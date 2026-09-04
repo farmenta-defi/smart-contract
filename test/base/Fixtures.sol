@@ -63,8 +63,9 @@ library Fixtures {
     /* silently weakening a test.                                                  */
     /*                                                                            */
     /* No real *below-range* position survives at this block — LPs close them      */
-    /* rather than hold a fully one-sided bag — so that case is covered by         */
-    /* positions minted inside the fork instead.                                   */
+    /* rather than hold a fully one-sided bag. That case, along with single-tick    */
+    /* ranges and wei-scale liquidity, is covered by positions minted inside the    */
+    /* fork: see test/base/PositionMinter.sol and test/fork/MintedPositions.t.sol.  */
 
     /// @notice ETH/USDG dyn-fee pool, in range, both fee sides accrued.
     /// @dev The richest fixture: native ETH as currency0, a live hook, a dynamic fee, and
