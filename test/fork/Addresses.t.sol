@@ -22,7 +22,6 @@ contract AddressesForkTest is ForkTest {
         // wrong PoolManager constant cannot survive this.
         assertEq(_addressCall(RobinhoodChain.POSITION_MANAGER, "poolManager()"), RobinhoodChain.POOL_MANAGER);
         assertEq(_addressCall(RobinhoodChain.STATE_VIEW, "poolManager()"), RobinhoodChain.POOL_MANAGER);
-        assertEq(_addressCall(RobinhoodChain.V4_QUOTER, "poolManager()"), RobinhoodChain.POOL_MANAGER);
         assertEq(_addressCall(RobinhoodChain.POSITION_MANAGER, "permit2()"), RobinhoodChain.PERMIT2);
     }
 
@@ -34,10 +33,6 @@ contract AddressesForkTest is ForkTest {
         IAggregatorV3 usdgUsd = IAggregatorV3(RobinhoodChain.CHAINLINK_USDG_USD);
         assertEq(usdgUsd.description(), "USDG / USD", "USDG/USD feed is not USDG/USD");
         assertEq(usdgUsd.decimals(), 8, "unexpected feed decimals");
-
-        // Not used by the MVP, but listed in §18 — keep them honest too.
-        assertEq(IAggregatorV3(RobinhoodChain.CHAINLINK_BTC_USD).description(), "BTC / USD");
-        assertEq(IAggregatorV3(RobinhoodChain.CHAINLINK_USDC_USD).description(), "USDC / USD");
     }
 
     function test_feedsReturnSanePrices() public view {
@@ -78,12 +73,9 @@ contract AddressesForkTest is ForkTest {
         assertEq(IERC20Metadata(RobinhoodChain.WETH).decimals(), RobinhoodChain.WETH_DECIMALS);
     }
 
-    /// @dev The remaining addresses have no cheap identity probe; at minimum they must be
-    ///      contracts, which rules out a typo landing on an empty or EOA address.
-    function test_remainingAddressesAreContracts() public view {
-        assertGt(RobinhoodChain.UNIVERSAL_ROUTER.code.length, 0, "UniversalRouter has no code");
-        assertGt(RobinhoodChain.UNIVERSAL_ROUTER_ALT.code.length, 0, "UniversalRouter alt has no code");
-        assertGt(RobinhoodChain.MORPHO_BLUE.code.length, 0, "Morpho Blue has no code");
+    /// @dev Pyth exposes no cheap identity probe; at minimum it must be a contract, which
+    ///      rules out a typo landing on an empty or EOA address.
+    function test_pythIsAContract() public view {
         assertGt(RobinhoodChain.PYTH.code.length, 0, "Pyth has no code");
     }
 

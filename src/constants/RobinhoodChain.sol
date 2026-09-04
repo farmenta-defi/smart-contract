@@ -9,7 +9,12 @@ pragma solidity 0.8.26;
 ///      whose truncation matched. `test/fork/Addresses.t.sol` asks each address on-chain
 ///      what it is; `make addresses` runs it.
 ///
-///      Constants only — nothing here is deployed, so importing this costs no bytecode.
+///      Only addresses something actually uses live here. V4Quoter, both UniversalRouters,
+///      Morpho Blue, and the BTC/USD and USDC/USD feeds were removed once it became clear
+///      they were referenced by nothing except the test verifying them — a loop that
+///      justifies itself. They belong to `LiquidatorHelper` and later phases; §18 already
+///      holds them, and they come back the same way these arrived: copied from §18, verified
+///      against the chain.
 library RobinhoodChain {
     uint256 internal constant CHAIN_ID = 4663;
 
@@ -18,19 +23,8 @@ library RobinhoodChain {
     address internal constant POOL_MANAGER = 0x8366a39CC670B4001A1121B8F6A443A643e40951;
     address internal constant POSITION_MANAGER = 0x58daec3116aae6D93017bAAea7749052E8a04fA7;
     address internal constant STATE_VIEW = 0xF3334192D15450CdD385c8B70e03f9A6bD9E673b;
-    address internal constant V4_QUOTER = 0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94;
-
-    /// @notice Primary router: 11.3M txs, the one the Uniswap app uses.
-    address internal constant UNIVERSAL_ROUTER = 0x8876789976dEcBfCbBbe364623C63652db8C0904;
-    /// @notice Newer deployment, 43.7k txs. Both are verified `UniversalRouter`.
-    address internal constant UNIVERSAL_ROUTER_ALT = 0x06AfBA43Fd06227fA663b0DAecF536f6EaA6bf99;
 
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
-
-    /* ------------------------------ Third party ------------------------------- */
-
-    /// @notice Flash loan source for `LiquidatorHelper` (ARCHITECTURE §4.7).
-    address internal constant MORPHO_BLUE = 0x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010;
 
     /* --------------------------------- Tokens --------------------------------- */
 
@@ -47,11 +41,8 @@ library RobinhoodChain {
 
     address internal constant CHAINLINK_ETH_USD = 0x78F3556b67E17Df817D51Ef5a990cDaF09E8d3A9;
     address internal constant CHAINLINK_USDG_USD = 0x61B7e5650328764B076A108EFF5fa7282a1B9aD2;
-    /// @notice Not used yet; listed in §18 for completeness.
-    address internal constant CHAINLINK_BTC_USD = 0xa2c5184bF03d373Dc9dE4876eb4Bce595B460251;
-    /// @notice Not used yet; listed in §18 for completeness.
-    address internal constant CHAINLINK_USDC_USD = 0x9e6f4605992a899eE2999999F3Ec80C41F452546;
 
+    /// @notice Verification source for the ETH price under the verify-if-fresh rule in §5.2.
     address internal constant PYTH = 0x8250f4aF4B972684F7b336503E2D6dFeDeB1487a;
 
     /// @notice Chainlink's L2 Sequencer Uptime Feed does **not** exist on this chain
