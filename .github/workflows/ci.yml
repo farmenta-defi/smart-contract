@@ -24,15 +24,12 @@ jobs:
         with:
           submodules: recursive
 
-      # Pinned rather than floating on `stable`, for two reasons found the hard way.
-      # `stable` and a nightly disagreed about whether block.number inside a fork reports
-      # the L1 or L2 block, so CI failed on an assertion that passed locally. And the
-      # linter in `stable` crashes on this codebase — "native_members: type Struct should
-      # be wrapped in Ref", an upstream panic in solar, aborting `forge build`.
-      # This is the build developers run locally, so the two now agree.
+      # `stable`, not a pinned nightly: exact nightly tags are pruned upstream and stop
+      # being installable. CI and local development therefore run different builds, and
+      # they have disagreed twice — see the note on block.number in test/base/ForkTest.sol.
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-f076dc895caef7ca0b5e5940efc3159729a5651d
+          version: stable
 
       - name: Check formatting
         run: forge fmt --check
@@ -57,15 +54,12 @@ jobs:
         with:
           submodules: recursive
 
-      # Pinned rather than floating on `stable`, for two reasons found the hard way.
-      # `stable` and a nightly disagreed about whether block.number inside a fork reports
-      # the L1 or L2 block, so CI failed on an assertion that passed locally. And the
-      # linter in `stable` crashes on this codebase — "native_members: type Struct should
-      # be wrapped in Ref", an upstream panic in solar, aborting `forge build`.
-      # This is the build developers run locally, so the two now agree.
+      # `stable`, not a pinned nightly: exact nightly tags are pruned upstream and stop
+      # being installable. CI and local development therefore run different builds, and
+      # they have disagreed twice — see the note on block.number in test/base/ForkTest.sol.
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly-f076dc895caef7ca0b5e5940efc3159729a5651d
+          version: stable
 
       - name: Fail early if the RPC secret is missing
         run: |
