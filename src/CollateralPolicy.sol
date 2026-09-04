@@ -239,12 +239,12 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     ) external onlyOwner {
         Listing storage listing = _listings[poolId];
         if (!listing.listed) revert PoolNotListed(poolId);
-        // Timestamp comparison is inherent here, not incidental: the ramp is a published
+        // A `block-timestamp` lint fires here on some Foundry builds. The comparison is
+        // inherent, not incidental: the ramp is a published
         // schedule and §5.3/§7 define every time-based rule on block.timestamp. On this
         // Orbit chain block.number reports the L1 block and is useless for timing, and a
         // sequencer nudging the clock by seconds cannot meaningfully move a ramp measured
         // in days.
-        // forge-lint: disable-next-line(block-timestamp)
         if (rampStart < block.timestamp) revert RampStartInThePast();
         if (rampDuration == 0) revert RampDurationIsZero();
 
