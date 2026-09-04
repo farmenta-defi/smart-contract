@@ -36,14 +36,28 @@ fork. It is also DNS-hijacked by some ISPs, and `anvil` has no equivalent of cur
 
 ```
 src/
+  PositionValuer.sol             values a position at oracle prices (spec §4.2, §5.1)
   constants/RobinhoodChain.sol   deployed addresses (spec §18)
-  interfaces/                    minimal external interfaces
+  interfaces/                    IPositionValuer, IPriceOracle, IAggregatorV3
+  libraries/                     PositionAmounts (amounts + fees), PriceMath (oracle → sqrt price)
 test/
-  base/       ForkTest (pinned-block harness), Fixtures (real pools and hooks)
+  base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
+              PositionMinter (mints positions in the fork for shapes the chain lacks)
+  mocks/      MockPriceOracle — settable prices, so the oracle can move while the pool cannot
   unit/       no network
   fork/       pinned-block reads against live Uniswap v4 state
-  invariant/  invariant and fuzz campaigns
+  invariant/  empty until FarmentaMarket exists — see below
+script/
+  DiscoverPositions.s.sol        finds real positions to use as fixtures
+  InspectPositions.s.sol         prints everything the valuer reads, for one position
 ```
+
+`test/invariant/` is deliberately empty. The invariants worth stating — the vault stays
+solvent, a user action never leaves a loan at HF < 1, a liquidator is never paid more than
+`repay × (1 + bonus)` (spec §16 Phase 1) — are all properties of `FarmentaMarket`'s state,
+and none of it exists yet. Today's code is pure functions over live chain reads, where fuzz
+is the right tool and is already applied. The profiles are configured so the campaigns can
+be added without touching the harness.
 
 ## Tests
 

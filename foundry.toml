@@ -12,9 +12,9 @@ optimizer_runs = 200
 via_ir = false                  # kept off for fast iteration; the `deploy` profile turns it on
 bytecode_hash = "none"
 
-# Fork tests pin a block, so results stay reproducible over time.
-# The alias is resolved from [rpc_endpoints] below.
-fs_permissions = [{ access = "read", path = "./test/fixtures" }]
+# Fork tests pin a block, so results stay reproducible over time; the `robinhood` alias is
+# resolved from [rpc_endpoints] below. No filesystem access is granted: fixtures are
+# expressed as constants in test/base/Fixtures.sol, not read from disk.
 
 [profile.default.fuzz]
 runs = 512
