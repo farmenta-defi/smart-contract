@@ -1,0 +1,60 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+
+solc = "0.8.26"
+evm_version = "cancun"          # Uniswap v4 needs transient storage; Robinhood Chain runs ArbOS 61
+optimizer = true
+optimizer_runs = 200
+via_ir = false                  # kept off for fast iteration; the `deploy` profile turns it on
+bytecode_hash = "none"
+
+# Fork tests pin a block, so results stay reproducible over time.
+# The alias is resolved from [rpc_endpoints] below.
+fs_permissions = [{ access = "read", path = "./test/fixtures" }]
+
+[profile.default.fuzz]
+runs = 512
+
+[profile.default.invariant]
+runs = 256
+depth = 64
+fail_on_revert = false
+
+# Fast lane: unit tests only, no network. Used by CI on every push.
+[profile.lite]
+optimizer = false
+via_ir = false
+
+[profile.lite.fuzz]
+runs = 64
+
+# Deep lane: PRs to main + the nightly schedule.
+[profile.deep.fuzz]
+runs = 4096
+
+[profile.deep.invariant]
+runs = 1024
+depth = 128
+fail_on_revert = false
+
+# Production build: via-IR, matching how Uniswap ships v4 periphery.
+[profile.deploy]
+via_ir = true
+optimizer_runs = 1000000
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+quote_style = "double"
+number_underscore = "thousands"
+multiline_func_header = "params_first"
+sort_imports = true
+
+[rpc_endpoints]
+robinhood = "${ROBINHOOD_RPC_URL}"

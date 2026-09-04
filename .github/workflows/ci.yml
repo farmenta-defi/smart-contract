@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly deep run: fuzz and invariant campaigns against a pinned fork.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+env:
+  FOUNDRY_PROFILE: lite
+
+jobs:
+  # Fast lane on every push: formatting, compilation, and unit tests.
+  # Deliberately offline — no RPC key, no Alchemy quota, no flakiness from the network.
+  fast:
+    name: fmt · build · unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Check formatting
+        run: forge fmt --check
+
+      - name: Build
+        run: forge build --sizes
+
+      - name: Unit tests (no network)
+        run: forge test --no-match-path "test/fork/**" -vv
+
+  # Deep lane: fork tests plus long fuzz/invariant campaigns. Runs where the extra
+  # minutes and Alchemy quota are worth it — before merging to main, and nightly.
+  deep:
+    name: fork · fuzz · invariant
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    env:
+      FOUNDRY_PROFILE: deep
+      ROBINHOOD_RPC_URL: ${{ secrets.ROBINHOOD_RPC_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Fail early if the RPC secret is missing
+        run: |
+          if [ -z "$ROBINHOOD_RPC_URL" ]; then
+            echo "::error::ROBINHOOD_RPC_URL is not set. Fork tests need an archive endpoint;"
+            echo "::error::the public Robinhood RPC keeps only ~10-25 minutes of state history."
+            exit 1
+          fi
+
+      - name: Full test suite (fork + fuzz + invariant)
+        run: forge test -vv
