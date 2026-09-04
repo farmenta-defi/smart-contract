@@ -25,7 +25,8 @@ interface ICollateralPolicy {
     /// @param liquidatorBonusBps Net bonus a liquidator receives.
     /// @param removeHaircutBps Value skimmed by the pool's hook when liquidity is removed,
     ///        recorded during review (§6.3). Zero for hooks that take nothing.
-    /// @param debtCapUsd Ceiling on this pool's debt, USD scaled 1e18.
+    /// @param debtCapUsdg Ceiling on this pool's debt, in USDG (6 decimals) — the same unit
+    ///        as the market's `poolDebt` ledger, so the cap is comparable without a price.
     /// @param minPositionUsd Smallest position accepted as collateral, USD scaled 1e18.
     /// @param tier Which market may take it.
     struct Terms {
@@ -33,7 +34,7 @@ interface ICollateralPolicy {
         uint16 ltBps;
         uint16 liquidatorBonusBps;
         uint16 removeHaircutBps;
-        uint128 debtCapUsd;
+        uint128 debtCapUsdg;
         uint128 minPositionUsd;
         Tier tier;
     }

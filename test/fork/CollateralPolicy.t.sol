@@ -113,7 +113,7 @@ contract CollateralPolicyForkTest is ForkTest {
                 ltBps: preset.ltBps,
                 liquidatorBonusBps: preset.minLiquidatorBonusBps,
                 removeHaircutBps: 0,
-                debtCapUsd: preset.maxDebtCapUsd,
+                debtCapUsdg: preset.maxDebtCapUsdg,
                 minPositionUsd: preset.minPositionUsd
             })
         );

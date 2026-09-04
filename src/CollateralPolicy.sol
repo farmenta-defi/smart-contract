@@ -40,7 +40,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         uint16 ltBps;
         uint16 liquidatorBonusBps;
         uint16 removeHaircutBps;
-        uint128 debtCapUsd;
+        uint128 debtCapUsdg;
         uint128 minPositionUsd;
     }
 
@@ -56,7 +56,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         uint40 rampDuration;
         uint16 liquidatorBonusBps;
         uint16 removeHaircutBps;
-        uint128 debtCapUsd;
+        uint128 debtCapUsdg;
         uint128 minPositionUsd;
     }
 
@@ -138,7 +138,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
 
         Tier tier = _poolTier(key);
         _requireHookPermitted(address(key.hooks));
-        _validate(tier, params);
+        _validate(tier, params, true); // a pool is never listed already frozen
 
         _listings[poolId] = Listing({
             listed: true,
@@ -151,7 +151,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
             rampDuration: 0,
             liquidatorBonusBps: params.liquidatorBonusBps,
             removeHaircutBps: params.removeHaircutBps,
-            debtCapUsd: params.debtCapUsd,
+            debtCapUsdg: params.debtCapUsdg,
             minPositionUsd: params.minPositionUsd
         });
 
@@ -164,6 +164,11 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     ///      bonus without having done anything wrong. That is a deliberate trade for being
     ///      able to react to a pool going bad; §15 records it next to the upgrade key.
     ///      Any active ramp is cleared — the new terms are the schedule now.
+    ///
+    ///      While the pool is frozen the threshold may be written at or below max LTV. That
+    ///      is the instant equivalent of a ramp: no new borrows can be taken, so nothing is
+    ///      handed out underwater, and tightening stays as fast as the decision to allow no
+    ///      rate limit intended.
     function updateTerms(
         PoolId poolId,
         ListingParams calldata params
@@ -171,7 +176,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         Listing storage listing = _listings[poolId];
         if (!listing.listed) revert PoolNotListed(poolId);
 
-        _validate(listing.tier, params);
+        _validate(listing.tier, params, !listing.frozen);
 
         listing.maxLtvBps = params.maxLtvBps;
         listing.ltStartBps = params.ltBps;
@@ -180,7 +185,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         listing.rampDuration = 0;
         listing.liquidatorBonusBps = params.liquidatorBonusBps;
         listing.removeHaircutBps = params.removeHaircutBps;
-        listing.debtCapUsd = params.debtCapUsd;
+        listing.debtCapUsdg = params.debtCapUsdg;
         listing.minPositionUsd = params.minPositionUsd;
 
         emit PoolTermsUpdated(poolId, params);
@@ -197,12 +202,14 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     ) external onlyOwner {
         Listing storage listing = _listings[poolId];
         if (!listing.listed) revert PoolNotListed(poolId);
-        // Unfreezing must not reopen a pool whose threshold has already been ramped past the
-        // point where borrowing is possible — every new loan there would be liquidatable on
-        // the block it opened.
-        if (!frozen) {
-            uint16 ltNow = _effectiveLt(listing);
-            if (listing.maxLtvBps >= ltNow) revert UnfreezeWouldLeaveNoBorrowingRoom(listing.maxLtvBps, ltNow);
+        // Unfreezing is judged on where the threshold is *heading*, not where it stands.
+        // A ramp that has not started yet still reads as its starting value, so checking the
+        // current threshold would let a pool be reopened moments before it ramps below max
+        // LTV — and every loan taken in that window is liquidatable as soon as the ramp
+        // lands. The effective threshold never falls below the target, so testing the target
+        // covers both the ramping and the settled case.
+        if (!frozen && listing.maxLtvBps >= listing.ltTargetBps) {
+            revert UnfreezeWouldLeaveNoBorrowingRoom(listing.maxLtvBps, listing.ltTargetBps);
         }
 
         listing.frozen = frozen;
@@ -267,7 +274,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
             ltBps: _effectiveLt(listing),
             liquidatorBonusBps: listing.liquidatorBonusBps,
             removeHaircutBps: listing.removeHaircutBps,
-            debtCapUsd: listing.debtCapUsd,
+            debtCapUsdg: listing.debtCapUsdg,
             minPositionUsd: listing.minPositionUsd,
             tier: listing.tier
         });
@@ -379,19 +386,24 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
 
     /// @dev Deviations from the tier preset are accepted only toward stricter, and the
     ///      direction differs per parameter — see TierPresets.
+    /// @param requireBorrowingRoom False only when the pool is frozen. A frozen pool takes
+    ///        no new borrows, so a threshold at or under max LTV harms nobody — and refusing
+    ///        it would block the fastest way to tighten a pool that has just gone bad, which
+    ///        the "no rate limit, no floor" decision exists to keep available.
     function _validate(
         Tier tier,
-        ListingParams calldata params
+        ListingParams calldata params,
+        bool requireBorrowingRoom
     ) internal pure {
         TierPresets.Preset memory preset = TierPresets.forTier(tier);
 
         if (params.maxLtvBps > preset.maxLtvBps) revert LooserThanPreset("maxLtv");
         if (params.ltBps > preset.ltBps) revert LooserThanPreset("lt");
         if (params.liquidatorBonusBps < preset.minLiquidatorBonusBps) revert LooserThanPreset("liquidatorBonus");
-        if (params.debtCapUsd > preset.maxDebtCapUsd) revert LooserThanPreset("debtCap");
+        if (params.debtCapUsdg > preset.maxDebtCapUsdg) revert LooserThanPreset("debtCap");
         if (params.minPositionUsd < preset.minPositionUsd) revert LooserThanPreset("minPosition");
 
-        if (params.maxLtvBps == 0 || params.maxLtvBps >= params.ltBps) {
+        if (requireBorrowingRoom && (params.maxLtvBps == 0 || params.maxLtvBps >= params.ltBps)) {
             revert NoBorrowingRoom(params.maxLtvBps, params.ltBps);
         }
         if (params.removeHaircutBps > BPS) revert HaircutTooLarge(params.removeHaircutBps);

@@ -177,7 +177,7 @@ contract CollateralPolicyTest is Test {
         p.maxLtvBps = 4000;
         p.ltBps = 5000;
         p.liquidatorBonusBps = 900;
-        p.debtCapUsd = 100_000e18;
+        p.debtCapUsdg = 100_000e6;
         p.minPositionUsd = 500e18;
 
         PoolKey memory key = _blueChipKey(address(0));
@@ -400,6 +400,80 @@ contract CollateralPolicyTest is Test {
         assertEq(policy.effectiveLt(poolId), 7000, "a cleared ramp is still falling");
     }
 
+    /// @dev The instant equivalent of a ramp. The decision was that tightening has no rate
+    ///      limit and no floor, so the owner must be able to drop the threshold below max LTV
+    ///      in one transaction when a pool goes bad — freezing first is what makes that safe,
+    ///      since a frozen pool takes no new borrows to hand out underwater.
+    function test_frozenPoolMayBeTightenedPastItsBorrowingRoomInstantly() public {
+        PoolKey memory key = _blueChipKey(address(0));
+        _list(key, _blueChipParams());
+        PoolId poolId = key.toId();
+
+        CollateralPolicy.ListingParams memory hard = _blueChipParams();
+        hard.ltBps = 1000; // far below max LTV of 6500
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.NoBorrowingRoom.selector, uint16(6500), uint16(1000)));
+        policy.updateTerms(poolId, hard);
+
+        vm.startPrank(owner);
+        policy.setFrozen(poolId, true);
+        policy.updateTerms(poolId, hard);
+        vm.stopPrank();
+
+        assertEq(policy.effectiveLt(poolId), 1000, "threshold did not drop");
+
+        // And it cannot be reopened in that state.
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CollateralPolicy.UnfreezeWouldLeaveNoBorrowingRoom.selector, uint16(6500), uint16(1000)
+            )
+        );
+        policy.setFrozen(poolId, false);
+    }
+
+    /// @dev Debt caps are denominated in USDG, not USD: §4.1's poolDebt ledger is in USDG, so
+    ///      comparing the two must never need a price. A cap written in 1e18 would be a
+    ///      trillion times too large and silently disable the cap entirely.
+    function test_debtCapIsDenominatedInUsdg() public {
+        CollateralPolicy.ListingParams memory p = _blueChipParams();
+        assertEq(p.debtCapUsdg, 500_000e6, "preset cap is not in USDG units");
+
+        p.debtCapUsdg = 500_000e18;
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.LooserThanPreset.selector, "debtCap"));
+        policy.list(_blueChipKey(address(0)), p);
+    }
+
+    /// @notice Regression: unfreezing is judged on where the ramp is heading, not where the
+    ///         threshold stands.
+    /// @dev Found by the invariant campaign. A ramp that has not started yet still reads as
+    ///      its starting value, so a check against the current threshold let a pool be
+    ///      reopened moments before it ramped below max LTV — and every loan taken in that
+    ///      window is liquidatable the instant the ramp lands.
+    function test_cannotUnfreezeWhileARampIsHeadedBelowBorrowingRoom() public {
+        PoolKey memory key = _blueChipKey(address(0));
+        _list(key, _blueChipParams());
+        PoolId poolId = key.toId();
+
+        vm.startPrank(owner);
+        policy.setFrozen(poolId, true);
+        // Starts in the future, so the threshold still reads 7500 right now.
+        policy.scheduleLtRamp(poolId, 100, uint40(block.timestamp + 1 days), 1 days);
+        vm.stopPrank();
+
+        assertEq(policy.effectiveLt(poolId), 7500, "ramp has not started yet");
+
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CollateralPolicy.UnfreezeWouldLeaveNoBorrowingRoom.selector, uint16(6500), uint16(100)
+            )
+        );
+        policy.setFrozen(poolId, false);
+    }
+
     /* --------------------------------- checkPool ------------------------------ */
 
     function test_marketOnlyTakesItsOwnTier() public {
@@ -446,7 +520,7 @@ contract CollateralPolicyTest is Test {
             ltBps: preset.ltBps,
             liquidatorBonusBps: preset.minLiquidatorBonusBps,
             removeHaircutBps: 0,
-            debtCapUsd: preset.maxDebtCapUsd,
+            debtCapUsdg: preset.maxDebtCapUsdg,
             minPositionUsd: preset.minPositionUsd
         });
     }
@@ -458,7 +532,7 @@ contract CollateralPolicyTest is Test {
             ltBps: preset.ltBps,
             liquidatorBonusBps: preset.minLiquidatorBonusBps,
             removeHaircutBps: 0,
-            debtCapUsd: preset.maxDebtCapUsd,
+            debtCapUsdg: preset.maxDebtCapUsdg,
             minPositionUsd: preset.minPositionUsd
         });
     }
@@ -471,7 +545,7 @@ contract CollateralPolicyTest is Test {
         if (which == 0) p.maxLtvBps = 6501;
         if (which == 1) p.ltBps = 7501;
         if (which == 2) p.liquidatorBonusBps = 499;
-        if (which == 3) p.debtCapUsd = 500_001e18;
+        if (which == 3) p.debtCapUsdg = 500_001e6;
         if (which == 4) p.minPositionUsd = 49e18;
         return p;
     }

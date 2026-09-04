@@ -18,16 +18,18 @@ library TierPresets {
     /// @param maxLtvBps Ceiling on a listing's max LTV.
     /// @param ltBps Ceiling on a listing's liquidation threshold.
     /// @param minLiquidatorBonusBps Floor on a listing's liquidator bonus.
-    /// @param maxDebtCapUsd Ceiling on a listing's debt cap, USD 1e18. §6.2 states the pool
-    ///        rule as a share of pool TVL, which is not computable on-chain; the market cap
-    ///        is the enforceable bound, and the percentage rule stays an off-chain input to
-    ///        the number the owner writes.
+    /// @param maxDebtCapUsdg Ceiling on a listing's debt cap, in **USDG** (6 decimals), not
+    ///        USD 1e18. §6.2 and §6.5 store the cap as an absolute USDG amount, and §4.1's
+    ///        `poolDebt` ledger is denominated the same way — so capping debt never needs a
+    ///        price. §6.2 states the pool rule as a share of pool TVL, which is not
+    ///        computable on-chain; the market cap is the enforceable bound, and the
+    ///        percentage rule stays an off-chain input to the number the owner writes.
     /// @param minPositionUsd Floor on a listing's minimum position value, USD 1e18.
     struct Preset {
         uint16 maxLtvBps;
         uint16 ltBps;
         uint16 minLiquidatorBonusBps;
-        uint128 maxDebtCapUsd;
+        uint128 maxDebtCapUsdg;
         uint128 minPositionUsd;
     }
 
@@ -36,14 +38,14 @@ library TierPresets {
     /// @notice Blue-chip: ETH/USDG and WETH/USDG.
     function blueChip() internal pure returns (Preset memory) {
         return Preset({
-            maxLtvBps: 6500, ltBps: 7500, minLiquidatorBonusBps: 500, maxDebtCapUsd: 500_000e18, minPositionUsd: 50e18
+            maxLtvBps: 6500, ltBps: 7500, minLiquidatorBonusBps: 500, maxDebtCapUsdg: 500_000e6, minPositionUsd: 50e18
         });
     }
 
     /// @notice Meme: xyz/USDG on allowlisted pools.
     function meme() internal pure returns (Preset memory) {
         return Preset({
-            maxLtvBps: 3000, ltBps: 4000, minLiquidatorBonusBps: 1000, maxDebtCapUsd: 50_000e18, minPositionUsd: 50e18
+            maxLtvBps: 3000, ltBps: 4000, minLiquidatorBonusBps: 1000, maxDebtCapUsdg: 50_000e6, minPositionUsd: 50e18
         });
     }
 
