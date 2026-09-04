@@ -24,9 +24,15 @@ jobs:
         with:
           submodules: recursive
 
+      # Pinned rather than floating on `stable`, for two reasons found the hard way.
+      # `stable` and a nightly disagreed about whether block.number inside a fork reports
+      # the L1 or L2 block, so CI failed on an assertion that passed locally. And the
+      # linter in `stable` crashes on this codebase — "native_members: type Struct should
+      # be wrapped in Ref", an upstream panic in solar, aborting `forge build`.
+      # This is the build developers run locally, so the two now agree.
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          version: nightly-f076dc895caef7ca0b5e5940efc3159729a5651d
 
       - name: Check formatting
         run: forge fmt --check
@@ -51,9 +57,15 @@ jobs:
         with:
           submodules: recursive
 
+      # Pinned rather than floating on `stable`, for two reasons found the hard way.
+      # `stable` and a nightly disagreed about whether block.number inside a fork reports
+      # the L1 or L2 block, so CI failed on an assertion that passed locally. And the
+      # linter in `stable` crashes on this codebase — "native_members: type Struct should
+      # be wrapped in Ref", an upstream panic in solar, aborting `forge build`.
+      # This is the build developers run locally, so the two now agree.
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          version: nightly-f076dc895caef7ca0b5e5940efc3159729a5651d
 
       - name: Fail early if the RPC secret is missing
         run: |
