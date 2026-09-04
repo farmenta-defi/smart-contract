@@ -4,7 +4,7 @@ Solidity contracts for Farmenta — borrow USDG against Uniswap v4 LP position N
 Robinhood Chain (chain id 4663).
 
 Specification: [`farmenta-defi/docs`](https://github.com/farmenta-defi/docs) →
-`ARCHITECTURE.md` v0.3. **The spec is the source of truth.** Where this repo and the spec
+`ARCHITECTURE.md` v0.4. **The spec is the source of truth.** Where this repo and the spec
 disagree, the spec wins and the code is wrong — except for addresses, which live in exactly
 two places: spec §18 and `src/constants/RobinhoodChain.sol`, kept in sync by a test.
 
@@ -36,14 +36,28 @@ fork. It is also DNS-hijacked by some ISPs, and `anvil` has no equivalent of cur
 
 ```
 src/
+  PositionValuer.sol             values a position at oracle prices (spec §4.2, §5.1)
   constants/RobinhoodChain.sol   deployed addresses (spec §18)
-  interfaces/                    minimal external interfaces
+  interfaces/                    IPositionValuer, IPriceOracle, IAggregatorV3
+  libraries/                     PositionAmounts (amounts + fees), PriceMath (oracle → sqrt price)
 test/
-  base/       ForkTest (pinned-block harness), Fixtures (real pools and hooks)
+  base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
+              PositionMinter (mints positions in the fork for shapes the chain lacks)
+  mocks/      MockPriceOracle — settable prices, so the oracle can move while the pool cannot
   unit/       no network
   fork/       pinned-block reads against live Uniswap v4 state
-  invariant/  invariant and fuzz campaigns
+  invariant/  empty until FarmentaMarket exists — see below
+script/
+  DiscoverPositions.s.sol        finds real positions to use as fixtures
+  InspectPositions.s.sol         prints everything the valuer reads, for one position
 ```
+
+`test/invariant/` is deliberately empty. The invariants worth stating — the vault stays
+solvent, a user action never leaves a loan at HF < 1, a liquidator is never paid more than
+`repay × (1 + bonus)` (spec §16 Phase 1) — are all properties of `FarmentaMarket`'s state,
+and none of it exists yet. Today's code is pure functions over live chain reads, where fuzz
+is the right tool and is already applied. The profiles are configured so the campaigns can
+be added without touching the harness.
 
 ## Tests
 
@@ -87,13 +101,15 @@ hard-coded constant against another.
 
 Stated plainly, because the MVP is neither audited nor timelocked:
 
-- `FarmentaMarket` is **immutable** — no proxy, no upgrade path. A bug in it is fixed by
-  deploying a new market and migrating, not by patching.
-- The **owner can replace `PositionValuer`, `CollateralPolicy` and `InterestRateModel` at
-  any time, with no delay.** The valuer decides every position's value, so whoever holds
-  the owner key can move every borrower's health factor. This is a deliberate trade: the
-  market itself cannot be upgraded, so a valuation bug would otherwise be unfixable. It is
-  not an acceptable posture for real deposits, and a timelock is the obvious next step.
+- **`FarmentaMarket` is UUPS upgradeable, and the owner can upgrade it at any time with no
+  delay.** The market custodies collateral NFTs and holds USDG deposits, so whoever holds
+  the owner key can replace its entire logic — including taking everything — in a single
+  transaction, without warning. This is the largest risk in the protocol. It is accepted
+  only because the MVP has no real TVL; a timelock on `_authorizeUpgrade` (with `pause`
+  exempt so emergencies stay instant) is required before real funds. Spec §4.1, §15.
+- Only the market sits behind a proxy. `PositionValuer`, `PriceOracle`, `CollateralPolicy`
+  and `InterestRateModel` are plain contracts held as immutables and changed by upgrading —
+  every extra proxy doubles the storage-collision surface without adding a capability.
 - The owner can `pause`, and pausing halts liquidations too. Robinhood Chain publishes no
   Chainlink L2 Sequencer Uptime Feed, so pausing is the only sequencer-downtime mitigation
   available (spec §5.2, §15.1).
