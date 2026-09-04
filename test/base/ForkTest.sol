@@ -23,6 +23,16 @@ abstract contract ForkTest is Test {
     ///         live third-party positions, so re-run the fixture checks when you change it.
     uint256 internal constant FORK_BLOCK = 54_200_000;
 
+    /// @notice `PositionManager.nextTokenId()` at `FORK_BLOCK` — used to assert the fork
+    ///         really is where we think it is.
+    /// @dev Deliberately a state fact rather than `block.number`. Robinhood Chain is an
+    ///      Arbitrum Orbit chain, where `block.number` reports the **L1** block, not the L2
+    ///      block passed to `createSelectFork` — and Foundry versions disagree about
+    ///      surfacing that (a nightly returned the L2 number locally while CI's stable
+    ///      returned the L1 one). Nothing in this repo may use `block.number` for timing;
+    ///      interest accrual and TWAP windows are defined on `block.timestamp` (§5.3, §7).
+    uint256 internal constant FORK_NEXT_TOKEN_ID = 1_773_489;
+
     IPoolManager internal poolManager;
     IPositionManager internal positionManager;
     IStateView internal stateView;

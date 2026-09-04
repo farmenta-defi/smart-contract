@@ -58,6 +58,14 @@ Three lanes, matching how CI runs them:
 
 CI runs the fast lane on every push and the deep lane on PRs to `main` plus nightly.
 
+### `block.number` lies here
+
+Robinhood Chain is an Arbitrum Orbit chain, so `block.number` reports the **L1** block, not
+the L2 block — and Foundry versions disagree about whether a fork surfaces that. Never
+assert on it, and never use it for timing: interest accrual and the TWAP window are defined
+on `block.timestamp` (spec §5.3, §7). Fork tests assert they are at the pinned block by
+checking a state fact instead (`PositionManager.nextTokenId()`).
+
 ### Fixtures
 
 Two kinds, both needed. **Real positions** owned by strangers (reached with `vm.prank`)

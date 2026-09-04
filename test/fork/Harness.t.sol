@@ -14,7 +14,9 @@ import {ForkTest} from "../base/ForkTest.sol";
 contract HarnessForkTest is ForkTest {
     function test_forkIsRobinhoodChainAtPinnedBlock() public view {
         assertEq(block.chainid, RobinhoodChain.CHAIN_ID, "wrong chain");
-        assertEq(block.number, FORK_BLOCK, "fork not pinned");
+        // State, not block.number: on this Arbitrum Orbit chain block.number reports the L1
+        // block, and Foundry versions disagree about it. See ForkTest.FORK_NEXT_TOKEN_ID.
+        assertEq(positionManager.nextTokenId(), FORK_NEXT_TOKEN_ID, "fork is not at the pinned block");
     }
 
     function test_positionManagerIsTheUniswapNft() public view {
@@ -23,7 +25,6 @@ contract HarnessForkTest is ForkTest {
             "Uniswap v4 Positions NFT",
             "not the Uniswap position NFT"
         );
-        assertGt(positionManager.nextTokenId(), 1, "no positions minted");
     }
 
     /// @dev USDG has 6 decimals while ETH/WETH have 18. Every valuation path has to carry
