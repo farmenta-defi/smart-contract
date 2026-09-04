@@ -46,6 +46,14 @@ fail_on_revert = false
 via_ir = true
 optimizer_runs = 1000000
 
+[lint]
+# Off during builds. The linter in Foundry `stable` panics on this codebase —
+# "native_members: type Struct(StructId) should be wrapped in Ref", an upstream crash in
+# solar — which aborts `forge build` with a core dump and takes CI down with it. Lints are
+# advisory; the compiler, the tests and `forge fmt --check` are the actual gates. Run
+# `forge lint` by hand on a toolchain where it works.
+lint_on_build = false
+
 [fmt]
 line_length = 120
 tab_width = 4

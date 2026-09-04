@@ -24,6 +24,9 @@ jobs:
         with:
           submodules: recursive
 
+      # `stable`, not a pinned nightly: exact nightly tags are pruned upstream and stop
+      # being installable. CI and local development therefore run different builds, and
+      # they have disagreed twice — see the note on block.number in test/base/ForkTest.sol.
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
@@ -51,6 +54,9 @@ jobs:
         with:
           submodules: recursive
 
+      # `stable`, not a pinned nightly: exact nightly tags are pruned upstream and stop
+      # being installable. CI and local development therefore run different builds, and
+      # they have disagreed twice — see the note on block.number in test/base/ForkTest.sol.
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable

@@ -36,28 +36,22 @@ fork. It is also DNS-hijacked by some ISPs, and `anvil` has no equivalent of cur
 
 ```
 src/
+  CollateralPolicy.sol           which pools may back a loan, on what terms (spec §4.5, §6)
   PositionValuer.sol             values a position at oracle prices (spec §4.2, §5.1)
   constants/RobinhoodChain.sol   deployed addresses (spec §18)
-  interfaces/                    IPositionValuer, IPriceOracle, IAggregatorV3
-  libraries/                     PositionAmounts (amounts + fees), PriceMath (oracle → sqrt price)
+  interfaces/                    ICollateralPolicy, IPositionValuer, IPriceOracle, IAggregatorV3
+  libraries/                     PositionAmounts, PriceMath, HookPermissions, TierPresets
 test/
   base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
               PositionMinter (mints positions in the fork for shapes the chain lacks)
   mocks/      MockPriceOracle — settable prices, so the oracle can move while the pool cannot
   unit/       no network
   fork/       pinned-block reads against live Uniswap v4 state
-  invariant/  empty until FarmentaMarket exists — see below
+  invariant/  properties asserted across arbitrary call sequences
 script/
   DiscoverPositions.s.sol        finds real positions to use as fixtures
   InspectPositions.s.sol         prints everything the valuer reads, for one position
 ```
-
-`test/invariant/` is deliberately empty. The invariants worth stating — the vault stays
-solvent, a user action never leaves a loan at HF < 1, a liquidator is never paid more than
-`repay × (1 + bonus)` (spec §16 Phase 1) — are all properties of `FarmentaMarket`'s state,
-and none of it exists yet. Today's code is pure functions over live chain reads, where fuzz
-is the right tool and is already applied. The profiles are configured so the campaigns can
-be added without touching the harness.
 
 ## Tests
 
@@ -69,6 +63,14 @@ Three lanes, matching how CI runs them:
 | `make test-fork` | fork tests at the pinned block | yes |
 | `make test-deep` | everything, long fuzz/invariant campaigns | yes |
 | `make addresses` | asks every address on-chain what it is | yes |
+
+The invariant campaign earns its place: it found a real bug. `setFrozen` judged whether a
+pool could reopen by the threshold in force, but a ramp that has not started yet still reads
+as its starting value — so a pool could be unfrozen moments before ramping below max LTV, and
+every loan taken in that window was liquidatable the instant the ramp landed. No unit test
+reached that ordering. The remaining invariants worth stating — the vault stays solvent, a
+user action never leaves a loan at HF < 1, a liquidator is never paid more than
+`repay × (1 + bonus)` (spec §16 Phase 1) — are properties of `FarmentaMarket`, and follow it.
 
 CI runs the fast lane on every push and the deep lane on PRs to `main` plus nightly.
 
