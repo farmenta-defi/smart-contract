@@ -63,14 +63,13 @@ contract PositionValuer is IPositionValuer {
 
         uint160 derivedSqrtPriceX96 = PriceMath.derivedSqrtPriceX96(price0, price1, decimals0, decimals1);
 
-        v.liquidity = positionManager.getPositionLiquidity(tokenId);
+        (v.liquidity, v.fees0, v.fees1) = _positionState(poolId, tokenId, tickLower, tickUpper);
         (v.amount0, v.amount1) = PositionAmounts.forLiquidity(
             derivedSqrtPriceX96,
             TickMath.getSqrtPriceAtTick(tickLower),
             TickMath.getSqrtPriceAtTick(tickUpper),
             v.liquidity
         );
-        (v.fees0, v.fees1) = _fees(poolId, tokenId, tickLower, tickUpper);
 
         v.principalUsd = _usd(v.amount0, price0, decimals0) + _usd(v.amount1, price1, decimals1);
         v.feesUsd = _usd(v.fees0, price0, decimals0) + _usd(v.fees1, price1, decimals1);
@@ -79,18 +78,28 @@ contract PositionValuer is IPositionValuer {
         v.spotDeviationBps = PriceMath.spotDeviationBps(sqrtSpotX96, derivedSqrtPriceX96);
     }
 
-    /// @dev Uncollected fees live only as a fee-growth delta in v4 — there is no `tokensOwed`
-    ///      to read — so both the pool's current growth and the position's cached growth are
-    ///      needed to recover them.
-    function _fees(
+    /// @dev One read of the position's pool-side state, feeding both the principal and the
+    ///      fees. §5.1 takes `liq` from `getPositionInfo` and uses that same value for
+    ///      `getAmountsForLiquidity` and for the fee delta; reading liquidity twice — once
+    ///      here and once from `PositionManager` — would cost an extra call and leave room
+    ///      for principal and fees to be computed against different liquidity.
+    ///
+    ///      Uncollected fees exist in v4 only as a fee-growth delta — there is no
+    ///      `tokensOwed` — so both the pool's current growth and the position's cached
+    ///      growth are needed to recover them.
+    function _positionState(
         PoolId poolId,
         uint256 tokenId,
         int24 tickLower,
         int24 tickUpper
-    ) internal view returns (uint256 fees0, uint256 fees1) {
+    ) internal view returns (uint128 liquidity, uint256 fees0, uint256 fees1) {
         bytes32 positionKey =
             Position.calculatePositionKey(address(positionManager), tickLower, tickUpper, bytes32(tokenId));
-        (uint128 liquidity, uint256 growth0Last, uint256 growth1Last) = stateView.getPositionInfo(poolId, positionKey);
+
+        uint256 growth0Last;
+        uint256 growth1Last;
+        (liquidity, growth0Last, growth1Last) = stateView.getPositionInfo(poolId, positionKey);
+
         (uint256 growth0, uint256 growth1) = stateView.getFeeGrowthInside(poolId, tickLower, tickUpper);
         (fees0, fees1) = PositionAmounts.feesOwed(growth0, growth1, growth0Last, growth1Last, liquidity);
     }
