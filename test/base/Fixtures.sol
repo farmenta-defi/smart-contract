@@ -50,4 +50,41 @@ library Fixtures {
 
     /// @notice CashCatHookV2: has `beforeRemoveLiquidity` → manual review path.
     address internal constant HOOK_CASHCAT_V2 = 0x75A54357D9C78a2Db19004a5FDc76c50F9242AEC;
+
+    /* ----------------------------- Real positions ----------------------------- */
+    /* Live positions owned by third parties, verified at ForkTest.FORK_BLOCK.     */
+    /* Found by scanning PoolManager `ModifyLiquidity` logs (see                   */
+    /* script/DiscoverPositions.s.sol) — PositionManager has no ERC721Enumerable,  */
+    /* and sampling tokenIds is hopeless: launchpad mints outnumber blue-chip      */
+    /* positions by orders of magnitude on this chain.                             */
+    /*                                                                            */
+    /* `PositionFixturesForkTest` asserts each one still has the shape described   */
+    /* here, so a position that gets closed upstream fails loudly instead of       */
+    /* silently weakening a test.                                                  */
+    /*                                                                            */
+    /* No real *below-range* position survives at this block — LPs close them      */
+    /* rather than hold a fully one-sided bag — so that case is covered by         */
+    /* positions minted inside the fork instead.                                   */
+
+    /// @notice ETH/USDG dyn-fee pool, in range, both fee sides accrued.
+    /// @dev The richest fixture: native ETH as currency0, a live hook, a dynamic fee, and
+    ///      tickSpacing 1. Worth ~$382 with ~$11 of uncollected fees (2.9% of principal,
+    ///      under the 10% cap in §6.2).
+    uint256 internal constant POS_ETH_USDG_DYN_IN_RANGE = 913_889;
+
+    /// @notice ETH/USDG plain pool, in range, both fee sides accrued.
+    uint256 internal constant POS_ETH_USDG_IN_RANGE = 1_768_881;
+
+    /// @notice ETH/USDG plain pool, **above** range: 100% USDG, and fees freshly collected
+    ///         so both fee sides are zero.
+    /// @dev Two edge cases in one — the safe out-of-range direction (§6.4) and a position
+    ///      whose fee growth delta is exactly zero.
+    uint256 internal constant POS_ETH_USDG_ABOVE_RANGE = 1_621_020;
+
+    /// @notice WETH/USDG, wide range (~±17%), in range.
+    /// @dev Both currencies are ERC-20 here, unlike the native-ETH pools above.
+    uint256 internal constant POS_WETH_USDG_WIDE_IN_RANGE = 999_597;
+
+    /// @notice WETH/USDG, above range: 100% USDG, with fees still uncollected.
+    uint256 internal constant POS_WETH_USDG_ABOVE_RANGE = 1_765_960;
 }

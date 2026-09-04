@@ -42,19 +42,33 @@ contract AddressesForkTest is ForkTest {
 
     function test_feedsReturnSanePrices() public view {
         (, int256 ethAnswer,, uint256 ethUpdatedAt,) = IAggregatorV3(RobinhoodChain.CHAINLINK_ETH_USD).latestRoundData();
-        assertGt(ethAnswer, 0, "non-positive ETH price");
+        uint256 ethPrice = _positive(ethAnswer, "ETH");
         // 8 decimals: $100 .. $100,000. Wide on purpose — this catches a decimals or feed
         // mix-up, not a market move.
-        assertGt(uint256(ethAnswer), 100e8, "ETH price implausibly low");
-        assertLt(uint256(ethAnswer), 100_000e8, "ETH price implausibly high");
+        assertGt(ethPrice, 100e8, "ETH price implausibly low");
+        assertLt(ethPrice, 100_000e8, "ETH price implausibly high");
         assertLe(block.timestamp - ethUpdatedAt, 25 hours, "ETH feed stale at the pinned block");
 
         (, int256 usdgAnswer,, uint256 usdgUpdatedAt,) =
             IAggregatorV3(RobinhoodChain.CHAINLINK_USDG_USD).latestRoundData();
+        uint256 usdgPrice = _positive(usdgAnswer, "USDG");
         // §5.2 bounds: outside [0.97, 1.03] borrowing is blocked.
-        assertGe(uint256(usdgAnswer), 0.97e8, "USDG below the depeg floor");
-        assertLe(uint256(usdgAnswer), 1.03e8, "USDG above the depeg ceiling");
+        assertGe(usdgPrice, 0.97e8, "USDG below the depeg floor");
+        assertLe(usdgPrice, 1.03e8, "USDG above the depeg ceiling");
         assertLe(block.timestamp - usdgUpdatedAt, 25 hours, "USDG feed stale at the pinned block");
+    }
+
+    /// @dev Chainlink answers are signed. A negative or zero answer is nonsense for a USD
+    ///      price feed and must never be cast into an unsigned price, so the check and the
+    ///      cast live together here rather than being spread across call sites.
+    function _positive(
+        int256 answer,
+        string memory label
+    ) internal pure returns (uint256) {
+        assertGt(answer, 0, string.concat(label, ": non-positive price"));
+        // Safe: the assertion above rules out the only values this cast could misread.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint256(answer);
     }
 
     function test_tokensAreTheClaimedTokens() public view {
