@@ -140,6 +140,18 @@ contract FarmentaMarketTest is Test {
         assertEq(market.owner(), stranger, "ownership did not move");
     }
 
+    /* -------------------------------- provenance ------------------------------ */
+
+    /// @notice Only the Uniswap PositionManager may hand this market an NFT.
+    /// @dev Without this the callback would accept any ERC-721. The policy and the valuer
+    ///      both key off `tokenId` alone, so a token of the depositor's own making would be
+    ///      recorded as collateral while those two read an entirely different contract.
+    function test_onERC721ReceivedRejectsAnyOtherCaller() public {
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotThePositionManager.selector, stranger));
+        market.onERC721Received(stranger, stranger, 1, "");
+    }
+
     /* --------------------------------- storage -------------------------------- */
 
     /// @notice The declared slot really is the ERC-7201 slot for this namespace.

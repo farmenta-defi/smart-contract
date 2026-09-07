@@ -294,7 +294,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         return listing.listed && !listing.frozen;
     }
 
-    /// @notice Everything §6.1 can decide from the pool alone, for a market of `marketTier`.
+    /// @inheritdoc ICollateralPolicy
     /// @dev Reverts with the specific reason rather than returning false, so a rejected
     ///      deposit tells the user which rule stopped it. The caller still has to enforce the
     ///      value-dependent rules from the returned terms: `minPositionUsd` and the debt cap.

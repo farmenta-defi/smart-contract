@@ -6,8 +6,10 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 import {ERC4626Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC4626Upgradeable.sol";
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 
 import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
@@ -81,8 +83,15 @@ contract FarmentaMarket is
     /// @notice Values a position at oracle prices (§4.2, §5.1).
     IPositionValuer public immutable valuer;
 
+    /// @notice A position was taken into custody as collateral.
+    event CollateralDeposited(uint256 indexed tokenId, address indexed owner);
+
     error ZeroAddress();
     error TierNotSet();
+    error NotThePositionManager(address caller);
+    error PositionAlreadyHeld(uint256 tokenId);
+    error PositionIsEmpty(uint256 tokenId);
+    error PositionBelowMinimum(uint256 principalUsd, uint256 minimumUsd);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -132,6 +141,54 @@ contract FarmentaMarket is
         _marketStorage().tier = tier_;
     }
 
+    /* -------------------------------- collateral ------------------------------ */
+
+    /// @notice Takes a Uniswap v4 position into custody as collateral.
+    /// @param tokenId The position NFT. Must be approved to this market first, or use
+    ///        `depositCollateralWithPermit` to approve and deposit in one transaction.
+    /// @dev Custody, not a lien: the market becomes the NFT's owner. That is the point rather
+    ///      than an implementation detail. `PositionManager` gates `DECREASE_LIQUIDITY` and
+    ///      `BURN_POSITION` behind `onlyIfApproved(msgSender())`, so owning the NFT is what
+    ///      lets this contract pull liquidity during liquidation. The subscriber mechanism
+    ///      cannot substitute: an owner can always unsubscribe, and a transfer unsubscribes
+    ///      automatically (§10).
+    ///
+    ///      Pulled with `transferFrom` rather than `safeTransferFrom` deliberately. This
+    ///      contract is the recipient and is known to accept the token, and the plain
+    ///      transfer fires no `onERC721Received`, which keeps this path from re-entering the
+    ///      one below.
+    function depositCollateral(
+        uint256 tokenId
+    ) external whenNotPaused nonReentrant {
+        IERC721(address(positionManager)).transferFrom(msg.sender, address(this), tokenId);
+        _acceptCollateral(msg.sender, tokenId);
+    }
+
+    /// @notice Accepts a position pushed here directly with `safeTransferFrom`.
+    /// @dev The second intake path, and it runs exactly the same checks as the first. A
+    ///      position that fails them makes the transfer revert, so the sender keeps their NFT
+    ///      rather than stranding it here.
+    ///
+    ///      `msg.sender` must be the Uniswap `PositionManager`. Without that check any ERC-721
+    ///      would do, and a worthless token of the depositor's own making would be recorded as
+    ///      collateral — the policy and valuer both key off `tokenId` alone and would be
+    ///      reading a different contract's state.
+    ///
+    ///      Note what this does *not* catch. `PositionManager` mints with solmate's `_mint`,
+    ///      which fires no callback, so a position minted straight to this address never
+    ///      reaches here and is never recorded. `rescueUnaccountedToken` exists for exactly
+    ///      that case (§4.1).
+    function onERC721Received(
+        address,
+        address from,
+        uint256 tokenId,
+        bytes memory
+    ) public override whenNotPaused nonReentrant returns (bytes4) {
+        if (msg.sender != address(positionManager)) revert NotThePositionManager(msg.sender);
+        _acceptCollateral(from, tokenId);
+        return this.onERC721Received.selector;
+    }
+
     /* ---------------------------------- views --------------------------------- */
 
     /// @notice The collateral tier this market accepts.
@@ -160,6 +217,43 @@ contract FarmentaMarket is
     }
 
     /* -------------------------------- internals ------------------------------- */
+
+    /// @dev Runs every §6.1 admission rule and records the loan. Called once the market
+    ///      already owns the NFT, which both intake paths guarantee.
+    ///
+    ///      The pool-level rules live in `CollateralPolicy.checkPool`: listed, not frozen,
+    ///      right tier, both tokens enabled, quoted in USDG, hook permitted. The two rules
+    ///      that need the position itself are enforced here, because §4.5 keeps the policy
+    ///      free of dependencies and the market has already paid for the valuation.
+    ///
+    ///      The minimum is measured on **principal alone**, not principal plus fees. A
+    ///      depositor can collect their fees the moment the position is in, so counting them
+    ///      toward the floor would admit positions that fall under it one transaction later.
+    ///      Fees are collateral (§1 #6); they are just not a reason to let dust in.
+    function _acceptCollateral(
+        address depositor,
+        uint256 tokenId
+    ) private {
+        MarketStorage storage $ = _marketStorage();
+        if ($.loans[tokenId].owner != address(0)) revert PositionAlreadyHeld(tokenId);
+
+        // No existence check: both intake paths reach here holding the NFT, and
+        // `PositionManager` clears a position's info in the same call that burns its token.
+        // Owning it therefore implies it exists. Were that ever untrue, the zeroed key names
+        // a pool that cannot be listed anyway, since neither of its currencies is USDG.
+        (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(tokenId);
+
+        ICollateralPolicy.Terms memory terms = policy.checkPool(key, $.tier);
+
+        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
+        if (valuation.liquidity == 0) revert PositionIsEmpty(tokenId);
+        if (valuation.principalUsd < terms.minPositionUsd) {
+            revert PositionBelowMinimum(valuation.principalUsd, terms.minPositionUsd);
+        }
+
+        $.loans[tokenId].owner = depositor;
+        emit CollateralDeposited(tokenId, depositor);
+    }
 
     /// @inheritdoc UUPSUpgradeable
     /// @dev Owner-only, no timelock. See the trust note on this contract.
