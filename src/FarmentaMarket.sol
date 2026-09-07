@@ -72,6 +72,8 @@ contract FarmentaMarket is
     /// @notice Decimal offset on the vault's shares, against inflation attacks (§7).
     uint8 private constant DECIMALS_OFFSET = 3;
 
+    uint256 private constant BPS = 10_000;
+
     /// @notice The Uniswap position NFT this market custodies.
     /// @dev Immutable in the implementation and changed by upgrading, like every other
     ///      dependency here (§4.1): each extra proxy would double the storage-collision
@@ -277,6 +279,15 @@ contract FarmentaMarket is
         IERC721(address(positionManager)).safeTransferFrom(address(this), to, tokenId);
     }
 
+    /// @notice Accepts native ETH (§4.1).
+    /// @dev Pools whose `currency0` is `address(0)` pay out in ETH, so `TAKE_PAIR` will send it
+    ///      here when collecting fees, decreasing liquidity or liquidating. None of those exist
+    ///      yet and nothing in this version can make ETH arrive, but the alternative is a
+    ///      market that rejects the first payout it is ever handed. ETH that turns up before
+    ///      then has no accounting and no way out; the functions that produce it bring that
+    ///      with them.
+    receive() external payable {}
+
     /* ---------------------------------- views --------------------------------- */
 
     /// @notice The collateral tier this market accepts.
@@ -346,6 +357,10 @@ contract FarmentaMarket is
         uint256 tokenId
     ) private {
         MarketStorage storage $ = _marketStorage();
+        // Unreachable today, since a recorded position is one this contract already owns and
+        // so cannot be handed to it again. Kept because it guards the single record that must
+        // never be silently overwritten, and `mintAndDeposit` (§4.1, Phase 2) adds an intake
+        // path that does not start from a transfer.
         if ($.loans[tokenId].owner != address(0)) revert PositionAlreadyHeld(tokenId);
 
         // No existence check: both intake paths reach here holding the NFT, and
@@ -358,8 +373,14 @@ contract FarmentaMarket is
 
         IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
         if (valuation.liquidity == 0) revert PositionIsEmpty(tokenId);
-        if (valuation.principalUsd < terms.minPositionUsd) {
-            revert PositionBelowMinimum(valuation.principalUsd, terms.minPositionUsd);
+
+        // §6.3: a hook that skims on withdrawal has its cut recorded at listing and deducted
+        // from the value. What backs a loan is what the protocol could actually pull out, not
+        // what the position reads as on paper. The policy caps the haircut at 100%, so this
+        // cannot underflow.
+        uint256 recoverableUsd = valuation.principalUsd * (BPS - terms.removeHaircutBps) / BPS;
+        if (recoverableUsd < terms.minPositionUsd) {
+            revert PositionBelowMinimum(recoverableUsd, terms.minPositionUsd);
         }
 
         $.loans[tokenId].owner = depositor;
@@ -371,6 +392,21 @@ contract FarmentaMarket is
     function _authorizeUpgrade(
         address
     ) internal override onlyOwner {}
+
+    /// @inheritdoc ERC4626Upgradeable
+    /// @dev Both `deposit` and `mint` route through here, so pausing stops the vault taking
+    ///      new money while `withdraw` and `redeem` stay open. The same asymmetry as the
+    ///      collateral side: what takes on risk stops, what hands assets back does not. §5.2
+    ///      makes pausing the only sequencer-downtime lever this chain offers, and continuing
+    ///      to accept deposits during one would be the wrong half to leave running.
+    function _deposit(
+        address caller,
+        address receiver,
+        uint256 assets,
+        uint256 shares
+    ) internal override whenNotPaused {
+        super._deposit(caller, receiver, assets, shares);
+    }
 
     /// @inheritdoc ERC4626Upgradeable
     function _decimalsOffset() internal pure override returns (uint8) {

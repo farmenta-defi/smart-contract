@@ -5,9 +5,11 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IERC721Permit_v4} from "@uniswap/v4-periphery/src/interfaces/IERC721Permit_v4.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {ERC721PermitHash} from "@uniswap/v4-periphery/src/libraries/ERC721PermitHash.sol";
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
@@ -15,9 +17,10 @@ import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {PositionValuer} from "../../src/PositionValuer.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
+import {PriceMath} from "../../src/libraries/PriceMath.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
-import {ForkTest} from "../base/ForkTest.sol";
+import {PositionMinter} from "../base/PositionMinter.sol";
 import {MockPriceOracle} from "../mocks/MockPriceOracle.sol";
 
 /// @notice The EIP-712 domain separator, which `IPositionManager` does not expose.
@@ -29,7 +32,7 @@ interface IEIP712Domain {
 /// @dev Custody is the one thing that cannot be proved against a mock. These positions belong
 ///      to strangers, sit in pools with live hooks, and hold native ETH on one side — the
 ///      shapes a hand-built ERC-721 double would quietly get wrong.
-contract MarketCustodyForkTest is ForkTest {
+contract MarketCustodyForkTest is PositionMinter {
     /// @dev ETH price implied by the fixture pool's own spot price at the pinned block, so
     ///      oracle and pool agree and the valuation is the one the chain would give.
     uint256 internal constant ETH_AT_POOL_SPOT = 2520.1324440246868e18;
@@ -350,6 +353,63 @@ contract MarketCustodyForkTest is ForkTest {
         vm.stopPrank();
     }
 
+    /// @notice A position drained to zero liquidity is refused.
+    /// @dev §6.1 rejects empty positions, and this shows the case is real rather than
+    ///      theoretical: decreasing a position to zero leaves the NFT alive, transferable and
+    ///      holding nothing at all. Accepting one would record collateral worth zero, which is
+    ///      a loan against nothing the moment borrowing exists.
+    function test_drainedPositionIsRefused() public {
+        PoolKey memory key = _keyOf(Fixtures.POS_WETH_USDG_WIDE_IN_RANGE);
+        int24 spacing = key.tickSpacing;
+        int24 mid = _alignedOracleTick(spacing);
+
+        _fundAndApprove(key, 10 ether, 100_000e6);
+        uint256 tokenId = _mint(key, mid - 10 * spacing, mid + 10 * spacing, 1e15);
+        _drain(key, tokenId, 1e15);
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), 0, "the position should be empty");
+        assertEq(nft.ownerOf(tokenId), address(this), "an emptied position keeps its NFT");
+
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+
+        nft.approve(address(market), tokenId);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PositionIsEmpty.selector, tokenId));
+        market.depositCollateral(tokenId);
+    }
+
+    /// @notice A hook that skims on withdrawal shrinks the value the floor is measured against.
+    /// @dev §6.3 records `removeHaircutBps` at listing and deducts it from the value. What
+    ///      backs a loan is what the protocol could actually pull back out, not what the
+    ///      position reads as on paper. Same position and same floor as the test below, which
+    ///      passes; only the haircut differs.
+    function test_removeHaircutIsDeductedBeforeTheMinimum() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, 300e18, 5000);
+
+        uint256 principal = valuer.value(tokenId).principalUsd;
+        assertGt(principal, 300e18, "the fixture must clear the floor before any haircut");
+
+        address holder = nft.ownerOf(tokenId);
+        vm.startPrank(holder);
+        nft.approve(address(market), tokenId);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, principal / 2, uint256(300e18))
+        );
+        market.depositCollateral(tokenId);
+        vm.stopPrank();
+    }
+
+    /// @dev The control for the test above: without the haircut the same position clears the
+    ///      same floor, so the refusal there is the deduction and nothing else.
+    function test_theSameFloorPassesWithoutAHaircut() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, 300e18, 0);
+        address holder = nft.ownerOf(tokenId);
+
+        _deposit(tokenId, holder);
+        assertEq(nft.ownerOf(tokenId), address(market), "the position should have been accepted");
+    }
+
     /* ---------------------------------- rescue -------------------------------- */
 
     /// @notice A position that arrived without the callback can be swept back out.
@@ -566,9 +626,47 @@ contract MarketCustodyForkTest is ForkTest {
     /// @dev The key is read before `vm.prank`, not inside the call. `getPoolAndPositionInfo`
     ///      is an external call, so evaluating it as an argument would spend the prank and
     ///      leave `list` to be called by this test contract, which is not the owner.
+    /// @dev Empties a position without burning it, which is the only way to reach a live NFT
+    ///      that holds nothing.
+    function _drain(
+        PoolKey memory key,
+        uint256 tokenId,
+        uint256 liquidity
+    ) internal {
+        bytes memory actions = abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR));
+        bytes[] memory params = new bytes[](2);
+        params[0] = abi.encode(tokenId, liquidity, uint128(0), uint128(0), bytes(""));
+        params[1] = abi.encode(key.currency0, key.currency1, address(this));
+        positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp + 60);
+    }
+
+    /// @dev The tick the oracle implies, snapped down onto the pool's spacing. Ranges are
+    ///      placed against this rather than the pool's own tick because the valuer decides
+    ///      in or out of range at the oracle price (§5.1).
+    function _alignedOracleTick(
+        int24 spacing
+    ) internal pure returns (int24) {
+        int24 tick = TickMath.getTickAtSqrtPrice(
+            PriceMath.derivedSqrtPriceX96(ETH_AT_POOL_SPOT, ONE_USD, 18, RobinhoodChain.USDG_DECIMALS)
+        );
+        // Dividing before multiplying is the point: it snaps the tick down onto the spacing.
+        // forge-lint: disable-next-line(divide-before-multiply)
+        int24 aligned = (tick / spacing) * spacing;
+        if (tick < 0 && aligned != tick) aligned -= spacing;
+        return aligned;
+    }
+
     function _listPoolOf(
         uint256 tokenId,
         uint128 minPositionUsd
+    ) internal {
+        _listPoolOf(tokenId, minPositionUsd, 0);
+    }
+
+    function _listPoolOf(
+        uint256 tokenId,
+        uint128 minPositionUsd,
+        uint16 removeHaircutBps
     ) internal {
         PoolKey memory key = _keyOf(tokenId);
         TierPresets.Preset memory preset = TierPresets.blueChip();
@@ -580,7 +678,7 @@ contract MarketCustodyForkTest is ForkTest {
                 maxLtvBps: preset.maxLtvBps,
                 ltBps: preset.ltBps,
                 liquidatorBonusBps: preset.minLiquidatorBonusBps,
-                removeHaircutBps: 0,
+                removeHaircutBps: removeHaircutBps,
                 debtCapUsdg: preset.maxDebtCapUsdg,
                 minPositionUsd: minPositionUsd
             })
@@ -592,14 +690,15 @@ contract MarketCustodyForkTest is ForkTest {
     ) internal returns (FarmentaMarket) {
         FarmentaMarket implementation = new FarmentaMarket(positionManager, policy, valuer);
         return FarmentaMarket(
-            address(
-                new ERC1967Proxy(
-                    address(implementation),
-                    abi.encodeCall(
-                        FarmentaMarket.initialize, (IERC20(RobinhoodChain.USDG), "Farmenta USDG", "fUSDG", tier_, owner)
+            payable(address(
+                    new ERC1967Proxy(
+                        address(implementation),
+                        abi.encodeCall(
+                            FarmentaMarket.initialize,
+                            (IERC20(RobinhoodChain.USDG), "Farmenta USDG", "fUSDG", tier_, owner)
+                        )
                     )
-                )
-            )
+                ))
         );
     }
 }

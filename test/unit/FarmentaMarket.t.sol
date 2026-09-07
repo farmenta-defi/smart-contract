@@ -4,6 +4,8 @@ pragma solidity 0.8.26;
 import {Test} from "forge-std/Test.sol";
 
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -113,6 +115,15 @@ contract FarmentaMarketTest is Test {
         market.upgradeToAndCall(address(next), "");
     }
 
+    /// @dev `onlyProxy` on the upgrade entry point. An implementation that could be upgraded
+    ///      through its own address is the other half of the bricking story that
+    ///      `_disableInitializers` covers.
+    function test_implementationCannotBeUpgradedThroughItself() public {
+        FarmentaMarket next = _deployImplementation();
+        vm.expectRevert(UUPSUpgradeable.UUPSUnauthorizedCallContext.selector);
+        implementation.upgradeToAndCall(address(next), "");
+    }
+
     /* ---------------------------------- pause --------------------------------- */
 
     function test_onlyOwnerCanPause() public {
@@ -127,6 +138,48 @@ contract FarmentaMarketTest is Test {
         vm.prank(owner);
         market.unpause();
         assertFalse(market.paused(), "unpause did not take");
+    }
+
+    /// @notice Pausing stops the vault taking money, and still lets lenders take theirs out.
+    /// @dev The same asymmetry the collateral side uses. §5.2 makes pausing the only
+    ///      sequencer-downtime lever this chain offers, so continuing to accept deposits
+    ///      during one would be the wrong half to leave running; refusing to return them
+    ///      would be the wrong half to stop.
+    function test_pausingStopsVaultDepositsButNotWithdrawals() public {
+        address lender = address(0x1E4DE2);
+        usdg.mint(lender, 1000e6);
+
+        vm.startPrank(lender);
+        usdg.approve(address(market), type(uint256).max);
+        market.deposit(500e6, lender);
+        vm.stopPrank();
+
+        vm.prank(owner);
+        market.pause();
+
+        vm.startPrank(lender);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        market.deposit(100e6, lender);
+
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        market.mint(100e6, lender);
+
+        market.withdraw(100e6, lender, lender);
+        vm.stopPrank();
+
+        assertEq(usdg.balanceOf(lender), 600e6, "a paused market trapped a lender's assets");
+    }
+
+    /// @notice The market accepts native ETH.
+    /// @dev Pools whose currency0 is `address(0)` pay out in ETH, so `TAKE_PAIR` will send it
+    ///      here once fees, liquidity decreases and liquidations exist (§4.1). Nothing routes
+    ///      ETH here yet; a market that rejected the first payout it was handed would fail at
+    ///      exactly the wrong moment.
+    function test_marketAcceptsNativeEth() public {
+        vm.deal(address(this), 1 ether);
+        (bool ok,) = address(market).call{value: 1 ether}("");
+        assertTrue(ok, "market refused native ETH");
+        assertEq(address(market).balance, 1 ether, "ETH did not land");
     }
 
     /// @dev Ownership moves in two steps, so a typo in the new owner cannot lock the market.
@@ -195,7 +248,7 @@ contract FarmentaMarketTest is Test {
     function _deployProxy(
         ICollateralPolicy.Tier tier
     ) internal returns (FarmentaMarket) {
-        return FarmentaMarket(address(new ERC1967Proxy(address(implementation), _initData(tier))));
+        return FarmentaMarket(payable(address(new ERC1967Proxy(address(implementation), _initData(tier)))));
     }
 
     function _initData(
