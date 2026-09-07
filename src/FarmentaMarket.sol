@@ -90,6 +90,9 @@ contract FarmentaMarket is
     /// @notice A position was released back to the depositor.
     event CollateralWithdrawn(uint256 indexed tokenId, address indexed owner);
 
+    /// @notice A position that arrived here unrecorded was swept out by the owner.
+    event UnaccountedTokenRescued(uint256 indexed tokenId, address indexed to);
+
     error ZeroAddress();
     error TierNotSet();
     error NotThePositionManager(address caller);
@@ -100,6 +103,7 @@ contract FarmentaMarket is
     error NotTheDepositor(uint256 tokenId, address depositor);
     error OutstandingDebt(uint256 tokenId, uint256 debtShares);
     error InvalidRecipient(address to);
+    error PositionIsCollateral(uint256 tokenId);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -298,6 +302,29 @@ contract FarmentaMarket is
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @notice Recovers a position that reached this contract without being recorded.
+    /// @param tokenId The unaccounted position.
+    /// @param to Where to send it.
+    /// @dev Two ways a position lands here unrecorded, and neither runs the intake callback.
+    ///      `PositionManager` mints with solmate's `_mint`, which fires no callback at all, so
+    ///      anyone can mint a position whose owner is this contract. And a plain `transferFrom`
+    ///      is not a `safeTransferFrom`, so it too arrives silently. Without this the position
+    ///      would sit here forever, belonging to nobody the market can name (§4.1).
+    ///
+    ///      The guard is the whole point: this refuses any position with a loan record against
+    ///      it, so it can never be turned on collateral somebody actually deposited. It closes
+    ///      a trapped-asset hole without opening a theft one.
+    function rescueUnaccountedToken(
+        uint256 tokenId,
+        address to
+    ) external onlyOwner nonReentrant {
+        if (to == address(0) || to == address(this)) revert InvalidRecipient(to);
+        if (_marketStorage().loans[tokenId].owner != address(0)) revert PositionIsCollateral(tokenId);
+
+        emit UnaccountedTokenRescued(tokenId, to);
+        IERC721(address(positionManager)).safeTransferFrom(address(this), to, tokenId);
     }
 
     /* -------------------------------- internals ------------------------------- */

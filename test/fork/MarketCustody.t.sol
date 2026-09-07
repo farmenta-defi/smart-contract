@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
@@ -347,6 +348,56 @@ contract MarketCustodyForkTest is ForkTest {
         vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.InvalidRecipient.selector, address(market)));
         market.withdrawCollateral(tokenId, address(market));
         vm.stopPrank();
+    }
+
+    /* ---------------------------------- rescue -------------------------------- */
+
+    /// @notice A position that arrived without the callback can be swept back out.
+    /// @dev A plain `transferFrom` is not a `safeTransferFrom`, so nothing tells this contract
+    ///      it happened. The same silence applies to a position minted straight to this
+    ///      address, because `PositionManager` mints with solmate's `_mint` and fires no
+    ///      callback at all. Either way the NFT sits here belonging to nobody the market can
+    ///      name, and only this can retrieve it.
+    function test_rescueReturnsAPositionThatArrivedUnrecorded() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        address holder = nft.ownerOf(tokenId);
+
+        vm.prank(holder);
+        nft.transferFrom(holder, address(market), tokenId);
+
+        assertEq(nft.ownerOf(tokenId), address(market), "the market should be holding it");
+        assertEq(market.loanOf(tokenId).owner, address(0), "an unsafe transfer must record nothing");
+
+        vm.prank(owner);
+        market.rescueUnaccountedToken(tokenId, holder);
+        assertEq(nft.ownerOf(tokenId), holder, "rescue did not return the position");
+    }
+
+    /// @notice Rescue can never be turned on collateral somebody actually deposited.
+    /// @dev The guard that keeps this from being a back door into every borrower's position.
+    function test_rescueCannotTouchRecordedCollateral() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address holder = nft.ownerOf(tokenId);
+        _deposit(tokenId, holder);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PositionIsCollateral.selector, tokenId));
+        market.rescueUnaccountedToken(tokenId, owner);
+
+        assertEq(nft.ownerOf(tokenId), address(market), "collateral must stay put");
+    }
+
+    function test_onlyTheOwnerMayRescue() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        address holder = nft.ownerOf(tokenId);
+        vm.prank(holder);
+        nft.transferFrom(holder, address(market), tokenId);
+
+        address thief = address(0xBAD);
+        vm.prank(thief);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, thief));
+        market.rescueUnaccountedToken(tokenId, thief);
     }
 
     /* ---------------------------------- permit -------------------------------- */
