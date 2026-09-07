@@ -25,6 +25,21 @@ import {IPositionValuer} from "./interfaces/IPositionValuer.sol";
 ///      earns nothing yet: with no borrows, `totalAssets` is simply the USDG this contract
 ///      holds. §7 overrides it once `totalBorrows` and `reserves` exist.
 ///
+///      **Two more overrides land with that ledger, and are owed now so they are not
+///      discovered later.** §4.1 limits a lender's withdrawal to the cash actually on hand.
+///      The inherited `maxWithdraw` and `maxRedeem` measure against `totalAssets`, which is
+///      harmless while nothing is borrowed — cash *is* `totalAssets` — but once borrows exist
+///      they would advertise more than the vault can pay, and `withdraw` would fail inside the
+///      token transfer instead of reverting as `ERC4626ExceededMaxWithdraw`. Both must be
+///      bounded by cash in the same change that introduces `totalBorrows`.
+///
+///      **ETH that arrives has no way out.** `receive()` accepts it because the payout
+///      functions will need it (see the note there), but nothing in this version sends it
+///      anywhere, and §4.1's owner-function list has no ETH rescue. Nothing today can make
+///      ETH arrive legitimately, so this is a question for the §8 work that first produces a
+///      payout rather than a defect here; it is recorded as spec open item §15 no. 12 so the
+///      answer is decided with those functions and not after them.
+///
 ///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` with no timelock (§4.1, decided
 ///      4 Sep 2026). This contract custodies collateral NFTs and holds USDG deposits, so
 ///      whoever holds the owner key can replace its entire logic, including taking
@@ -288,9 +303,13 @@ contract FarmentaMarket is
     /// @dev Pools whose `currency0` is `address(0)` pay out in ETH, so `TAKE_PAIR` will send it
     ///      here when collecting fees, decreasing liquidity or liquidating. None of those exist
     ///      yet and nothing in this version can make ETH arrive, but the alternative is a
-    ///      market that rejects the first payout it is ever handed. ETH that turns up before
-    ///      then has no accounting and no way out; the functions that produce it bring that
-    ///      with them.
+    ///      market that rejects the first payout it is ever handed.
+    ///
+    ///      ETH that turns up before then has no accounting and no way out. That is the same
+    ///      trapped-asset hole `rescueUnaccountedToken` closes, one asset class over, and it
+    ///      is left open deliberately: §4.1 gives the owner no ETH rescue, and adding one
+    ///      before there is any legitimate ETH flow would decide by accident how ETH payouts
+    ///      are accounted for. Open item §15 no. 12, to be answered by the §8 work.
     receive() external payable {}
 
     /* ---------------------------------- views --------------------------------- */

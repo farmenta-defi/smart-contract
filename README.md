@@ -4,7 +4,7 @@ Solidity contracts for Farmenta — borrow USDG against Uniswap v4 LP position N
 Robinhood Chain (chain id 4663).
 
 Specification: [`farmenta-defi/docs`](https://github.com/farmenta-defi/docs) →
-`ARCHITECTURE.md` v0.6. **The spec is the source of truth.** Where this repo and the spec
+`ARCHITECTURE.md` v0.7. **The spec is the source of truth.** Where this repo and the spec
 disagree, the spec wins and the code is wrong — except for addresses, which live in exactly
 two places: spec §18 and `src/constants/RobinhoodChain.sol`, kept in sync by a test.
 
@@ -62,6 +62,16 @@ permit, withdrawn once nothing is owed, and rescued by the owner if one arrives
 unrecorded. The debt ledger, interest accrual, borrowing, repayment and liquidation
 are Phase 1 (spec §16). The ERC-4626 side is inherited and works, but earns nothing
 yet: with no borrows, `totalAssets` is just the USDG held.
+
+Two vault overrides are owed to that same change, and are written down here rather
+than left to be found later:
+
+- `totalAssets` must count `totalBorrows` and subtract `reserves` (spec §7).
+- `maxWithdraw` and `maxRedeem` must be bounded by the cash on hand (spec §4.1). The
+  inherited versions measure against `totalAssets`, which is correct only while
+  nothing is borrowed. Once it is, they would advertise more than the vault can pay
+  and `withdraw` would fail inside the token transfer rather than reverting as
+  `ERC4626ExceededMaxWithdraw`.
 
 Custody is the design rather than a detail. `PositionManager` gates
 `DECREASE_LIQUIDITY` and `BURN_POSITION` behind `onlyIfApproved(msgSender())`, so
@@ -142,8 +152,17 @@ Stated plainly, because the MVP is neither audited nor timelocked:
 - The owner can `pause`, and pausing halts liquidations too. Robinhood Chain publishes no
   Chainlink L2 Sequencer Uptime Feed, so pausing is the only sequencer-downtime mitigation
   available (spec §5.2, §15.1).
+- **The owner can make a healthy loan liquidatable**, by lowering a pool's liquidation
+  threshold with no rate limit and no floor (spec §6.5). A borrower who did nothing wrong
+  then pays the liquidator bonus. Spec §15 rates this in the same class as the upgrade key,
+  and it is accepted for the same reason. The only mitigation is legibility: the LT ramp is
+  scheduled on-chain, so a borrower can see when their position falls. Spec §15 no. 11.
 - Robinhood Chain is L2BEAT **Stage 0** with 2 validators; the sequencer can filter
   transactions. "A liquidation can always be submitted" is an assumption, not a guarantee.
+- **ETH sent to the market cannot be recovered.** `receive()` is open because the fee,
+  liquidity and liquidation payouts will arrive as native ETH, but none of those functions
+  exists yet and there is no ETH rescue. Nothing today can make ETH arrive legitimately.
+  Whether the owner gets one is open item spec §15 no. 12, to be answered alongside §8.
 
 ## License
 
