@@ -87,6 +87,9 @@ contract FarmentaMarket is
     /// @notice A position was taken into custody as collateral.
     event CollateralDeposited(uint256 indexed tokenId, address indexed owner);
 
+    /// @notice A position was released back to the depositor.
+    event CollateralWithdrawn(uint256 indexed tokenId, address indexed owner);
+
     error ZeroAddress();
     error TierNotSet();
     error NotThePositionManager(address caller);
@@ -94,6 +97,9 @@ contract FarmentaMarket is
     error PositionIsEmpty(uint256 tokenId);
     error PositionBelowMinimum(uint256 principalUsd, uint256 minimumUsd);
     error PermitRejected(uint256 tokenId);
+    error NotTheDepositor(uint256 tokenId, address depositor);
+    error OutstandingDebt(uint256 tokenId, uint256 debtShares);
+    error InvalidRecipient(address to);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -231,6 +237,40 @@ contract FarmentaMarket is
         if (msg.sender != address(positionManager)) revert NotThePositionManager(msg.sender);
         _acceptCollateral(from, tokenId);
         return this.onERC721Received.selector;
+    }
+
+    /// @notice Returns a position to the depositor once nothing is owed against it.
+    /// @param tokenId The position to release.
+    /// @param to Where to send it. The depositor's choice, so they can move it straight on.
+    /// @dev **Deliberately not pausable.** Everything that takes on new risk stops when the
+    ///      market is paused; this does not. A position with no debt against it belongs
+    ///      entirely to its depositor, so refusing to hand it back protects nobody and turns
+    ///      an operational lever into a way to strand other people's assets. §6.5 makes the
+    ///      same call for frozen pools, and for the same reason.
+    ///
+    ///      Sent with `safeTransferFrom`: the recipient is whatever address the depositor
+    ///      names, and a contract that cannot hold ERC-721s should make the call revert rather
+    ///      than swallow the position. Re-entry through that callback is closed off by
+    ///      clearing the record first and by the guard on this function.
+    function withdrawCollateral(
+        uint256 tokenId,
+        address to
+    ) external nonReentrant {
+        if (to == address(0) || to == address(this)) revert InvalidRecipient(to);
+
+        MarketStorage storage $ = _marketStorage();
+        Loan memory loan = $.loans[tokenId];
+
+        if (loan.owner != msg.sender) revert NotTheDepositor(tokenId, loan.owner);
+        // Vacuous until Phase 1 writes the ledger, and deliberately here anyway: the gate that
+        // stops a borrower walking away with their collateral should not be one that has to be
+        // remembered later.
+        if (loan.debtShares != 0) revert OutstandingDebt(tokenId, loan.debtShares);
+
+        delete $.loans[tokenId];
+        emit CollateralWithdrawn(tokenId, msg.sender);
+
+        IERC721(address(positionManager)).safeTransferFrom(address(this), to, tokenId);
     }
 
     /* ---------------------------------- views --------------------------------- */

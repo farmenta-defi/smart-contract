@@ -41,6 +41,11 @@ contract MarketCustodyForkTest is ForkTest {
     uint256 internal constant SIGNER_PK = 0xA11CE5EED;
     uint256 internal constant IMPOSTOR_PK = 0xBADBEEF;
 
+    /// @dev Mirrors the private constant in `FarmentaMarket`; the unit suite proves it is the
+    ///      ERC-7201 slot for `farmenta.storage.Market`.
+    bytes32 internal constant MARKET_STORAGE_LOCATION =
+        0x7264a1ba9a51633de6d083d092b5001ae1c4b527f9b0578321c709cd9ac3df00;
+
     MockPriceOracle internal oracle;
     PositionValuer internal valuer;
     CollateralPolicy internal policy;
@@ -223,6 +228,127 @@ contract MarketCustodyForkTest is ForkTest {
         assertEq(nft.ownerOf(tokenId), holder, "a paused market must not take custody");
     }
 
+    /* --------------------------------- withdraw ------------------------------- */
+
+    function test_withdrawReturnsThePositionToItsDepositor() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address holder = nft.ownerOf(tokenId);
+        _deposit(tokenId, holder);
+
+        vm.expectEmit(true, true, false, false, address(market));
+        emit FarmentaMarket.CollateralWithdrawn(tokenId, holder);
+        vm.prank(holder);
+        market.withdrawCollateral(tokenId, holder);
+
+        assertEq(nft.ownerOf(tokenId), holder, "position did not go back");
+        assertEq(market.loanOf(tokenId).owner, address(0), "the record should be cleared");
+    }
+
+    function test_withdrawCanSendSomewhereElse() public {
+        uint256 tokenId = Fixtures.POS_WETH_USDG_WIDE_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address holder = nft.ownerOf(tokenId);
+        _deposit(tokenId, holder);
+
+        address elsewhere = address(0xE15E);
+        vm.prank(holder);
+        market.withdrawCollateral(tokenId, elsewhere);
+
+        assertEq(nft.ownerOf(tokenId), elsewhere, "position went to the wrong address");
+    }
+
+    function test_onlyTheDepositorMayWithdraw() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address holder = nft.ownerOf(tokenId);
+        _deposit(tokenId, holder);
+
+        address thief = address(0xBAD);
+        vm.prank(thief);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotTheDepositor.selector, tokenId, holder));
+        market.withdrawCollateral(tokenId, thief);
+
+        assertEq(nft.ownerOf(tokenId), address(market), "the market should still hold it");
+    }
+
+    function test_cannotWithdrawSomethingNeverDeposited() public {
+        vm.prank(address(0xBAD));
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotTheDepositor.selector, uint256(42), address(0)));
+        market.withdrawCollateral(42, address(0xBAD));
+    }
+
+    /// @notice Pausing must not strand collateral that owes nothing.
+    /// @dev The deliberate asymmetry: intake stops while paused, release does not. A position
+    ///      with no debt against it belongs entirely to its depositor, so holding it back
+    ///      protects nobody and turns an operational lever into a way to trap other people's
+    ///      assets. §6.5 reaches the same conclusion for frozen pools.
+    function test_withdrawStillWorksWhilePaused() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address holder = nft.ownerOf(tokenId);
+        _deposit(tokenId, holder);
+
+        vm.prank(owner);
+        market.pause();
+
+        vm.prank(holder);
+        market.withdrawCollateral(tokenId, holder);
+        assertEq(nft.ownerOf(tokenId), holder, "a paused market trapped debt-free collateral");
+    }
+
+    /// @dev Proves the record is genuinely cleared rather than just emptied of its owner: a
+    ///      leftover entry would make the second deposit revert as already held.
+    function test_aWithdrawnPositionCanBeDepositedAgain() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address holder = nft.ownerOf(tokenId);
+
+        _deposit(tokenId, holder);
+        vm.prank(holder);
+        market.withdrawCollateral(tokenId, holder);
+        _deposit(tokenId, holder);
+
+        assertEq(nft.ownerOf(tokenId), address(market), "second deposit did not take");
+        assertEq(market.loanOf(tokenId).owner, holder, "second deposit not recorded");
+    }
+
+    /// @notice Debt blocks withdrawal, checked now rather than when the ledger exists.
+    /// @dev Nothing writes `debtShares` yet, so the only way to reach this branch is to plant
+    ///      a value in the slot the contract reads. That is the point: the gate that stops a
+    ///      borrower walking off with their collateral is the last one anybody should
+    ///      discover is missing, and it is verified before there is any borrowing at all.
+    function test_outstandingDebtBlocksWithdrawal() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address holder = nft.ownerOf(tokenId);
+        _deposit(tokenId, holder);
+
+        vm.store(address(market), _debtSharesSlot(tokenId), bytes32(uint256(1e18)));
+        assertEq(market.loanOf(tokenId).debtShares, 1e18, "the planted debt is not where the market reads");
+
+        vm.prank(holder);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.OutstandingDebt.selector, tokenId, uint256(1e18)));
+        market.withdrawCollateral(tokenId, holder);
+    }
+
+    /// @dev Sending the position to the market itself would re-enter the intake callback and
+    ///      re-record what was just released.
+    function test_withdrawRefusesDegenerateRecipients() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address holder = nft.ownerOf(tokenId);
+        _deposit(tokenId, holder);
+
+        vm.startPrank(holder);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.InvalidRecipient.selector, address(0)));
+        market.withdrawCollateral(tokenId, address(0));
+
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.InvalidRecipient.selector, address(market)));
+        market.withdrawCollateral(tokenId, address(market));
+        vm.stopPrank();
+    }
+
     /* ---------------------------------- permit -------------------------------- */
 
     /// @notice One transaction instead of two: the owner signs, and the position moves.
@@ -328,6 +454,17 @@ contract MarketCustodyForkTest is ForkTest {
     }
 
     /* --------------------------------- helpers -------------------------------- */
+
+    /// @dev Where `loans[tokenId].debtShares` lives. `MarketStorage` puts `tier` at the
+    ///      namespace root and the `loans` mapping one slot on; inside `Loan`, `owner` comes
+    ///      first and `debtShares` second. Derived rather than hard-coded so a change to the
+    ///      layout shows up as a failing assertion instead of a silently harmless write.
+    function _debtSharesSlot(
+        uint256 tokenId
+    ) internal pure returns (bytes32) {
+        uint256 loansSlot = uint256(MARKET_STORAGE_LOCATION) + 1;
+        return bytes32(uint256(keccak256(abi.encode(tokenId, loansSlot))) + 1);
+    }
 
     /// @dev Fixture positions belong to strangers whose keys nobody has, so a position is
     ///      moved to an address this test can sign for before any permit is exercised.
