@@ -6,6 +6,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {IERC721Permit_v4} from "@uniswap/v4-periphery/src/interfaces/IERC721Permit_v4.sol";
+import {ERC721PermitHash} from "@uniswap/v4-periphery/src/libraries/ERC721PermitHash.sol";
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
@@ -16,6 +18,11 @@ import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {ForkTest} from "../base/ForkTest.sol";
 import {MockPriceOracle} from "../mocks/MockPriceOracle.sol";
+
+/// @notice The EIP-712 domain separator, which `IPositionManager` does not expose.
+interface IEIP712Domain {
+    function DOMAIN_SEPARATOR() external view returns (bytes32);
+}
 
 /// @notice Takes real positions off real owners and into the market.
 /// @dev Custody is the one thing that cannot be proved against a mock. These positions belong
@@ -28,6 +35,11 @@ contract MarketCustodyForkTest is ForkTest {
     uint256 internal constant ONE_USD = 1e18;
 
     address internal owner = address(0xA11CE);
+
+    /// @dev Keys the test can sign with. Fixture positions belong to strangers, so a position
+    ///      is handed to `vm.addr(SIGNER_PK)` before any permit is exercised.
+    uint256 internal constant SIGNER_PK = 0xA11CE5EED;
+    uint256 internal constant IMPOSTOR_PK = 0xBADBEEF;
 
     MockPriceOracle internal oracle;
     PositionValuer internal valuer;
@@ -211,7 +223,141 @@ contract MarketCustodyForkTest is ForkTest {
         assertEq(nft.ownerOf(tokenId), holder, "a paused market must not take custody");
     }
 
+    /* ---------------------------------- permit -------------------------------- */
+
+    /// @notice One transaction instead of two: the owner signs, and the position moves.
+    function test_permitDepositsWithoutASeparateApproval() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address signer = _giveToSigner(tokenId);
+
+        assertEq(nft.getApproved(tokenId), address(0), "no approval should exist yet");
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory signature = _signPermit(SIGNER_PK, tokenId, 0, deadline);
+
+        vm.prank(signer);
+        market.depositCollateralWithPermit(tokenId, deadline, 0, signature);
+
+        assertEq(nft.ownerOf(tokenId), address(market), "market does not own the position");
+        assertEq(market.loanOf(tokenId).owner, signer, "depositor not recorded");
+    }
+
+    /// @notice A signature built over the usual four-field EIP-712 domain is rejected.
+    /// @dev The trap this whole function exists to document. ERC-721 has no permit, and
+    ///      Uniswap's own domain carries name, chainId and verifyingContract but **no
+    ///      version**. Every wallet helper and most examples add one, and the resulting
+    ///      signature fails with nothing to indicate why. Pinning that here means a future
+    ///      change to the domain surfaces as this test breaking.
+    function test_permitSignedWithAVersionedDomainIsRejected() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address signer = _giveToSigner(tokenId);
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes32 versionedDomain = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes("Uniswap v4 Positions NFT")),
+                keccak256(bytes("1")),
+                block.chainid,
+                RobinhoodChain.POSITION_MANAGER
+            )
+        );
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                hex"1901", versionedDomain, ERC721PermitHash.hashPermit(address(market), tokenId, 0, deadline)
+            )
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(SIGNER_PK, digest);
+
+        vm.prank(signer);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PermitRejected.selector, tokenId));
+        market.depositCollateralWithPermit(tokenId, deadline, 0, abi.encodePacked(r, s, v));
+    }
+
+    function test_permitFromTheWrongSignerIsRejected() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address signer = _giveToSigner(tokenId);
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory signature = _signPermit(IMPOSTOR_PK, tokenId, 0, deadline);
+
+        vm.prank(signer);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PermitRejected.selector, tokenId));
+        market.depositCollateralWithPermit(tokenId, deadline, 0, signature);
+    }
+
+    function test_expiredPermitIsRejected() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address signer = _giveToSigner(tokenId);
+
+        uint256 deadline = block.timestamp - 1;
+        bytes memory signature = _signPermit(SIGNER_PK, tokenId, 0, deadline);
+
+        vm.prank(signer);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PermitRejected.selector, tokenId));
+        market.depositCollateralWithPermit(tokenId, deadline, 0, signature);
+    }
+
+    /// @notice A permit spent by someone else first still leaves the deposit working.
+    /// @dev Permits are public once broadcast and `PositionManager.permit` is callable by
+    ///      anyone, so a bystander can spend the nonce before this transaction lands. Without
+    ///      the catch that would revert a deposit whose approval had in fact been granted,
+    ///      which is a free way to grief every permit deposit.
+    function test_aPermitAlreadySpentBySomeoneElseStillDeposits() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address signer = _giveToSigner(tokenId);
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory signature = _signPermit(SIGNER_PK, tokenId, 0, deadline);
+
+        // A bystander front-runs, spending the nonce but leaving the approval in place.
+        vm.prank(address(0xF00D));
+        IERC721Permit_v4(RobinhoodChain.POSITION_MANAGER).permit(address(market), tokenId, deadline, 0, signature);
+        assertEq(nft.getApproved(tokenId), address(market), "the front-run permit should have approved us");
+
+        vm.prank(signer);
+        market.depositCollateralWithPermit(tokenId, deadline, 0, signature);
+
+        assertEq(nft.ownerOf(tokenId), address(market), "market does not own the position");
+        assertEq(market.loanOf(tokenId).owner, signer, "depositor not recorded");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
+
+    /// @dev Fixture positions belong to strangers whose keys nobody has, so a position is
+    ///      moved to an address this test can sign for before any permit is exercised.
+    function _giveToSigner(
+        uint256 tokenId
+    ) internal returns (address signer) {
+        signer = vm.addr(SIGNER_PK);
+        address holder = nft.ownerOf(tokenId);
+        vm.prank(holder);
+        nft.transferFrom(holder, signer, tokenId);
+    }
+
+    /// @dev Struct hash comes from Uniswap's own library so it cannot drift from the
+    ///      contract. The domain is read live from `PositionManager` for the same reason.
+    function _signPermit(
+        uint256 privateKey,
+        uint256 tokenId,
+        uint256 nonce,
+        uint256 deadline
+    ) internal view returns (bytes memory) {
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                hex"1901",
+                IEIP712Domain(RobinhoodChain.POSITION_MANAGER).DOMAIN_SEPARATOR(),
+                ERC721PermitHash.hashPermit(address(market), tokenId, nonce, deadline)
+            )
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
+        return abi.encodePacked(r, s, v);
+    }
 
     function _deposit(
         uint256 tokenId,

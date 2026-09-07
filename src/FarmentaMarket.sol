@@ -10,6 +10,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {IERC721Permit_v4} from "@uniswap/v4-periphery/src/interfaces/IERC721Permit_v4.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 
 import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
@@ -92,6 +93,7 @@ contract FarmentaMarket is
     error PositionAlreadyHeld(uint256 tokenId);
     error PositionIsEmpty(uint256 tokenId);
     error PositionBelowMinimum(uint256 principalUsd, uint256 minimumUsd);
+    error PermitRejected(uint256 tokenId);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -162,6 +164,48 @@ contract FarmentaMarket is
     ) external whenNotPaused nonReentrant {
         IERC721(address(positionManager)).transferFrom(msg.sender, address(this), tokenId);
         _acceptCollateral(msg.sender, tokenId);
+    }
+
+    /// @notice Approves and deposits in one transaction, using a signature from the owner.
+    /// @param tokenId The position NFT.
+    /// @param deadline After which the signature is no longer valid.
+    /// @param nonce Any nonce the owner has not spent. Uniswap's nonces are unordered, so
+    ///        this need not follow on from a previous one.
+    /// @param signature The owner's EIP-712 `Permit`, 65 bytes or the compact 64-byte form.
+    /// @dev **The signature is not an ERC-721 standard one.** ERC-721 has no permit; this is
+    ///      Uniswap's own `ERC721Permit_v4`, and its EIP-712 domain omits `version`, carrying
+    ///      only name, chainId and verifyingContract. A signer that assembles the usual
+    ///      four-field domain produces a signature that always fails. Note also that the
+    ///      arguments here follow Uniswap's function order, deadline then nonce, while the
+    ///      signed struct hashes them the other way round.
+    ///
+    ///      The position is credited to its owner rather than to `msg.sender`. The owner is
+    ///      who signed, the signature names this market as the only possible spender, and the
+    ///      collateral is withdrawable only by them, so letting someone else pay the gas costs
+    ///      nobody anything.
+    ///
+    ///      A signed permit is public once broadcast and anyone may submit it, so it can be
+    ///      spent between this transaction being signed and being mined. Losing that race is
+    ///      not a failure as long as it left this market approved, which is the only thing the
+    ///      call was for.
+    function depositCollateralWithPermit(
+        uint256 tokenId,
+        uint256 deadline,
+        uint256 nonce,
+        bytes calldata signature
+    ) external whenNotPaused nonReentrant {
+        IERC721 nft = IERC721(address(positionManager));
+        address depositor = nft.ownerOf(tokenId);
+
+        try IERC721Permit_v4(address(positionManager)).permit(address(this), tokenId, deadline, nonce, signature) {}
+        catch {
+            if (nft.getApproved(tokenId) != address(this) && !nft.isApprovedForAll(depositor, address(this))) {
+                revert PermitRejected(tokenId);
+            }
+        }
+
+        nft.transferFrom(depositor, address(this), tokenId);
+        _acceptCollateral(depositor, tokenId);
     }
 
     /// @notice Accepts a position pushed here directly with `safeTransferFrom`.
