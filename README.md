@@ -4,7 +4,7 @@ Solidity contracts for Farmenta — borrow USDG against Uniswap v4 LP position N
 Robinhood Chain (chain id 4663).
 
 Specification: [`farmenta-defi/docs`](https://github.com/farmenta-defi/docs) →
-`ARCHITECTURE.md` v0.4. **The spec is the source of truth.** Where this repo and the spec
+`ARCHITECTURE.md` v0.7. **The spec is the source of truth.** Where this repo and the spec
 disagree, the spec wins and the code is wrong — except for addresses, which live in exactly
 two places: spec §18 and `src/constants/RobinhoodChain.sol`, kept in sync by a test.
 
@@ -36,6 +36,7 @@ fork. It is also DNS-hijacked by some ISPs, and `anvil` has no equivalent of cur
 
 ```
 src/
+  FarmentaMarket.sol             custodies position NFTs, and will lend against them (spec §4.1)
   CollateralPolicy.sol           which pools may back a loan, on what terms (spec §4.5, §6)
   PositionValuer.sol             values a position at oracle prices (spec §4.2, §5.1)
   constants/RobinhoodChain.sol   deployed addresses (spec §18)
@@ -44,7 +45,8 @@ src/
 test/
   base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
               PositionMinter (mints positions in the fork for shapes the chain lacks)
-  mocks/      MockPriceOracle — settable prices, so the oracle can move while the pool cannot
+  mocks/      MockPriceOracle — settable prices, so the oracle can move while the pool cannot;
+              MockERC20 — a 6-decimal asset, so the vault's decimals are exercised off-fork
   unit/       no network
   fork/       pinned-block reads against live Uniswap v4 state
   invariant/  properties asserted across arbitrary call sequences
@@ -52,6 +54,41 @@ script/
   DiscoverPositions.s.sol        finds real positions to use as fixtures
   InspectPositions.s.sol         prints everything the valuer reads, for one position
 ```
+
+## What `FarmentaMarket` does today
+
+The custody half, and only that. Positions can be deposited, deposited with a signed
+permit, withdrawn once nothing is owed, and rescued by the owner if one arrives
+unrecorded. The debt ledger, interest accrual, borrowing, repayment and liquidation
+are Phase 1 (spec §16). The ERC-4626 side is inherited and works, but earns nothing
+yet: with no borrows, `totalAssets` is just the USDG held.
+
+Two vault overrides are owed to that same change, and are written down here rather
+than left to be found later:
+
+- `totalAssets` must count `totalBorrows` and subtract `reserves` (spec §7).
+- `maxWithdraw` and `maxRedeem` must be bounded by the cash on hand (spec §4.1). The
+  inherited versions measure against `totalAssets`, which is correct only while
+  nothing is borrowed. Once it is, they would advertise more than the vault can pay
+  and `withdraw` would fail inside the token transfer rather than reverting as
+  `ERC4626ExceededMaxWithdraw`.
+
+Custody is the design rather than a detail. `PositionManager` gates
+`DECREASE_LIQUIDITY` and `BURN_POSITION` behind `onlyIfApproved(msgSender())`, so
+owning the NFT is precisely what will let the market pull liquidity during
+liquidation. A market that recorded the loan but left the token with the borrower
+could never liquidate it. The subscriber mechanism cannot substitute: an owner can
+always unsubscribe, and a transfer unsubscribes automatically (spec §10).
+
+### The permit signature is not a standard one
+
+ERC-721 has no permit. `depositCollateralWithPermit` uses Uniswap's own
+`ERC721Permit_v4`, whose EIP-712 domain carries name, chainId and verifyingContract
+and **no `version` field**. Wallet helpers and examples almost always add one, and
+the resulting signature fails with nothing to say why. Its arguments also run
+deadline-then-nonce while the signed struct hashes them the other way round. A test
+signs over the four-field domain and asserts the rejection, so the trap is pinned
+rather than remembered.
 
 ## Tests
 
@@ -115,8 +152,17 @@ Stated plainly, because the MVP is neither audited nor timelocked:
 - The owner can `pause`, and pausing halts liquidations too. Robinhood Chain publishes no
   Chainlink L2 Sequencer Uptime Feed, so pausing is the only sequencer-downtime mitigation
   available (spec §5.2, §15.1).
+- **The owner can make a healthy loan liquidatable**, by lowering a pool's liquidation
+  threshold with no rate limit and no floor (spec §6.5). A borrower who did nothing wrong
+  then pays the liquidator bonus. Spec §15 rates this in the same class as the upgrade key,
+  and it is accepted for the same reason. The only mitigation is legibility: the LT ramp is
+  scheduled on-chain, so a borrower can see when their position falls. Spec §15 no. 11.
 - Robinhood Chain is L2BEAT **Stage 0** with 2 validators; the sequencer can filter
   transactions. "A liquidation can always be submitted" is an assumption, not a guarantee.
+- **ETH sent to the market cannot be recovered.** `receive()` is open because the fee,
+  liquidity and liquidation payouts will arrive as native ETH, but none of those functions
+  exists yet and there is no ETH rescue. Nothing today can make ETH arrive legitimately.
+  Whether the owner gets one is open item spec §15 no. 12, to be answered alongside §8.
 
 ## License
 

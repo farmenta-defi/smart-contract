@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 /// @title ICollateralPolicy
 /// @notice Decides which Uniswap positions may back a loan, and on what terms
@@ -46,6 +47,16 @@ interface ICollateralPolicy {
     ///      not be touched, and those are different mistakes to make.
     function termsOf(
         PoolId poolId
+    ) external view returns (Terms memory);
+
+    /// @notice Everything §6.1 can decide from the pool alone, for a market of `marketTier`.
+    /// @dev The gate a market calls on deposit. Reverts with the specific reason rather than
+    ///      returning false, so a rejected deposit says which rule stopped it. The caller
+    ///      still has to enforce the value-dependent rules from the returned terms:
+    ///      `minPositionUsd` and the debt cap.
+    function checkPool(
+        PoolKey calldata key,
+        Tier marketTier
     ) external view returns (Terms memory);
 
     /// @notice Whether new collateral and new borrowing are currently allowed for a pool.
