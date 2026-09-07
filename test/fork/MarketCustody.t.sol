@@ -564,6 +564,32 @@ contract MarketCustodyForkTest is PositionMinter {
         assertEq(market.loanOf(tokenId).owner, signer, "depositor not recorded");
     }
 
+    /// @notice A blanket operator approval does not let a stranger deposit for someone else.
+    /// @dev The fallback deliberately reads `getApproved` alone. Widening it to
+    ///      `isApprovedForAll` would mean that any owner who had ever made this market an
+    ///      operator could have their positions pushed in by anybody holding a worthless
+    ///      signature — the position is recorded to its real owner and immediately
+    ///      withdrawable, so it is griefing rather than theft, but it is surface the race
+    ///      being defended against never produces: whoever spends a permit grants a
+    ///      per-token approval, never an operator one.
+    function test_operatorApprovalDoesNotLetAStrangerDepositWithAGarbageSignature() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address signer = _giveToSigner(tokenId);
+
+        vm.prank(signer);
+        nft.setApprovalForAll(address(market), true);
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory garbage = _signPermit(IMPOSTOR_PK, tokenId, 0, deadline);
+
+        vm.prank(address(0xF00D));
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PermitRejected.selector, tokenId));
+        market.depositCollateralWithPermit(tokenId, deadline, 0, garbage);
+
+        assertEq(nft.ownerOf(tokenId), signer, "the position must not have moved");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     /// @dev Where `loans[tokenId].debtShares` lives. `MarketStorage` puts `tier` at the

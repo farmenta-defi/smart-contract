@@ -200,6 +200,13 @@ contract FarmentaMarket is
     ///      spent between this transaction being signed and being mined. Losing that race is
     ///      not a failure as long as it left this market approved, which is the only thing the
     ///      call was for.
+    ///
+    ///      The fallback checks the per-token approval and nothing else. That is exactly the
+    ///      state the lost race leaves behind — the spender is part of the signed struct, so
+    ///      whoever spends the permit grants `getApproved(tokenId) == address(this)` and no
+    ///      other approval. Accepting a blanket `isApprovedForAll` here would be wider than
+    ///      the case being defended: an owner who had ever made this market an operator could
+    ///      have any of their positions pushed in by a stranger holding a garbage signature.
     function depositCollateralWithPermit(
         uint256 tokenId,
         uint256 deadline,
@@ -211,9 +218,7 @@ contract FarmentaMarket is
 
         try IERC721Permit_v4(address(positionManager)).permit(address(this), tokenId, deadline, nonce, signature) {}
         catch {
-            if (nft.getApproved(tokenId) != address(this) && !nft.isApprovedForAll(depositor, address(this))) {
-                revert PermitRejected(tokenId);
-            }
+            if (nft.getApproved(tokenId) != address(this)) revert PermitRejected(tokenId);
         }
 
         nft.transferFrom(depositor, address(this), tokenId);
