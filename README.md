@@ -14,16 +14,17 @@ two places: spec §18 and `src/constants/RobinhoodChain.sol`, kept in sync by a 
 ## Kekuasaan owner dan batasnya
 
 **Belum diaudit.** MVP ini belum memiliki TVL nyata. Kuasa berikut harus dipahami
-sebelum menyimpan NFT jaminan atau deposit USDG. Lending dan likuidasi belum diimplementasikan; konsekuensinya di bawah mengikuti
-spesifikasi; lihat batas implementasi pada bagian “What `FarmentaMarket` does today”.
+sebelum menyimpan NFT jaminan atau deposit USDG. Lending dan likuidasi belum
+diimplementasikan; konsekuensinya di bawah mengikuti spesifikasi. Lihat batas
+implementasi pada bagian “What `FarmentaMarket` does today”.
 
 1. **Kunci owner dapat mengambil seluruh aset.** `FarmentaMarket` memakai UUPS;
    `_authorizeUpgrade` dibatasi `onlyOwner`, dengan `Ownable2StepUpgradeable` untuk
    perpindahan ownership. Owner EOA dalam desain MVP dapat mengganti seluruh logika,
    termasuk mengambil semua NFT jaminan dan deposit USDG, dalam satu transaksi tanpa
    peringatan. Ini risiko terbesar protokol. **Tidak ada timelock.**
-   Dua langkah perpindahan ownership tidak memberi
-   jeda pada upgrade. Ini diterima hanya untuk MVP tanpa TVL nyata dan belum diaudit.
+   Dua langkah perpindahan ownership tidak memberi jeda pada upgrade. Ini diterima
+   hanya untuk MVP tanpa TVL nyata dan belum diaudit.
    Sebelum dana sungguhan, timelock pada `_authorizeUpgrade` wajib diterapkan, dengan
    `pause` dikecualikan agar respons darurat tetap instan (FAR-21). Timelock memberi
    jeda; ia tidak menghapus kuasa mengganti logika. Pengungkapan ini wajib diperbarui
@@ -44,6 +45,24 @@ spesifikasi; lihat batas implementasi pada bagian “What `FarmentaMarket` does 
    disampaikan di frontend. Keduanya tidak mencabut kuasa owner; spesifikasi belum
    menetapkan pembatasan laju atau lantai untuk mencabutnya. Sumber: `ARCHITECTURE.md`
    §6.5, **§15 no. 11**; syarat simulasi: §15 no. 3.
+
+3. **Lantai reserve tidak mengikat pemegang kunci upgrade.** Aturan §7 membatasi
+   penarikan rutin oleh owner lewat `withdrawReserves`: lantai dihitung dari
+   `totalAssets × reserveFloorBps / 10_000` (1% blue-chip, 2,5% meme), dan hanya reserve
+   di atas lantai yang boleh ditarik, sebatas kas tersedia. Bad debt tetap dapat
+   menghabiskan reserve, termasuk bagian di bawah lantai. **`withdrawReserves` dan
+   lantai ini belum diimplementasikan pada versi kustodi saat ini** (FAR-12).
+   Setelah diterapkan pun, owner dapat mengganti aturan lantai melalui upgrade dan
+   mengambil aset dalam satu transaksi. Lantai mencegah penarikan rutin melewati batas;
+   ia bukan jaminan terhadap pemegang kunci upgrade. Risiko ini diterima hanya untuk
+   MVP tanpa TVL nyata, dengan syarat yang sama seperti kuasa upgrade: timelock pada
+   `_authorizeUpgrade` wajib sebelum dana sungguhan, dengan `pause` tetap instan.
+   Timelock menunda perubahan aturan, bukan membuat lantai kebal terhadap upgrade.
+   Sumber: `ARCHITECTURE.md` §7, **§15 no. 13**.
+
+Ketiga poin merujuk SOT
+[`farmenta-defi/docs/ARCHITECTURE.md`](https://github.com/farmenta-defi/docs/blob/main/ARCHITECTURE.md)
+v0.9. Penyampaian risiko di frontend adalah pekerjaan terpisah dari FAR-14.
 
 ## Setup
 
