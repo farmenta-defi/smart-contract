@@ -11,6 +11,40 @@ two places: spec §18 and `src/constants/RobinhoodChain.sol`, kept in sync by a 
 > **Status: pre-alpha.** Not audited, not deployed, not usable. Do not send funds anywhere
 > derived from this code.
 
+## Kekuasaan owner dan batasnya
+
+**Belum diaudit.** MVP ini belum memiliki TVL nyata. Kuasa berikut harus dipahami
+sebelum menyimpan NFT jaminan atau deposit USDG. Lending dan likuidasi belum diimplementasikan; konsekuensinya di bawah mengikuti
+spesifikasi; lihat batas implementasi pada bagian “What `FarmentaMarket` does today”.
+
+1. **Kunci owner dapat mengambil seluruh aset.** `FarmentaMarket` memakai UUPS;
+   `_authorizeUpgrade` dibatasi `onlyOwner`, dengan `Ownable2StepUpgradeable` untuk
+   perpindahan ownership. Owner EOA dalam desain MVP dapat mengganti seluruh logika,
+   termasuk mengambil semua NFT jaminan dan deposit USDG, dalam satu transaksi tanpa
+   peringatan. Ini risiko terbesar protokol. **Tidak ada timelock.**
+   Dua langkah perpindahan ownership tidak memberi
+   jeda pada upgrade. Ini diterima hanya untuk MVP tanpa TVL nyata dan belum diaudit.
+   Sebelum dana sungguhan, timelock pada `_authorizeUpgrade` wajib diterapkan, dengan
+   `pause` dikecualikan agar respons darurat tetap instan (FAR-21). Timelock memberi
+   jeda; ia tidak menghapus kuasa mengganti logika. Pengungkapan ini wajib diperbarui
+   ketika FAR-21 diterapkan. Sumber: `ARCHITECTURE.md` §4.1, **§15 no. 9**.
+
+2. **Owner dapat membuat pinjaman sehat menjadi likuidatable.** Owner dapat menurunkan
+   liquidation threshold (LT) sebuah pool sedalam dan secepat apa pun, tanpa batas laju
+   maupun lantai, termasuk seketika melalui `updateTerms`. Pool harus dibekukan dahulu
+   jika LT turun ke atau di bawah max LTV; pembekuan itu membatasi pinjaman baru, bukan
+   melindungi pinjaman yang sudah ada. Menurut spesifikasi, perubahan parameter berlaku
+   **seketika ke pinjaman yang sudah ada**: LT efektif mengikuti jadwal jika memakai
+   `scheduleLtRamp`, atau langsung berubah jika memakai `updateTerms`. Peminjam yang
+   tidak melakukan kesalahan tetap dapat dilikuidasi dan menanggung bonus likuidator.
+   Kuasa ini diterima untuk ketanggapan operasional MVP terhadap oracle rusak, perubahan
+   hook, atau token ter-rug. Satu-satunya mitigasi adalah keterbacaan jadwal ramp on-chain
+   oleh siapa pun; owner tidak wajib memakai ramp dan jadwal itu tidak membatasi kuasanya.
+   Sebelum TVL nyata, simulasi parameter risiko wajib dilakukan dan konsekuensi ini harus
+   disampaikan di frontend. Keduanya tidak mencabut kuasa owner; spesifikasi belum
+   menetapkan pembatasan laju atau lantai untuk mencabutnya. Sumber: `ARCHITECTURE.md`
+   §6.5, **§15 no. 11**; syarat simulasi: §15 no. 3.
+
 ## Setup
 
 ```bash
@@ -138,25 +172,14 @@ hard-coded constant against another.
 
 ## Trust assumptions
 
-Stated plainly, because the MVP is neither audited nor timelocked:
+The owner powers are disclosed above. Other trust assumptions:
 
-- **`FarmentaMarket` is UUPS upgradeable, and the owner can upgrade it at any time with no
-  delay.** The market custodies collateral NFTs and holds USDG deposits, so whoever holds
-  the owner key can replace its entire logic — including taking everything — in a single
-  transaction, without warning. This is the largest risk in the protocol. It is accepted
-  only because the MVP has no real TVL; a timelock on `_authorizeUpgrade` (with `pause`
-  exempt so emergencies stay instant) is required before real funds. Spec §4.1, §15.
 - Only the market sits behind a proxy. `PositionValuer`, `PriceOracle`, `CollateralPolicy`
   and `InterestRateModel` are plain contracts held as immutables and changed by upgrading —
   every extra proxy doubles the storage-collision surface without adding a capability.
 - The owner can `pause`, and pausing halts liquidations too. Robinhood Chain publishes no
   Chainlink L2 Sequencer Uptime Feed, so pausing is the only sequencer-downtime mitigation
   available (spec §5.2, §15.1).
-- **The owner can make a healthy loan liquidatable**, by lowering a pool's liquidation
-  threshold with no rate limit and no floor (spec §6.5). A borrower who did nothing wrong
-  then pays the liquidator bonus. Spec §15 rates this in the same class as the upgrade key,
-  and it is accepted for the same reason. The only mitigation is legibility: the LT ramp is
-  scheduled on-chain, so a borrower can see when their position falls. Spec §15 no. 11.
 - Robinhood Chain is L2BEAT **Stage 0** with 2 validators; the sequencer can filter
   transactions. "A liquidation can always be submitted" is an assumption, not a guarantee.
 - **ETH sent to the market cannot be recovered.** `receive()` is open because the fee,
