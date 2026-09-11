@@ -17,7 +17,9 @@ contract InterestRateModel is IInterestRateModel {
     error TierNotSet();
     error UtilizationTooHigh(uint256 utilization);
 
-    constructor(ICollateralPolicy.Tier tier) {
+    constructor(
+        ICollateralPolicy.Tier tier
+    ) {
         if (tier == ICollateralPolicy.Tier.BLUE_CHIP) {
             kink = 80e16;
             slope1PerYear = 4e16;
@@ -31,7 +33,9 @@ contract InterestRateModel is IInterestRateModel {
         }
     }
 
-    function ratePerSecond(uint256 utilization) external view returns (uint256) {
+    function ratePerSecond(
+        uint256 utilization
+    ) external view returns (uint256) {
         if (utilization > WAD) revert UtilizationTooHigh(utilization);
 
         uint256 annualRate = utilization <= kink
