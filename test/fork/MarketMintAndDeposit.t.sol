@@ -2,8 +2,12 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -313,11 +317,7 @@ contract MarketMintAndDepositForkTest is MarketForkTest {
     ///      liquidity never calls it, and that one bit is all the policy reads.
     function test_hookThatFailsTheBitCheckRevertsAndLeavesNothingBehind() public {
         address hook = address((uint160(0xF00D) << 144) | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG);
-        PoolKey memory key = PoolKey({
-            currency0: wethKey.currency0, currency1: wethKey.currency1, fee: 3000, tickSpacing: 60, hooks: IHooks(hook)
-        });
-        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(wethKey.toId());
-        poolManager.initialize(key, sqrtPriceX96);
+        PoolKey memory key = _initPool(hook);
 
         vm.prank(owner);
         policy.setHookAllowlist(hook, true);
@@ -332,6 +332,43 @@ contract MarketMintAndDepositForkTest is MarketForkTest {
 
         vm.prank(borrower);
         vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
+        market.mintAndDeposit(p, permit, signature);
+
+        _assertNothingMoved(before, nextId);
+    }
+
+    /// @notice A vault deposit made from inside the mint is refused, so it cannot be paid out as
+    ///         change.
+    /// @dev ERC-20 change is whatever the market holds above its balance from before the caller
+    ///      paid in, so anything else landing mid-mint would be counted with it. A vault deposit
+    ///      is the one inflow that hands its sender something back: a pool hook that deposits
+    ///      while liquidity is added would end up holding shares, and the minter holding the
+    ///      deposit. The hook passes the §6.1 bit check — that check is about removing liquidity,
+    ///      not adding it — so listing alone would not stop it. `_deposit` refuses re-entry, the
+    ///      hook's call fails, and the whole mint unwinds.
+    function test_aVaultDepositFromInsideTheMintIsRefused() public {
+        address hook = address((uint160(0xDEF0) << 144) | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
+        deployCodeTo("MarketMintAndDeposit.t.sol:VaultDepositingHook", abi.encode(market), hook);
+        deal(RobinhoodChain.USDG, hook, 10_000e6);
+
+        PoolKey memory key = _initPool(hook);
+        _listPool(key, TierPresets.blueChip().minPositionUsd, 0);
+
+        FarmentaMarket.MintParams memory p = _inRange(key, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 0);
+        Balances memory before = _balances();
+        uint256 nextId = positionManager.nextTokenId();
+
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                hook,
+                IHooks.afterAddLiquidity.selector,
+                abi.encodeWithSelector(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
         market.mintAndDeposit(p, permit, signature);
 
         _assertNothingMoved(before, nextId);
@@ -562,5 +599,46 @@ contract MarketMintAndDepositForkTest is MarketForkTest {
         b.marketUsdg = usdg.balanceOf(address(market));
         b.poolManagerWeth = weth.balanceOf(RobinhoodChain.POOL_MANAGER);
         b.poolManagerUsdg = usdg.balanceOf(RobinhoodChain.POOL_MANAGER);
+    }
+
+    /// @dev A fresh WETH/USDG pool behind `hook`, opened at the fixture pool's price. Nothing on
+    ///      the chain pairs USDG with the hook shapes these tests need, so they make their own.
+    function _initPool(
+        address hook
+    ) internal returns (PoolKey memory key) {
+        key = PoolKey({
+            currency0: wethKey.currency0, currency1: wethKey.currency1, fee: 3000, tickSpacing: 60, hooks: IHooks(hook)
+        });
+        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(wethKey.toId());
+        poolManager.initialize(key, sqrtPriceX96);
+    }
+}
+
+/// @notice A hook that deposits into the market while liquidity is being added to its pool.
+/// @dev The re-entry `FarmentaMarket._deposit` refuses. Were it allowed, the hook would keep the
+///      shares while the deposited USDG sat above the market's pre-mint balance and was paid
+///      out as the minter's change.
+contract VaultDepositingHook {
+    FarmentaMarket internal immutable market;
+
+    constructor(
+        FarmentaMarket market_
+    ) {
+        market = market_;
+    }
+
+    function afterAddLiquidity(
+        address,
+        PoolKey calldata,
+        IPoolManager.ModifyLiquidityParams calldata,
+        BalanceDelta,
+        BalanceDelta,
+        bytes calldata
+    ) external returns (bytes4, BalanceDelta) {
+        IERC20 usdg = IERC20(market.asset());
+        uint256 amount = usdg.balanceOf(address(this));
+        usdg.approve(address(market), amount);
+        market.deposit(amount, address(this));
+        return (IHooks.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 }
