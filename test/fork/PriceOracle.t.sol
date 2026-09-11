@@ -62,6 +62,18 @@ contract PriceOracleForkTest is ForkTest {
         assertEq(oracle.price(Currency.wrap(RobinhoodChain.NATIVE)), oracle.price(Currency.wrap(RobinhoodChain.WETH)));
     }
 
+    function test_nativeEthPriceMatchesThePinnedChainlinkAnswer() public view {
+        assertEq(oracle.price(Currency.wrap(RobinhoodChain.NATIVE)), 252_657_000_000 * 1e10);
+    }
+
+    function test_realOracleStaysWithinTheSpotDeviationGateForInRangeFixtures() public {
+        PositionValuer productionValuer = new PositionValuer(positionManager, stateView, oracle);
+
+        _assertWithinSpotDeviationGate(productionValuer, Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        _assertWithinSpotDeviationGate(productionValuer, Fixtures.POS_ETH_USDG_IN_RANGE);
+        _assertWithinSpotDeviationGate(productionValuer, Fixtures.POS_WETH_USDG_WIDE_IN_RANGE);
+    }
+
     function test_realOracleValuesAllFivePositionFixtures() public {
         MockPriceOracle mock = new MockPriceOracle();
         _copyPricesTo(mock);
@@ -100,5 +112,12 @@ contract PriceOracleForkTest is ForkTest {
         assertEq(actual.principalUsd, expected.principalUsd, "principalUsd");
         assertEq(actual.feesUsd, expected.feesUsd, "feesUsd");
         assertEq(actual.spotDeviationBps, expected.spotDeviationBps, "spotDeviationBps");
+    }
+
+    function _assertWithinSpotDeviationGate(
+        PositionValuer valuer,
+        uint256 tokenId
+    ) internal view {
+        assertLt(valuer.value(tokenId).spotDeviationBps, 200, "oracle and pool must agree within the borrow gate");
     }
 }

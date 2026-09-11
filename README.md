@@ -46,7 +46,7 @@ src/
 test/
   base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
               PositionMinter (mints positions in the fork for shapes the chain lacks)
-  mocks/      MockPriceOracle and MockAggregatorV3 — settable prices for isolated valuation
+  mocks/      MockPriceOracle and MockAggregatorV3: settable prices for isolated valuation
               and Chainlink checks; MockERC20 — a 6-decimal asset for the vault off-fork
   unit/       no network
   fork/       pinned-block reads against live Uniswap v4 state

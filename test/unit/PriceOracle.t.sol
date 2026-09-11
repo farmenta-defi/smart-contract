@@ -59,6 +59,14 @@ contract PriceOracleTest is Test {
         assertEq(oracle.decimals(NATIVE), 18);
     }
 
+    function test_priceAndDecimalsRemainAvailableAfterTokenIsDisabled() public {
+        vm.prank(OWNER);
+        policy.setTokenConfig(WETH, false, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(ethUsd));
+
+        assertEq(oracle.price(WETH), 2520e18);
+        assertEq(oracle.decimals(WETH), 18);
+    }
+
     function test_priceAcceptsAFeedUpdatedTwentyFourHoursAgo() public {
         ethUsd.setAnswer(2520e8, block.timestamp - 24 hours);
         assertEq(oracle.price(WETH), 2520e18);
@@ -81,7 +89,7 @@ contract PriceOracleTest is Test {
     }
 
     function test_unlistedTokenReverts() public {
-        vm.expectRevert(abi.encodeWithSelector(PriceOracle.TokenNotConfigured.selector, UNKNOWN));
+        vm.expectRevert(abi.encodeWithSelector(PriceOracle.PriceFeedNotConfigured.selector, UNKNOWN));
         oracle.price(UNKNOWN);
     }
 }

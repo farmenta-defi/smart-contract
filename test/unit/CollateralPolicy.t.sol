@@ -31,8 +31,8 @@ contract CollateralPolicyTest is Test {
         policy = new CollateralPolicy(usdg, owner);
 
         vm.startPrank(owner);
-        policy.setTokenConfig(usdg, true, ICollateralPolicy.Tier.BLUE_CHIP, 6, address(0));
-        policy.setTokenConfig(weth, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(0));
+        policy.setTokenConfig(usdg, true, ICollateralPolicy.Tier.BLUE_CHIP, 6, address(1));
+        policy.setTokenConfig(weth, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(1));
         policy.setTokenConfig(memeToken, true, ICollateralPolicy.Tier.MEME, 18, address(0));
         vm.stopPrank();
     }
@@ -121,11 +121,19 @@ contract CollateralPolicyTest is Test {
         policy.list(_blueChipKey(address(0)), _blueChipParams());
     }
 
+    function test_enabledBlueChipRequiresAPriceFeed() public {
+        Currency currency = Currency.wrap(address(0xF00D));
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.PriceFeedRequiredForBlueChip.selector, currency));
+        policy.setTokenConfig(currency, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(0));
+    }
+
     /// @dev §1: the MVP only takes pairs quoted in USDG.
     function test_pairMustQuoteInUsdg() public {
         Currency other = Currency.wrap(address(0xCAFE));
         vm.prank(owner);
-        policy.setTokenConfig(other, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(0));
+        policy.setTokenConfig(other, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(1));
 
         PoolKey memory key =
             PoolKey({currency0: weth, currency1: other, fee: 500, tickSpacing: 10, hooks: IHooks(address(0))});
