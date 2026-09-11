@@ -48,6 +48,7 @@ contract TwapRecorderForkTest is ForkTest {
         // This measures the recorder call body against the deployed StateView, excluding
         // transaction base and calldata. Keep the bound loose across Foundry stable bumps;
         // record the measured value in the PR against ARCHITECTURE.md §13's ~30k target.
+        emit log_named_uint("routine recordBatch gas", gasUsed);
         assertLt(gasUsed, 500_000, "routine batch exceeded 100k gas per live pool");
     }
 
