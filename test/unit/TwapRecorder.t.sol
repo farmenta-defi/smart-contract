@@ -83,6 +83,17 @@ contract TwapRecorderTest is Test {
         recorder.consult(poolId, 1800);
     }
 
+    function test_RevertWhenPoolHasNoRecordedObservation() public {
+        vm.expectRevert(TwapRecorder.TwapUnavailable.selector);
+        recorder.consult(poolId, 1800);
+    }
+
+    function test_RevertWhenConsultWindowIsZero() public {
+        _record(100);
+        vm.expectRevert(TwapRecorder.TwapUnavailable.selector);
+        recorder.consult(poolId, 0);
+    }
+
     function test_consultInterpolatesObservationAtWindowStart() public {
         _record(100);
         _recordAfter(900, 300);
@@ -122,6 +133,15 @@ contract TwapRecorderTest is Test {
         recorder.recordBatch(keys);
         for (uint256 i = 0; i < keys.length; ++i) {
             assertEq(recorder.observationCount(keys[i].toId()), 1);
+        }
+
+        vm.warp(block.timestamp + 300);
+        for (uint256 i = 0; i < keys.length; ++i) {
+            stateView.setTick(keys[i].toId(), int24(uint24(100 + i)));
+        }
+        recorder.recordBatch(keys);
+        for (uint256 i = 0; i < keys.length; ++i) {
+            assertEq(recorder.consult(keys[i].toId(), 300), int24(uint24(i)));
         }
     }
 

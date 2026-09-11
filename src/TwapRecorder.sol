@@ -87,7 +87,8 @@ contract TwapRecorder {
         uint64 timestamp = uint64(block.timestamp);
         if (pool.observationCount != 0 && pool.lastTimestamp == timestamp) return;
 
-        (, int24 tick,,) = stateView.getSlot0(poolId);
+        (uint160 sqrtPriceX96, int24 tick,,) = stateView.getSlot0(poolId);
+        if (sqrtPriceX96 == 0) revert TwapUnavailable();
         if (pool.observationCount == 0) {
             pool.lastTimestamp = timestamp;
             pool.lastTick = tick;

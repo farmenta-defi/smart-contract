@@ -14,11 +14,14 @@ contract MockStateView {
         int24 tick
     ) external {
         _tick[poolId] = tick;
+        _initialized[poolId] = true;
     }
 
     function getSlot0(
         PoolId poolId
     ) external view returns (uint160, int24 tick, uint24, uint24) {
-        return (0, _tick[poolId], 0, 0);
+        return (_tick[poolId] == 0 && !_initialized[poolId] ? 0 : 1, _tick[poolId], 0, 0);
     }
+
+    mapping(PoolId poolId => bool) internal _initialized;
 }
