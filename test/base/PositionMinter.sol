@@ -19,9 +19,9 @@ import {ForkTest} from "./ForkTest.sol";
 ///      sitting entirely below the current price. Both were required (no real below-range
 ///      position survives on this chain: LPs close them rather than sit on a one-sided bag).
 ///
-///      Only ERC-20 pairs are minted here. The native-ETH path needs `msg.value` plumbing
-///      that nothing needs yet, and `mintAndDeposit` — the protocol function that will need
-///      it — is Phase 2 (§1 #12, §16).
+///      Only ERC-20 pairs are minted here. Native-ETH minting is exercised through the
+///      protocol's own `mintAndDeposit`, in `test/fork/MarketMintAndDeposit.t.sol`, which is
+///      where the `msg.value` plumbing lives.
 abstract contract PositionMinter is ForkTest, ERC721Holder {
     /// @dev Permit2 sits between the token and PositionManager: the token approves Permit2,
     ///      then Permit2 approves PositionManager. Skipping either half fails inside
@@ -47,7 +47,7 @@ abstract contract PositionMinter is ForkTest, ERC721Holder {
 
     /// @notice Mints a position owned by the test contract.
     /// @dev `nextTokenId()` is read before minting because `modifyLiquidities` returns
-    ///      nothing — the same trick `mintAndDeposit` will use (§4.1).
+    ///      nothing — the same trick `FarmentaMarket.mintAndDeposit` relies on (§4.1).
     function _mint(
         PoolKey memory key,
         int24 tickLower,

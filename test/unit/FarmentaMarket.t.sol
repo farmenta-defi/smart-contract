@@ -9,7 +9,11 @@ import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Pau
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol";
 
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
@@ -193,6 +197,77 @@ contract FarmentaMarketTest is Test {
         assertEq(market.owner(), stranger, "ownership did not move");
     }
 
+    /* ----------------------------- mint and deposit --------------------------- */
+
+    /// @notice ETH sent along with an ERC-20 pair is refused before anything moves.
+    /// @dev Nothing in that mint would spend it, and ETH that reaches this market has no way
+    ///      back out (§15 no. 12). Refusing it is the only way it is not lost.
+    function test_mintAndDepositRefusesEthForAnErc20Pair() public {
+        FarmentaMarket.MintParams memory p = _mintParams(_erc20Pair());
+
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NativeValueMismatch.selector, 0, 1));
+        market.mintAndDeposit{value: 1}(p, _permit(_tokens(RobinhoodChain.WETH, RobinhoodChain.USDG)), "");
+    }
+
+    /// @notice A native-ETH mint must send exactly its ETH maximum, no more and no less.
+    /// @dev `amount0Max` is the one number the caller gives for the ETH leg. Letting
+    ///      `msg.value` differ from it would give that leg two maxima, and a short one would
+    ///      only fail later, inside the settle, with nothing to say why.
+    function test_mintAndDepositNeedsExactlyAmount0MaxInEth() public {
+        FarmentaMarket.MintParams memory p = _mintParams(_nativePair());
+        ISignatureTransfer.PermitBatchTransferFrom memory permit = _permit(_tokens(RobinhoodChain.USDG));
+        uint256 max0 = p.amount0Max;
+
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NativeValueMismatch.selector, max0, max0 - 1));
+        market.mintAndDeposit{value: max0 - 1}(p, permit, "");
+
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NativeValueMismatch.selector, max0, max0 + 1));
+        market.mintAndDeposit{value: max0 + 1}(p, permit, "");
+    }
+
+    /// @notice A permit for any token other than the pool's is refused.
+    /// @dev The check that keeps lenders' USDG out of a mint. Permit2 moves the token the
+    ///      signature names, not the one the market expects, while the settle still pays in
+    ///      the pool's currency — so a permit for a worthless token would otherwise be spent
+    ///      and the position paid for out of the market's own balance.
+    function test_mintAndDepositRefusesAPermitForAnotherToken() public {
+        FarmentaMarket.MintParams memory p = _mintParams(_erc20Pair());
+
+        vm.expectRevert(FarmentaMarket.PermitDoesNotMatchPool.selector);
+        market.mintAndDeposit(p, _permit(_tokens(RobinhoodChain.WETH, address(usdg))), "");
+    }
+
+    /// @dev Order is part of the match: each entry pays for the leg at the same place.
+    function test_mintAndDepositRefusesAPermitInTheWrongOrder() public {
+        FarmentaMarket.MintParams memory p = _mintParams(_erc20Pair());
+
+        vm.expectRevert(FarmentaMarket.PermitDoesNotMatchPool.selector);
+        market.mintAndDeposit(p, _permit(_tokens(RobinhoodChain.USDG, RobinhoodChain.WETH)), "");
+    }
+
+    /// @notice A permit must cover exactly the ERC-20 legs: two for a pair, one beside ETH.
+    function test_mintAndDepositRefusesAPermitWithTheWrongLegs() public {
+        FarmentaMarket.MintParams memory erc20 = _mintParams(_erc20Pair());
+        vm.expectRevert(FarmentaMarket.PermitDoesNotMatchPool.selector);
+        market.mintAndDeposit(erc20, _permit(_tokens(RobinhoodChain.USDG)), "");
+
+        // ETH is `msg.value`, never a Permit2 transfer, so a permit that lists it is malformed.
+        FarmentaMarket.MintParams memory native = _mintParams(_nativePair());
+        uint256 max0 = native.amount0Max;
+        vm.expectRevert(FarmentaMarket.PermitDoesNotMatchPool.selector);
+        market.mintAndDeposit{value: max0}(native, _permit(_tokens(RobinhoodChain.NATIVE, RobinhoodChain.USDG)), "");
+    }
+
+    /// @dev Minting takes on new risk just as a deposit does, so pausing stops it too.
+    function test_mintAndDepositStopsWhilePaused() public {
+        vm.prank(owner);
+        market.pause();
+
+        FarmentaMarket.MintParams memory p = _mintParams(_erc20Pair());
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        market.mintAndDeposit(p, _permit(_tokens(RobinhoodChain.WETH, RobinhoodChain.USDG)), "");
+    }
+
     /* -------------------------------- provenance ------------------------------ */
 
     /// @notice Only the Uniswap PositionManager may hand this market an NFT.
@@ -236,6 +311,69 @@ contract FarmentaMarketTest is Test {
     }
 
     /* --------------------------------- helpers -------------------------------- */
+
+    /// @dev WETH sorts below USDG, so it is currency0.
+    function _erc20Pair() internal pure returns (PoolKey memory) {
+        return _pool(RobinhoodChain.WETH, RobinhoodChain.USDG);
+    }
+
+    /// @dev Native ETH is `address(0)`, which always sorts first.
+    function _nativePair() internal pure returns (PoolKey memory) {
+        return _pool(RobinhoodChain.NATIVE, RobinhoodChain.USDG);
+    }
+
+    function _pool(
+        address currency0,
+        address currency1
+    ) internal pure returns (PoolKey memory) {
+        return PoolKey({
+            currency0: Currency.wrap(currency0),
+            currency1: Currency.wrap(currency1),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+    }
+
+    function _mintParams(
+        PoolKey memory key
+    ) internal pure returns (FarmentaMarket.MintParams memory) {
+        return FarmentaMarket.MintParams({
+            poolKey: key,
+            tickLower: -600,
+            tickUpper: 600,
+            liquidity: 1e18,
+            amount0Max: 1 ether,
+            amount1Max: 1000e6,
+            hookData: ""
+        });
+    }
+
+    function _permit(
+        address[] memory tokens
+    ) internal pure returns (ISignatureTransfer.PermitBatchTransferFrom memory permit) {
+        permit.permitted = new ISignatureTransfer.TokenPermissions[](tokens.length);
+        for (uint256 i; i < tokens.length; ++i) {
+            permit.permitted[i] = ISignatureTransfer.TokenPermissions({token: tokens[i], amount: type(uint256).max});
+        }
+        permit.deadline = type(uint256).max;
+    }
+
+    function _tokens(
+        address a
+    ) internal pure returns (address[] memory tokens) {
+        tokens = new address[](1);
+        tokens[0] = a;
+    }
+
+    function _tokens(
+        address a,
+        address b
+    ) internal pure returns (address[] memory tokens) {
+        tokens = new address[](2);
+        tokens[0] = a;
+        tokens[1] = b;
+    }
 
     function _marketStorageLocation() internal pure returns (bytes32) {
         return 0x7264a1ba9a51633de6d083d092b5001ae1c4b527f9b0578321c709cd9ac3df00;
