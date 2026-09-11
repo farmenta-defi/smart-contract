@@ -85,7 +85,7 @@ contract TwapRecorder {
         PoolId poolId = key.toId();
         PoolState storage pool = _pools[poolId];
         uint64 timestamp = uint64(block.timestamp);
-        if (pool.lastTimestamp == timestamp) return;
+        if (pool.observationCount != 0 && pool.lastTimestamp == timestamp) return;
 
         (, int24 tick,,) = stateView.getSlot0(poolId);
         if (pool.observationCount == 0) {
@@ -118,7 +118,8 @@ contract TwapRecorder {
         uint64 target = uint64(block.timestamp - window);
         Observation memory oldest = _observationAt(poolId, pool, 0);
         Observation memory latest = _observationAt(poolId, pool, pool.observationCount - 1);
-        if (oldest.timestamp > target || latest.timestamp < block.timestamp - STALE_THRESHOLD) {
+        uint64 staleAt = block.timestamp > STALE_THRESHOLD ? uint64(block.timestamp - STALE_THRESHOLD) : 0;
+        if (oldest.timestamp > target || latest.timestamp < staleAt) {
             revert TwapUnavailable();
         }
 
