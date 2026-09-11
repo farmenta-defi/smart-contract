@@ -26,9 +26,9 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    Dua langkah perpindahan ownership tidak memberi jeda pada upgrade. Ini diterima
    hanya untuk MVP tanpa TVL nyata dan belum diaudit.
    Sebelum dana sungguhan, timelock pada `_authorizeUpgrade` wajib diterapkan, dengan
-   `pause` dikecualikan agar respons darurat tetap instan (FAR-21). Timelock memberi
-   jeda; ia tidak menghapus kuasa mengganti logika. Pengungkapan ini wajib diperbarui
-   ketika FAR-21 diterapkan. Sumber: `ARCHITECTURE.md` §4.1, **§15 no. 9**.
+   `pause` dikecualikan agar respons darurat tetap instan. Timelock memberi jeda; ia
+   tidak menghapus kuasa mengganti logika. Pengungkapan ini wajib diperbarui ketika
+   timelock diterapkan. Sumber: `ARCHITECTURE.md` §4.1, **§15 no. 9**.
 
 2. **Owner dapat membuat pinjaman sehat menjadi likuidatable.** Owner dapat menurunkan
    liquidation threshold (LT) sebuah pool sedalam dan secepat apa pun, tanpa batas laju
@@ -51,7 +51,7 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    `totalAssets × reserveFloorBps / 10_000` (1% blue-chip, 2,5% meme), dan hanya reserve
    di atas lantai yang boleh ditarik, sebatas kas tersedia. Bad debt tetap dapat
    menghabiskan reserve, termasuk bagian di bawah lantai. **`withdrawReserves` dan
-   lantai ini belum diimplementasikan pada versi kustodi saat ini** (FAR-12).
+   lantai ini belum diimplementasikan pada versi kustodi saat ini**.
    Setelah diterapkan pun, owner dapat mengganti aturan lantai melalui upgrade dan
    mengambil aset dalam satu transaksi. Lantai mencegah penarikan rutin melewati batas;
    ia bukan jaminan terhadap pemegang kunci upgrade. Risiko ini diterima hanya untuk
