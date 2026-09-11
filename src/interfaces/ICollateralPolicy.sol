@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
@@ -39,6 +40,13 @@ interface ICollateralPolicy {
         uint128 minPositionUsd;
         Tier tier;
     }
+
+    /// @notice The listing-time metadata for `currency`.
+    /// @dev `enabled` gates new listings only. Existing positions may still need its recorded
+    ///      decimals and price source to repay, withdraw, or be liquidated (§6.5).
+    function tokenConfig(
+        Currency currency
+    ) external view returns (bool enabled, Tier tier, uint8 decimals, address priceFeed);
 
     /// @notice Terms for a listed pool, with the liquidation threshold already resolved
     ///         through any active ramp.

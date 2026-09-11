@@ -24,12 +24,30 @@ contract CollateralPolicyForkTest is ForkTest {
         policy = new CollateralPolicy(Currency.wrap(RobinhoodChain.USDG), owner);
 
         vm.startPrank(owner);
-        policy.setTokenConfig(Currency.wrap(RobinhoodChain.USDG), true, ICollateralPolicy.Tier.BLUE_CHIP, 6);
-        policy.setTokenConfig(Currency.wrap(RobinhoodChain.WETH), true, ICollateralPolicy.Tier.BLUE_CHIP, 18);
+        policy.setTokenConfig(
+            Currency.wrap(RobinhoodChain.USDG),
+            true,
+            ICollateralPolicy.Tier.BLUE_CHIP,
+            6,
+            RobinhoodChain.CHAINLINK_USDG_USD
+        );
+        policy.setTokenConfig(
+            Currency.wrap(RobinhoodChain.WETH),
+            true,
+            ICollateralPolicy.Tier.BLUE_CHIP,
+            18,
+            RobinhoodChain.CHAINLINK_ETH_USD
+        );
         // Native ETH is address(0) inside a PoolKey, and two of the three fixture pools use
         // it as currency0. A policy that only handled ERC-20s would reject most of the
         // chain's ETH liquidity.
-        policy.setTokenConfig(Currency.wrap(RobinhoodChain.NATIVE), true, ICollateralPolicy.Tier.BLUE_CHIP, 18);
+        policy.setTokenConfig(
+            Currency.wrap(RobinhoodChain.NATIVE),
+            true,
+            ICollateralPolicy.Tier.BLUE_CHIP,
+            18,
+            RobinhoodChain.CHAINLINK_ETH_USD
+        );
         vm.stopPrank();
     }
 
@@ -87,7 +105,13 @@ contract CollateralPolicyForkTest is ForkTest {
         _list(key);
 
         vm.prank(owner);
-        policy.setTokenConfig(Currency.wrap(RobinhoodChain.NATIVE), false, ICollateralPolicy.Tier.BLUE_CHIP, 18);
+        policy.setTokenConfig(
+            Currency.wrap(RobinhoodChain.NATIVE),
+            false,
+            ICollateralPolicy.Tier.BLUE_CHIP,
+            18,
+            RobinhoodChain.CHAINLINK_ETH_USD
+        );
 
         vm.expectRevert(
             abi.encodeWithSelector(CollateralPolicy.TokenNotEnabled.selector, Currency.wrap(RobinhoodChain.NATIVE))

@@ -38,6 +38,7 @@ fork. It is also DNS-hijacked by some ISPs, and `anvil` has no equivalent of cur
 src/
   FarmentaMarket.sol             custodies position NFTs, and will lend against them (spec §4.1)
   CollateralPolicy.sol           which pools may back a loan, on what terms (spec §4.5, §6)
+  PriceOracle.sol                reads policy-listed Chainlink USD feeds (spec §4.3, §5.2)
   PositionValuer.sol             values a position at oracle prices (spec §4.2, §5.1)
   constants/RobinhoodChain.sol   deployed addresses (spec §18)
   interfaces/                    ICollateralPolicy, IPositionValuer, IPriceOracle, IAggregatorV3
@@ -45,8 +46,8 @@ src/
 test/
   base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
               PositionMinter (mints positions in the fork for shapes the chain lacks)
-  mocks/      MockPriceOracle — settable prices, so the oracle can move while the pool cannot;
-              MockERC20 — a 6-decimal asset, so the vault's decimals are exercised off-fork
+  mocks/      MockPriceOracle and MockAggregatorV3: settable prices for isolated valuation
+              and Chainlink checks; MockERC20 — a 6-decimal asset for the vault off-fork
   unit/       no network
   fork/       pinned-block reads against live Uniswap v4 state
   invariant/  properties asserted across arbitrary call sequences
