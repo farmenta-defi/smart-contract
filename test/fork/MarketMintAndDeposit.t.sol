@@ -2,15 +2,20 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+import {SlippageCheck} from "@uniswap/v4-periphery/src/libraries/SlippageCheck.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {IEIP712} from "permit2/src/interfaces/IEIP712.sol";
 import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol";
 import {PermitHash} from "permit2/src/libraries/PermitHash.sol";
+import {SignatureVerification} from "permit2/src/libraries/SignatureVerification.sol";
 
+import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
@@ -24,6 +29,11 @@ import {MarketForkTest} from "../base/MarketForkTest.sol";
 ///      a mock, so every test here runs through the real contracts at the pinned block.
 contract MarketMintAndDepositForkTest is MarketForkTest {
     uint256 internal constant BORROWER_PK = 0xB0B5EED;
+
+    /// @dev Permit2's free errors, spelled out because `PermitErrors.sol` pins `pragma 0.8.17`
+    ///      exactly and cannot be imported into a 0.8.26 build.
+    bytes4 internal constant SIGNATURE_EXPIRED = bytes4(keccak256("SignatureExpired(uint256)"));
+    bytes4 internal constant INVALID_NONCE = bytes4(keccak256("InvalidNonce()"));
 
     /// @dev What the borrower brings, and what each leg's maximum is set to by default.
     uint256 internal constant WETH_BUDGET = 10 ether;
@@ -208,7 +218,159 @@ contract MarketMintAndDepositForkTest is MarketForkTest {
         assertEq(market.loanOf(minted).owner, address(0), "the minted record was not cleared");
     }
 
+    /* ---------------------------------- refusals ------------------------------ */
+
+    /// @notice A pool nobody listed is refused, and the whole mint unwinds.
+    /// @dev Admission runs once the position exists, so a refusal has to revert everything.
+    ///      A position left behind would sit in the market belonging to nobody it can name,
+    ///      and the borrower's tokens would be locked inside it.
+    function test_unlistedPoolRevertsAndLeavesNothingBehind() public {
+        FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 0);
+        Balances memory before = _balances();
+        uint256 nextId = positionManager.nextTokenId();
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.PoolNotListed.selector, wethKey.toId()));
+        market.mintAndDeposit(p, permit, signature);
+
+        _assertNothingMoved(before, nextId);
+    }
+
+    /// @notice A listed pool whose hook no longer passes is refused at mint time.
+    /// @dev §6.1 is checked again at intake, not only at listing: an allowlisting can be
+    ///      revoked, and a mint must not be the way around that. No pool on the chain pairs
+    ///      USDG with a hook that touches remove-liquidity, so one is created here. Its hook
+    ///      address carries only the `afterRemoveLiquidity` bit and has no code — adding
+    ///      liquidity never calls it, and that one bit is all the policy reads.
+    function test_hookThatFailsTheBitCheckRevertsAndLeavesNothingBehind() public {
+        address hook = address((uint160(0xF00D) << 144) | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG);
+        PoolKey memory key = PoolKey({
+            currency0: wethKey.currency0, currency1: wethKey.currency1, fee: 3000, tickSpacing: 60, hooks: IHooks(hook)
+        });
+        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(wethKey.toId());
+        poolManager.initialize(key, sqrtPriceX96);
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, true);
+        _listPool(key, TierPresets.blueChip().minPositionUsd, 0);
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, false);
+
+        FarmentaMarket.MintParams memory p = _inRange(key, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 0);
+        Balances memory before = _balances();
+        uint256 nextId = positionManager.nextTokenId();
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
+        market.mintAndDeposit(p, permit, signature);
+
+        _assertNothingMoved(before, nextId);
+    }
+
+    /// @notice A position worth less than the floor is refused, however it was made.
+    /// @dev Minting through the market earns no exemption from §6.2's minimum, which exists
+    ///      because dust cannot be valued precisely (§5.1).
+    function test_positionBelowTheMinimumReverts() public {
+        _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
+        FarmentaMarket.MintParams memory p = _inRange(wethKey, 1e9, WETH_BUDGET, USDG_BUDGET);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 0);
+        Balances memory before = _balances();
+        uint256 nextId = positionManager.nextTokenId();
+
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.PositionBelowMinimum.selector);
+        market.mintAndDeposit(p, permit, signature);
+
+        _assertNothingMoved(before, nextId);
+    }
+
+    /// @notice A mint that would cost more than either maximum reverts.
+    /// @dev The maxima are also what the permit pulls, so this is what keeps a mint from
+    ///      needing more than the caller sent in.
+    function test_costAboveEitherMaximumReverts() public {
+        _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
+
+        FarmentaMarket.MintParams memory tightWeth = _inRange(wethKey, LIQUIDITY, 1, USDG_BUDGET);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(tightWeth, 0);
+        vm.prank(borrower);
+        vm.expectPartialRevert(SlippageCheck.MaximumAmountExceeded.selector);
+        market.mintAndDeposit(tightWeth, permit, signature);
+
+        FarmentaMarket.MintParams memory tightUsdg = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, 1);
+        (permit, signature) = _signedPermit(tightUsdg, 0);
+        vm.prank(borrower);
+        vm.expectPartialRevert(SlippageCheck.MaximumAmountExceeded.selector);
+        market.mintAndDeposit(tightUsdg, permit, signature);
+    }
+
+    function test_expiredPermitReverts() public {
+        _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
+        FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+
+        uint256 deadline = block.timestamp - 1;
+        ISignatureTransfer.PermitBatchTransferFrom memory permit = _permitFor(p, 0, deadline);
+        bytes memory signature = _sign(BORROWER_PK, permit);
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(SIGNATURE_EXPIRED, deadline));
+        market.mintAndDeposit(p, permit, signature);
+    }
+
+    /// @notice A permit mints once. Replaying it reverts, even with the tokens to pay again.
+    function test_replayedPermitReverts() public {
+        _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
+        FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 0);
+
+        vm.prank(borrower);
+        market.mintAndDeposit(p, permit, signature);
+
+        // Topped back up, so the only thing wrong with the second attempt is the nonce.
+        deal(RobinhoodChain.WETH, borrower, WETH_BUDGET);
+        deal(RobinhoodChain.USDG, borrower, USDG_BUDGET);
+
+        vm.prank(borrower);
+        vm.expectRevert(INVALID_NONCE);
+        market.mintAndDeposit(p, permit, signature);
+    }
+
+    /// @notice A permit can only be spent by the borrower who signed it.
+    /// @dev The market spends a permit as `msg.sender`'s, because that is who the position is
+    ///      recorded to. A borrower's broadcast permit submitted by anyone else fails the
+    ///      signature check instead of buying the submitter a position with the borrower's
+    ///      tokens.
+    function test_someoneElsesPermitCannotBeSpent() public {
+        _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
+        FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 0);
+        Balances memory before = _balances();
+        uint256 nextId = positionManager.nextTokenId();
+
+        vm.prank(address(0xBAD));
+        vm.expectRevert(SignatureVerification.InvalidSigner.selector);
+        market.mintAndDeposit(p, permit, signature);
+
+        _assertNothingMoved(before, nextId);
+    }
+
     /* --------------------------------- helpers -------------------------------- */
+
+    /// @dev A refused mint leaves no position and moves no token, the borrower's or the market's.
+    function _assertNothingMoved(
+        Balances memory before,
+        uint256 nextId
+    ) internal view {
+        Balances memory now_ = _balances();
+        assertEq(positionManager.nextTokenId(), nextId, "a position was left behind");
+        assertEq(now_.borrowerWeth, before.borrowerWeth, "the borrower's WETH moved");
+        assertEq(now_.borrowerUsdg, before.borrowerUsdg, "the borrower's USDG moved");
+        assertEq(now_.marketWeth, before.marketWeth, "the market's WETH moved");
+        assertEq(now_.marketUsdg, before.marketUsdg, "the market's USDG moved");
+        assertEq(now_.poolManagerWeth, before.poolManagerWeth, "WETH reached the pool");
+        assertEq(now_.poolManagerUsdg, before.poolManagerUsdg, "USDG reached the pool");
+    }
 
     /// @dev A range ten spacings either side of the oracle price, with the given maxima.
     function _inRange(
