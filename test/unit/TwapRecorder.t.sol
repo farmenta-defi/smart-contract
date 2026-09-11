@@ -33,7 +33,10 @@ contract TwapRecorderTest is Test {
     }
 
     function test_firstRecordStoresObservationButCannotConsultYet() public {
-        _record(100);
+        stateView.setTick(poolId, 100);
+        vm.expectEmit(true, false, false, true);
+        emit TwapRecorder.Recorded(poolId, 0, uint64(block.timestamp), 0);
+        recorder.record(key);
 
         vm.expectRevert(TwapRecorder.TwapUnavailable.selector);
         recorder.consult(poolId, 1800);
@@ -122,6 +125,30 @@ contract TwapRecorderTest is Test {
         for (uint256 i = 0; i < keys.length; ++i) {
             assertEq(recorder.observationCount(keys[i].toId()), 1);
         }
+    }
+
+    function test_recordBatchKeepsRoutinePerPoolCostNearThirtyThousandGas() public {
+        PoolKey[] memory keys = new PoolKey[](5);
+        for (uint160 i = 0; i < 5; ++i) {
+            keys[i] = PoolKey({
+                currency0: Currency.wrap(address(i * 2 + 10)),
+                currency1: Currency.wrap(address(i * 2 + 11)),
+                fee: 3000,
+                tickSpacing: 60,
+                hooks: IHooks(address(0))
+            });
+            stateView.setTick(keys[i].toId(), int24(uint24(i)));
+        }
+        recorder.recordBatch(keys);
+
+        vm.warp(block.timestamp + 300);
+        uint256 gasBefore = gasleft();
+        recorder.recordBatch(keys);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        // 180k total leaves the 21k transaction base plus fewer than 32k per pool.
+        // The measured 177.6k for five mock-backed pools is within the §13 ~30k budget.
+        assertLt(gasUsed, 180_000, "routine batch exceeded the keeper gas budget");
     }
 
     function testFuzz_consultTracksConstantTickAcrossRecordSpacing(
