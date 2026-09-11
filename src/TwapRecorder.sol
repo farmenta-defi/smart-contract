@@ -123,14 +123,19 @@ contract TwapRecorder {
         }
 
         int56 cumulativeNow = _currentCumulative(pool);
-        int56 cumulativeThen = _cumulativeAt(poolId, pool, target, latest, cumulativeNow);
-        return int24((cumulativeNow - cumulativeThen) / int56(uint56(window)));
+        int56 cumulativeThen = _cumulativeAt(poolId, pool, target, oldest, latest, cumulativeNow);
+        int56 tickDelta = cumulativeNow - cumulativeThen;
+        int56 divisor = int56(uint56(window));
+        int56 twapTick = tickDelta / divisor;
+        if (tickDelta < 0 && tickDelta % divisor != 0) --twapTick;
+        return int24(twapTick);
     }
 
     function _cumulativeAt(
         PoolId poolId,
         PoolState storage pool,
         uint64 target,
+        Observation memory oldest,
         Observation memory latest,
         int56 cumulativeNow
     ) internal view returns (int56) {
@@ -140,18 +145,26 @@ contract TwapRecorder {
                 : latest.tickCumulative + int56(pool.lastTick) * int56(uint56(target - latest.timestamp));
         }
 
-        Observation memory lower = _observationAt(poolId, pool, 0);
-        if (target == lower.timestamp) return lower.tickCumulative;
-        for (uint16 i = 1; i < pool.observationCount; ++i) {
-            Observation memory upper = _observationAt(poolId, pool, i);
-            if (target == upper.timestamp) return upper.tickCumulative;
-            if (target < upper.timestamp) {
-                return lower.tickCumulative + (upper.tickCumulative - lower.tickCumulative)
-                    * int56(uint56(target - lower.timestamp)) / int56(uint56(upper.timestamp - lower.timestamp));
+        if (target == oldest.timestamp) return oldest.tickCumulative;
+
+        uint16 lowerOffset;
+        uint16 upperOffset = pool.observationCount - 1;
+        Observation memory lower = oldest;
+        while (lowerOffset + 1 < upperOffset) {
+            uint16 middleOffset = lowerOffset + (upperOffset - lowerOffset) / 2;
+            Observation memory middle = _observationAt(poolId, pool, middleOffset);
+            if (middle.timestamp <= target) {
+                lowerOffset = middleOffset;
+                lower = middle;
+            } else {
+                upperOffset = middleOffset;
             }
-            lower = upper;
         }
-        return latest.tickCumulative;
+
+        Observation memory upper = _observationAt(poolId, pool, upperOffset);
+        if (target == upper.timestamp) return upper.tickCumulative;
+        return lower.tickCumulative + (upper.tickCumulative - lower.tickCumulative)
+            * int56(uint56(target - lower.timestamp)) / int56(uint56(upper.timestamp - lower.timestamp));
     }
 
     function _currentCumulative(
