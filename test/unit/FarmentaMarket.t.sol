@@ -14,7 +14,9 @@ import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionMa
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
+import {IInterestRateModel} from "../../src/interfaces/IInterestRateModel.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
+import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @notice Unit tests for the market's proxy setup, ownership and storage layout. No network.
@@ -27,6 +29,8 @@ contract FarmentaMarketTest is Test {
     address internal posm = address(0xB0B);
     address internal policy = address(0xC0DE);
     address internal valuer = address(0xDEAD);
+    address internal oracle = address(0x0A11CE);
+    address internal interestRateModel = address(0x1A7E);
 
     MockERC20 internal usdg;
     FarmentaMarket internal implementation;
@@ -84,13 +88,31 @@ contract FarmentaMarketTest is Test {
 
     function test_zeroDependencyIsRejected() public {
         vm.expectRevert(FarmentaMarket.ZeroAddress.selector);
-        new FarmentaMarket(IPositionManager(payable(address(0))), ICollateralPolicy(policy), IPositionValuer(valuer));
+        new FarmentaMarket(
+            IPositionManager(payable(address(0))),
+            ICollateralPolicy(policy),
+            IPositionValuer(valuer),
+            IPriceOracle(oracle),
+            IInterestRateModel(interestRateModel)
+        );
 
         vm.expectRevert(FarmentaMarket.ZeroAddress.selector);
-        new FarmentaMarket(IPositionManager(payable(posm)), ICollateralPolicy(address(0)), IPositionValuer(valuer));
+        new FarmentaMarket(
+            IPositionManager(payable(posm)),
+            ICollateralPolicy(address(0)),
+            IPositionValuer(valuer),
+            IPriceOracle(oracle),
+            IInterestRateModel(interestRateModel)
+        );
 
         vm.expectRevert(FarmentaMarket.ZeroAddress.selector);
-        new FarmentaMarket(IPositionManager(payable(posm)), ICollateralPolicy(policy), IPositionValuer(address(0)));
+        new FarmentaMarket(
+            IPositionManager(payable(posm)),
+            ICollateralPolicy(policy),
+            IPositionValuer(address(0)),
+            IPriceOracle(oracle),
+            IInterestRateModel(interestRateModel)
+        );
     }
 
     /* --------------------------------- upgrades ------------------------------- */
@@ -242,7 +264,13 @@ contract FarmentaMarketTest is Test {
     }
 
     function _deployImplementation() internal returns (FarmentaMarket) {
-        return new FarmentaMarket(IPositionManager(payable(posm)), ICollateralPolicy(policy), IPositionValuer(valuer));
+        return new FarmentaMarket(
+            IPositionManager(payable(posm)),
+            ICollateralPolicy(policy),
+            IPositionValuer(valuer),
+            IPriceOracle(oracle),
+            IInterestRateModel(interestRateModel)
+        );
     }
 
     function _deployProxy(

@@ -14,6 +14,7 @@ import {ERC721PermitHash} from "@uniswap/v4-periphery/src/libraries/ERC721Permit
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
+import {InterestRateModel} from "../../src/InterestRateModel.sol";
 import {PositionValuer} from "../../src/PositionValuer.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
@@ -718,7 +719,8 @@ contract MarketCustodyForkTest is PositionMinter {
     function _deployMarket(
         ICollateralPolicy.Tier tier_
     ) internal returns (FarmentaMarket) {
-        FarmentaMarket implementation = new FarmentaMarket(positionManager, policy, valuer);
+        FarmentaMarket implementation =
+            new FarmentaMarket(positionManager, policy, valuer, oracle, new InterestRateModel(tier_));
         return FarmentaMarket(
             payable(address(
                     new ERC1967Proxy(
