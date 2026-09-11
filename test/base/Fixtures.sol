@@ -29,9 +29,11 @@ library Fixtures {
     PoolId internal constant POOL_WETH_USDG_PLAIN =
         PoolId.wrap(0x84bd4e2d8be11aeb0afc1195b38f587b61e90068548f1063fdbe448fb8cad0b6);
 
-    /// @notice A pools.trade/Doppler meme pool initialized before the pinned fork block.
-    /// @dev Its complete key comes from PoolManager's Initialize event at block 54,190,095;
-    ///      keeping the key (not merely its id) lets recorder tests exercise `record` too.
+    /// @notice A pools.trade/Doppler pool initialized before the pinned fork block.
+    /// @dev This is FIG/BALLS, not a USDG-quoted pool, so it is a recorder-only fixture.
+    ///      FAR-16 must mint its own USDG-quoted pool on the fork. Its complete key comes from
+    ///      PoolManager's Initialize event at block 54,190,095; keeping the key (not merely
+    ///      its id) lets recorder tests exercise `record` too.
     PoolId internal constant POOL_MEME_DOPPLER =
         PoolId.wrap(0xc6451046bf06c20295032cf6e05e85bb1ca35fd7aebaf30c59c33350fe3c776e);
 
@@ -40,7 +42,7 @@ library Fixtures {
             currency0: Currency.wrap(0x41F4267525a8AFf329540eF24fD83d9044758B33),
             currency1: Currency.wrap(0x7384d1F183526d83aad28bA5A5eD6dceeA211E18),
             fee: 0x800000,
-            tickSpacing: 128,
+            tickSpacing: 8,
             hooks: IHooks(HOOK_DOPPLER)
         });
     }
