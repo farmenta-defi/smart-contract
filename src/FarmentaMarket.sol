@@ -11,6 +11,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IERC721Permit_v4} from "@uniswap/v4-periphery/src/interfaces/IERC721Permit_v4.sol";
@@ -89,7 +90,7 @@ contract FarmentaMarket is
         ///      implementation backs both markets, and they differ only here.
         ICollateralPolicy.Tier tier;
         mapping(uint256 tokenId => Loan) loans;
-        mapping(PoolId poolId => uint256) poolDebt;
+        mapping(PoolId poolId => uint256) poolDebtShares;
         uint256 totalBorrowShares;
         uint256 totalBorrows;
         uint256 borrowIndex;
@@ -108,7 +109,6 @@ contract FarmentaMarket is
 
     uint256 private constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
-    uint256 private constant MINIMUM_DEBT_USDG = 10e6;
 
     /// @notice The Uniswap position NFT this market custodies.
     /// @dev Immutable in the implementation and changed by upgrading, like every other
@@ -155,6 +155,7 @@ contract FarmentaMarket is
     error InvalidBorrowRecipient(address to);
     error BorrowExceedsMaxLtv(uint256 requestedDebt, uint256 maximumDebt);
     error BorrowBelowMinimum(uint256 debt);
+    error ZeroBorrowAmount();
     error PoolDebtCapExceeded(PoolId poolId, uint256 requestedDebt, uint256 debtCap);
     error MarketDebtCapExceeded(uint256 requestedDebt, uint256 debtCap);
     error PoolNotOpenForBorrowing(PoolId poolId);
@@ -403,6 +404,7 @@ contract FarmentaMarket is
         address to
     ) external whenNotPaused nonReentrant {
         if (to == address(0) || to == address(this)) revert InvalidBorrowRecipient(to);
+        if (amount == 0) revert ZeroBorrowAmount();
         accrue();
 
         MarketStorage storage $ = _marketStorage();
@@ -413,11 +415,13 @@ contract FarmentaMarket is
         // FAR-20 installs fresh-price, USDG-bound, and spot-deviation checks at this boundary.
         ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
         uint256 requestedDebt = debtOf(tokenId) + amount;
-        uint256 maximumDebt = positionValue(tokenId) * terms.maxLtvBps / BPS;
-        if (requestedDebt > maximumDebt) revert BorrowExceedsMaxLtv(requestedDebt, maximumDebt);
-        if (requestedDebt != 0 && requestedDebt < MINIMUM_DEBT_USDG) revert BorrowBelowMinimum(requestedDebt);
-        if ($.poolDebt[loan.poolKeyId] + amount > terms.debtCapUsdg) {
-            revert PoolDebtCapExceeded(loan.poolKeyId, $.poolDebt[loan.poolKeyId] + amount, terms.debtCapUsdg);
+        uint256 requestedDebtUsd = _debtUsd(requestedDebt);
+        uint256 maximumDebtUsd = _borrowValue(tokenId) * terms.maxLtvBps / BPS;
+        if (requestedDebtUsd > maximumDebtUsd) revert BorrowExceedsMaxLtv(requestedDebtUsd, maximumDebtUsd);
+        if (requestedDebtUsd < 10e18) revert BorrowBelowMinimum(requestedDebtUsd);
+        uint256 requestedPoolDebt = _poolDebt(loan.poolKeyId) + amount;
+        if (requestedPoolDebt > terms.debtCapUsdg) {
+            revert PoolDebtCapExceeded(loan.poolKeyId, requestedPoolDebt, terms.debtCapUsdg);
         }
 
         uint256 marketDebtCap = TierPresets.forTier($.tier).maxDebtCapUsdg;
@@ -428,8 +432,8 @@ contract FarmentaMarket is
         uint256 shares = amount.mulDiv(WAD, $.borrowIndex, Math.Rounding.Ceil);
         loan.debtShares += shares;
         $.totalBorrowShares += shares;
-        $.totalBorrows += amount;
-        $.poolDebt[loan.poolKeyId] += amount;
+        $.poolDebtShares[loan.poolKeyId] += shares;
+        $.totalBorrows = $.totalBorrowShares.mulDiv($.borrowIndex, WAD);
         IERC20(asset()).safeTransfer(to, amount);
         emit Borrow(tokenId, amount);
     }
@@ -450,8 +454,8 @@ contract FarmentaMarket is
         repaid = shares.mulDiv($.borrowIndex, WAD);
         loan.debtShares -= shares;
         $.totalBorrowShares -= shares;
-        $.totalBorrows -= repaid;
-        $.poolDebt[loan.poolKeyId] -= repaid;
+        $.poolDebtShares[loan.poolKeyId] -= shares;
+        $.totalBorrows = $.totalBorrowShares.mulDiv($.borrowIndex, WAD);
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), repaid);
         emit Repay(tokenId, repaid);
     }
@@ -471,8 +475,7 @@ contract FarmentaMarket is
         if (loan.owner == address(0)) return 0;
         ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
         IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
-        uint256 cappedFees = Math.min(valuation.feesUsd, valuation.principalUsd / 10);
-        return (valuation.principalUsd + cappedFees) * (BPS - terms.removeHaircutBps) / BPS;
+        return valuation.principalUsd * (BPS - terms.removeHaircutBps) / BPS;
     }
 
     function maxBorrow(
@@ -481,9 +484,10 @@ contract FarmentaMarket is
         MarketStorage storage $ = _marketStorage();
         Loan storage loan = $.loans[tokenId];
         if (loan.owner == address(0)) return 0;
-        uint256 ltvDebt = positionValue(tokenId) * policy.termsOf(loan.poolKeyId).maxLtvBps / BPS;
-        uint256 debt = debtOf(tokenId);
-        return ltvDebt > debt ? ltvDebt - debt : 0;
+        uint256 maximumDebtUsd = _borrowValue(tokenId) * policy.termsOf(loan.poolKeyId).maxLtvBps / BPS;
+        uint256 debtUsd = _debtUsd(debtOf(tokenId));
+        if (maximumDebtUsd <= debtUsd) return 0;
+        return _usdToDebt(maximumDebtUsd - debtUsd);
     }
 
     function healthFactor(
@@ -491,9 +495,9 @@ contract FarmentaMarket is
     ) external view returns (uint256) {
         MarketStorage storage $ = _marketStorage();
         Loan storage loan = $.loans[tokenId];
-        uint256 debt = debtOf(tokenId);
-        if (debt == 0) return type(uint256).max;
-        return positionValue(tokenId) * policy.termsOf(loan.poolKeyId).ltBps * WAD / (debt * BPS);
+        uint256 debtUsd = _debtUsd(debtOf(tokenId));
+        if (debtUsd == 0) return type(uint256).max;
+        return positionValue(tokenId) * policy.termsOf(loan.poolKeyId).ltBps * WAD / (debtUsd * BPS);
     }
 
     function totalBorrows() external view returns (uint256) {
@@ -511,7 +515,7 @@ contract FarmentaMarket is
     function poolDebt(
         PoolId poolId
     ) external view returns (uint256) {
-        return _marketStorage().poolDebt[poolId];
+        return _poolDebt(poolId);
     }
 
     /// @inheritdoc ERC4626Upgradeable
@@ -619,6 +623,42 @@ contract FarmentaMarket is
 
         $.loans[tokenId] = Loan({owner: depositor, debtShares: 0, poolKeyId: key.toId(), tier: $.tier});
         emit CollateralDeposited(tokenId, depositor);
+    }
+
+    /// @dev Borrow capacity admits at most 10% of principal in unclaimed fees. Health factor
+    ///      deliberately excludes fees: their owner may claim them at any time.
+    function _borrowValue(
+        uint256 tokenId
+    ) private view returns (uint256) {
+        MarketStorage storage $ = _marketStorage();
+        Loan storage loan = $.loans[tokenId];
+        ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
+        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
+        uint256 cappedFees = Math.min(valuation.feesUsd, valuation.principalUsd / 10);
+        return (valuation.principalUsd + cappedFees) * (BPS - terms.removeHaircutBps) / BPS;
+    }
+
+    /// @dev Converts USDG-denominated debt to USD 1e18 using the configured oracle price.
+    function _debtUsd(
+        uint256 debt
+    ) private view returns (uint256) {
+        Currency assetCurrency = Currency.wrap(asset());
+        return debt.mulDiv(oracle.price(assetCurrency), 10 ** oracle.decimals(assetCurrency));
+    }
+
+    /// @dev Floors a USD value to the amount of USDG that can be borrowed without exceeding it.
+    function _usdToDebt(
+        uint256 usdValue
+    ) private view returns (uint256) {
+        Currency assetCurrency = Currency.wrap(asset());
+        return usdValue.mulDiv(10 ** oracle.decimals(assetCurrency), oracle.price(assetCurrency));
+    }
+
+    function _poolDebt(
+        PoolId poolId
+    ) private view returns (uint256) {
+        MarketStorage storage $ = _marketStorage();
+        return $.poolDebtShares[poolId].mulDiv($.borrowIndex, WAD);
     }
 
     /// @inheritdoc UUPSUpgradeable
