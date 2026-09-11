@@ -530,7 +530,11 @@ contract MarketMintAndDepositForkTest is MarketForkTest {
             tickLower: mid - 10 * spacing,
             tickUpper: mid + 10 * spacing,
             liquidity: liquidity,
+            // Safe: every maximum a test passes is a budget of at most 100,000 tokens, far below
+            // 2^128 in either token's base units.
+            // forge-lint: disable-next-line(unsafe-typecast)
             amount0Max: uint128(max0),
+            // forge-lint: disable-next-line(unsafe-typecast)
             amount1Max: uint128(max1),
             hookData: ""
         });
