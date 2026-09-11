@@ -98,7 +98,8 @@ src/
   libraries/                     PositionAmounts, PriceMath, HookPermissions, TierPresets
 test/
   base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
-              PositionMinter (mints positions in the fork for shapes the chain lacks)
+              PositionMinter (mints positions in the fork for shapes the chain lacks),
+              MarketForkTest (a market wired to real policy and valuer, mock oracle)
   mocks/      MockPriceOracle and MockAggregatorV3: settable prices for isolated valuation
               and Chainlink checks; MockERC20 — a 6-decimal asset for the vault off-fork
   unit/       no network
@@ -112,8 +113,8 @@ script/
 ## What `FarmentaMarket` does today
 
 The custody half, and only that. Positions can be deposited, deposited with a signed
-permit, withdrawn once nothing is owed, and rescued by the owner if one arrives
-unrecorded. The debt ledger, interest accrual, borrowing, repayment and liquidation
+permit, minted straight into custody from the tokens themselves, withdrawn once nothing
+is owed, and rescued by the owner if one arrives unrecorded. The debt ledger, interest accrual, borrowing, repayment and liquidation
 are Phase 1 (spec §16). The ERC-4626 side is inherited and works, but earns nothing
 yet: with no borrows, `totalAssets` is just the USDG held.
 
@@ -143,6 +144,28 @@ the resulting signature fails with nothing to say why. Its arguments also run
 deadline-then-nonce while the signed struct hashes them the other way round. A test
 signs over the four-field domain and asserts the rejection, so the trap is pinned
 rather than remembered.
+
+### Minting into custody settles through Permit2
+
+`mintAndDeposit` takes a borrower who holds tokens rather than a position to recorded
+collateral in one transaction. The position gets no leniency for being minted by the market:
+it passes the same §6.1 admission as any deposit, and a refusal reverts everything. Three
+mechanics are easy to get wrong, and `test/fork/MarketMintAndDeposit.t.sol` pins each:
+
+- **The tokenId is read before minting.** `modifyLiquidities` returns nothing, so the id comes
+  from `PositionManager.nextTokenId()`. Read afterwards, it names the next position, which
+  does not exist yet.
+- **Two approval layers.** PositionManager pays the market's debt with
+  `permit2.transferFrom`, so the token approves Permit2 and Permit2 approves PositionManager.
+  The inner allowance is sized to the caller's maximum and expires with the block, so a mint
+  can never spend lenders' USDG.
+- **Change comes back two ways.** `SWEEP` only moves what PositionManager holds, which is
+  unspent ETH. ERC-20 change never leaves the market, so the market returns it itself, reading
+  the amount from the unspent Permit2 allowance rather than from its own balance.
+
+The signature is a Permit2 `PermitBatchTransferFrom` with the market as spender. It lists the
+pool's ERC-20 currencies in pool order: both for an ERC-20 pair, or only currency1 beside
+native ETH. Native ETH is sent as `msg.value`, which must equal `amount0Max`.
 
 ## Tests
 
