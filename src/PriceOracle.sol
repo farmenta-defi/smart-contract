@@ -3,8 +3,8 @@ pragma solidity 0.8.26;
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
-import {CollateralPolicy} from "./CollateralPolicy.sol";
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
+import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 
 /// @title PriceOracle
@@ -16,15 +16,14 @@ contract PriceOracle is IPriceOracle {
     uint256 public constant MAX_PRICE_AGE = 25 hours;
     uint8 internal constant USD_DECIMALS = 18;
 
-    CollateralPolicy public immutable policy;
+    ICollateralPolicy public immutable policy;
 
-    error TokenNotConfigured(Currency currency);
     error PriceFeedNotConfigured(Currency currency);
     error InvalidPrice(Currency currency, int256 answer);
     error StalePrice(Currency currency, uint256 updatedAt);
 
     constructor(
-        CollateralPolicy policy_
+        ICollateralPolicy policy_
     ) {
         policy = policy_;
     }
@@ -66,9 +65,8 @@ contract PriceOracle is IPriceOracle {
     function _config(
         Currency currency
     ) internal view returns (uint8 tokenDecimals, address priceFeed) {
-        bool enabled;
-        (enabled,, tokenDecimals, priceFeed) = policy.tokenConfig(currency);
-        if (!enabled) revert TokenNotConfigured(currency);
+        (,, tokenDecimals, priceFeed) = policy.tokenConfig(currency);
+        if (priceFeed == address(0)) revert PriceFeedNotConfigured(currency);
     }
 
     function _scaleToUsd1e18(

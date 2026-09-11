@@ -83,6 +83,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     event LtRampScheduled(PoolId indexed poolId, uint16 ltFromBps, uint16 ltTargetBps, uint40 start, uint40 duration);
 
     error TokenNotEnabled(Currency currency);
+    error PriceFeedRequiredForBlueChip(Currency currency);
     error PairMustQuoteInUsdg();
     error HookNotPermitted(address hooks);
     error PoolAlreadyListed(PoolId poolId);
@@ -116,6 +117,9 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         uint8 decimals,
         address priceFeed
     ) external onlyOwner {
+        if (tier == Tier.BLUE_CHIP && enabled && priceFeed == address(0)) {
+            revert PriceFeedRequiredForBlueChip(currency);
+        }
         tokenConfig[currency] = TokenConfig({enabled: enabled, tier: tier, decimals: decimals, priceFeed: priceFeed});
         emit TokenConfigured(currency, enabled, tier, decimals, priceFeed);
     }
