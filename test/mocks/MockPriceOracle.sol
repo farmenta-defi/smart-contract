@@ -38,4 +38,10 @@ contract MockPriceOracle is IPriceOracle {
     ) external view returns (uint8) {
         return _decimals[currency];
     }
+
+    function priceForLiquidation(
+        Currency currency
+    ) external view returns (uint256) {
+        return this.price(currency);
+    }
 }

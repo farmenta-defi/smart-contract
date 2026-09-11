@@ -146,8 +146,10 @@ contract CollateralPolicyInvariantTest is Test {
 
     function setUp() public {
         policy = new CollateralPolicy(Currency.wrap(RobinhoodChain.USDG), address(this));
-        policy.setTokenConfig(Currency.wrap(RobinhoodChain.USDG), true, ICollateralPolicy.Tier.BLUE_CHIP, 6);
-        policy.setTokenConfig(Currency.wrap(RobinhoodChain.WETH), true, ICollateralPolicy.Tier.BLUE_CHIP, 18);
+        policy.setTokenConfig(Currency.wrap(RobinhoodChain.USDG), true, ICollateralPolicy.Tier.BLUE_CHIP, 6, address(0));
+        policy.setTokenConfig(
+            Currency.wrap(RobinhoodChain.WETH), true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(0)
+        );
 
         handler = new PolicyHandler(policy);
         policy.transferOwnership(address(handler));

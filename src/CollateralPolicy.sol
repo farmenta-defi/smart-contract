@@ -28,10 +28,13 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     /// @param tier Risk class; a pool inherits the riskier of its two tokens.
     /// @param decimals Recorded at listing (§6.3), never read live — a token that could
     ///        change its reported decimals could change every position's value.
+    /// @param priceFeed USD price source recorded with the listing (§4.3). The oracle reads
+    ///        this configuration instead of maintaining a second token registry.
     struct TokenConfig {
         bool enabled;
         Tier tier;
         uint8 decimals;
+        address priceFeed;
     }
 
     /// @notice Terms the owner writes when listing; validated against the tier preset.
@@ -72,7 +75,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
 
     mapping(PoolId poolId => Listing) internal _listings;
 
-    event TokenConfigured(Currency indexed currency, bool enabled, Tier tier, uint8 decimals);
+    event TokenConfigured(Currency indexed currency, bool enabled, Tier tier, uint8 decimals, address priceFeed);
     event HookAllowlisted(address indexed hooks, bool allowed);
     event PoolListed(PoolId indexed poolId, Tier tier, ListingParams params);
     event PoolTermsUpdated(PoolId indexed poolId, ListingParams params);
@@ -110,10 +113,11 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         Currency currency,
         bool enabled,
         Tier tier,
-        uint8 decimals
+        uint8 decimals,
+        address priceFeed
     ) external onlyOwner {
-        tokenConfig[currency] = TokenConfig({enabled: enabled, tier: tier, decimals: decimals});
-        emit TokenConfigured(currency, enabled, tier, decimals);
+        tokenConfig[currency] = TokenConfig({enabled: enabled, tier: tier, decimals: decimals, priceFeed: priceFeed});
+        emit TokenConfigured(currency, enabled, tier, decimals, priceFeed);
     }
 
     function setHookAllowlist(

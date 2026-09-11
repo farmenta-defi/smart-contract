@@ -13,6 +13,13 @@ interface IPriceOracle {
         Currency currency
     ) external view returns (uint256 usd1e18);
 
+    /// @notice USD price used when deciding whether a position is liquidatable.
+    /// @dev Kept distinct from `price` even while MVP returns the same source, so a future
+    ///      liquidation-specific source does not require changing every liquidation caller.
+    function priceForLiquidation(
+        Currency currency
+    ) external view returns (uint256 usd1e18);
+
     /// @notice Decimals of `currency`, with native ETH reported as 18.
     /// @dev Read from `decimals()` at listing time and stored, never read live: a token that
     ///      could change its reported decimals could change every position's value. §5.1

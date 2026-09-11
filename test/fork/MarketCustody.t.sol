@@ -68,9 +68,13 @@ contract MarketCustodyForkTest is PositionMinter {
         policy = new CollateralPolicy(Currency.wrap(RobinhoodChain.USDG), owner);
 
         vm.startPrank(owner);
-        policy.setTokenConfig(Currency.wrap(RobinhoodChain.USDG), true, ICollateralPolicy.Tier.BLUE_CHIP, 6);
-        policy.setTokenConfig(Currency.wrap(RobinhoodChain.WETH), true, ICollateralPolicy.Tier.BLUE_CHIP, 18);
-        policy.setTokenConfig(Currency.wrap(RobinhoodChain.NATIVE), true, ICollateralPolicy.Tier.BLUE_CHIP, 18);
+        policy.setTokenConfig(Currency.wrap(RobinhoodChain.USDG), true, ICollateralPolicy.Tier.BLUE_CHIP, 6, address(0));
+        policy.setTokenConfig(
+            Currency.wrap(RobinhoodChain.WETH), true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(0)
+        );
+        policy.setTokenConfig(
+            Currency.wrap(RobinhoodChain.NATIVE), true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(0)
+        );
         vm.stopPrank();
 
         market = _deployMarket(ICollateralPolicy.Tier.BLUE_CHIP);

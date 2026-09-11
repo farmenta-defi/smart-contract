@@ -31,9 +31,9 @@ contract CollateralPolicyTest is Test {
         policy = new CollateralPolicy(usdg, owner);
 
         vm.startPrank(owner);
-        policy.setTokenConfig(usdg, true, ICollateralPolicy.Tier.BLUE_CHIP, 6);
-        policy.setTokenConfig(weth, true, ICollateralPolicy.Tier.BLUE_CHIP, 18);
-        policy.setTokenConfig(memeToken, true, ICollateralPolicy.Tier.MEME, 18);
+        policy.setTokenConfig(usdg, true, ICollateralPolicy.Tier.BLUE_CHIP, 6, address(0));
+        policy.setTokenConfig(weth, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(0));
+        policy.setTokenConfig(memeToken, true, ICollateralPolicy.Tier.MEME, 18, address(0));
         vm.stopPrank();
     }
 
@@ -47,7 +47,7 @@ contract CollateralPolicyTest is Test {
 
         vm.startPrank(stranger);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
-        policy.setTokenConfig(weth, true, ICollateralPolicy.Tier.BLUE_CHIP, 18);
+        policy.setTokenConfig(weth, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(0));
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
         policy.setHookAllowlist(address(1), true);
@@ -114,7 +114,7 @@ contract CollateralPolicyTest is Test {
 
     function test_bothTokensMustBeEnabled() public {
         vm.prank(owner);
-        policy.setTokenConfig(weth, false, ICollateralPolicy.Tier.BLUE_CHIP, 18);
+        policy.setTokenConfig(weth, false, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(0));
 
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.TokenNotEnabled.selector, weth));
@@ -125,7 +125,7 @@ contract CollateralPolicyTest is Test {
     function test_pairMustQuoteInUsdg() public {
         Currency other = Currency.wrap(address(0xCAFE));
         vm.prank(owner);
-        policy.setTokenConfig(other, true, ICollateralPolicy.Tier.BLUE_CHIP, 18);
+        policy.setTokenConfig(other, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(0));
 
         PoolKey memory key =
             PoolKey({currency0: weth, currency1: other, fee: 500, tickSpacing: 10, hooks: IHooks(address(0))});
