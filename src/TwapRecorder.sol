@@ -1,0 +1,177 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.26;
+
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {IStateView} from "@uniswap/v4-periphery/src/interfaces/IStateView.sol";
+
+/// @title TwapRecorder
+/// @notice Permissionless tick-observation recorder for Uniswap v4 pools.
+/// @dev StateView reads slot0 through Uniswap's StateLibrary. Recording uses the previous
+///      tick for elapsed time, matching Uniswap v3's cumulative-observation convention.
+contract TwapRecorder {
+    uint16 public constant OBSERVATION_CAPACITY = 1024;
+    uint32 public constant DEFAULT_WINDOW = 1800;
+    uint32 public constant STALE_THRESHOLD = 900;
+
+    error TwapUnavailable();
+
+    struct Observation {
+        uint64 timestamp;
+        int56 tickCumulative;
+    }
+
+    struct PoolState {
+        uint64 lastTimestamp;
+        int56 tickCumulative;
+        int24 lastTick;
+        uint16 observationCount;
+        uint16 latestIndex;
+    }
+
+    IStateView public immutable stateView;
+
+    mapping(PoolId poolId => PoolState) internal _pools;
+    mapping(PoolId poolId => mapping(uint16 index => Observation)) internal _observations;
+
+    event Recorded(PoolId indexed poolId, uint16 index, uint64 timestamp, int56 tickCumulative);
+
+    constructor(
+        IStateView stateView_
+    ) {
+        stateView = stateView_;
+    }
+
+    /// @notice Records a pool's current tick if no observation exists for this timestamp.
+    function record(
+        PoolKey calldata key
+    ) external {
+        _record(key);
+    }
+
+    /// @notice Records each pool independently; repeated pools or same-block calls are no-ops.
+    function recordBatch(
+        PoolKey[] calldata keys
+    ) external {
+        for (uint256 i; i < keys.length; ++i) {
+            _record(keys[i]);
+        }
+    }
+
+    /// @notice Returns the 30-minute geometric TWAP tick for a pool.
+    function consult(
+        PoolId poolId
+    ) external view returns (int24) {
+        return _consult(poolId, DEFAULT_WINDOW);
+    }
+
+    /// @notice Returns the geometric TWAP tick over `window` seconds.
+    function consult(
+        PoolId poolId,
+        uint32 window
+    ) external view returns (int24) {
+        return _consult(poolId, window);
+    }
+
+    function observationCount(
+        PoolId poolId
+    ) external view returns (uint16) {
+        return _pools[poolId].observationCount;
+    }
+
+    function _record(
+        PoolKey calldata key
+    ) internal {
+        PoolId poolId = key.toId();
+        PoolState storage pool = _pools[poolId];
+        uint64 timestamp = uint64(block.timestamp);
+        if (pool.lastTimestamp == timestamp) return;
+
+        (, int24 tick,,) = stateView.getSlot0(poolId);
+        if (pool.observationCount == 0) {
+            pool.lastTimestamp = timestamp;
+            pool.lastTick = tick;
+            pool.observationCount = 1;
+            _observations[poolId][0] = Observation({timestamp: timestamp, tickCumulative: 0});
+            emit Recorded(poolId, 0, timestamp, 0);
+            return;
+        }
+
+        pool.tickCumulative += int56(pool.lastTick) * int56(uint56(timestamp - pool.lastTimestamp));
+        uint16 index = pool.observationCount < OBSERVATION_CAPACITY ? pool.observationCount : _next(pool.latestIndex);
+        if (pool.observationCount < OBSERVATION_CAPACITY) ++pool.observationCount;
+
+        pool.latestIndex = index;
+        pool.lastTimestamp = timestamp;
+        pool.lastTick = tick;
+        _observations[poolId][index] = Observation({timestamp: timestamp, tickCumulative: pool.tickCumulative});
+        emit Recorded(poolId, index, timestamp, pool.tickCumulative);
+    }
+
+    function _consult(
+        PoolId poolId,
+        uint32 window
+    ) internal view returns (int24) {
+        PoolState storage pool = _pools[poolId];
+        if (window == 0 || pool.observationCount == 0 || block.timestamp < window) revert TwapUnavailable();
+
+        uint64 target = uint64(block.timestamp - window);
+        Observation memory oldest = _observationAt(poolId, pool, 0);
+        Observation memory latest = _observationAt(poolId, pool, pool.observationCount - 1);
+        if (oldest.timestamp > target || latest.timestamp < block.timestamp - STALE_THRESHOLD) {
+            revert TwapUnavailable();
+        }
+
+        int56 cumulativeNow = _currentCumulative(pool);
+        int56 cumulativeThen = _cumulativeAt(poolId, pool, target, latest, cumulativeNow);
+        return int24((cumulativeNow - cumulativeThen) / int56(uint56(window)));
+    }
+
+    function _cumulativeAt(
+        PoolId poolId,
+        PoolState storage pool,
+        uint64 target,
+        Observation memory latest,
+        int56 cumulativeNow
+    ) internal view returns (int56) {
+        if (target >= latest.timestamp) {
+            return target == uint64(block.timestamp)
+                ? cumulativeNow
+                : latest.tickCumulative + int56(pool.lastTick) * int56(uint56(target - latest.timestamp));
+        }
+
+        Observation memory lower = _observationAt(poolId, pool, 0);
+        if (target == lower.timestamp) return lower.tickCumulative;
+        for (uint16 i = 1; i < pool.observationCount; ++i) {
+            Observation memory upper = _observationAt(poolId, pool, i);
+            if (target == upper.timestamp) return upper.tickCumulative;
+            if (target < upper.timestamp) {
+                return lower.tickCumulative + (upper.tickCumulative - lower.tickCumulative)
+                    * int56(uint56(target - lower.timestamp)) / int56(uint56(upper.timestamp - lower.timestamp));
+            }
+            lower = upper;
+        }
+        return latest.tickCumulative;
+    }
+
+    function _currentCumulative(
+        PoolState storage pool
+    ) internal view returns (int56) {
+        return pool.tickCumulative + int56(pool.lastTick) * int56(uint56(block.timestamp - pool.lastTimestamp));
+    }
+
+    function _observationAt(
+        PoolId poolId,
+        PoolState storage pool,
+        uint16 offset
+    ) internal view returns (Observation memory) {
+        uint16 oldestIndex = pool.observationCount < OBSERVATION_CAPACITY ? 0 : _next(pool.latestIndex);
+        return _observations[poolId][uint16((uint256(oldestIndex) + offset) % OBSERVATION_CAPACITY)];
+    }
+
+    function _next(
+        uint16 index
+    ) internal pure returns (uint16) {
+        return index + 1 == OBSERVATION_CAPACITY ? 0 : index + 1;
+    }
+}
