@@ -300,8 +300,14 @@ contract FarmentaMarket is
     ///      Each leg brings its maximum and gets the change back. ERC-20 legs are pulled in
     ///      full through the permit; ETH arrives as `msg.value`, which must equal `amount0Max`
     ///      for a native pool and be zero otherwise. A mint that would cost more than either
-    ///      maximum reverts inside PositionManager. The permit's own deadline is the caller's
-    ///      deadline, so PositionManager is given the current block.
+    ///      maximum reverts inside PositionManager, which is handed the permit's deadline — the
+    ///      one the caller signed.
+    ///
+    ///      **§4.1 says the change comes back through `SWEEP`; for an ERC-20 leg it cannot.**
+    ///      `SWEEP` sends PositionManager's own balance, while `SETTLE_PAIR` pays an ERC-20 leg
+    ///      straight from this market through Permit2, so that change never leaves the market.
+    ///      Both sweeps are still encoded and return the unspent ETH; ERC-20 change is sent back
+    ///      by `_returnChange`.
     function mintAndDeposit(
         MintParams calldata p,
         ISignatureTransfer.PermitBatchTransferFrom calldata permit,
@@ -321,6 +327,14 @@ contract FarmentaMarket is
         // the Permit2 it pays through, and this way the two cannot disagree.
         IPermit2 permit2 = IPermit2(address(Permit2Forwarder(address(positionManager)).permit2()));
 
+        // What the market already held of each ERC-20 leg before the caller paid in. The change
+        // is whatever sits above this once the mint is done.
+        uint256[2] memory held;
+        for (uint256 i = firstLeg; i < 2; ++i) {
+            (Currency currency,) = _leg(p, i);
+            held[i] = IERC20(Currency.unwrap(currency)).balanceOf(address(this));
+        }
+
         permit2.permitTransferFrom(permit, transfers, msg.sender, signature);
         for (uint256 i = firstLeg; i < 2; ++i) {
             (Currency currency, uint128 amountMax) = _leg(p, i);
@@ -328,13 +342,13 @@ contract FarmentaMarket is
         }
 
         tokenId = positionManager.nextTokenId();
-        positionManager.modifyLiquidities{value: msg.value}(_mintActions(p), block.timestamp);
+        positionManager.modifyLiquidities{value: msg.value}(_mintActions(p), permit.deadline);
 
         _acceptCollateral(msg.sender, tokenId);
 
         for (uint256 i = firstLeg; i < 2; ++i) {
             (Currency currency,) = _leg(p, i);
-            _refundUnspent(permit2, currency);
+            _returnChange(currency, held[i]);
         }
     }
 
@@ -541,33 +555,38 @@ contract FarmentaMarket is
         }
     }
 
-    /// @dev The two approvals `SETTLE_PAIR` needs. PositionManager pays a locker's debt with
-    ///      `permit2.transferFrom`, so the token approves Permit2 and Permit2 approves
-    ///      PositionManager. Skipping either fails inside the settle with nothing to say which
-    ///      — the pattern proven in `test/base/PositionMinter.sol`.
+    /// @dev The two approvals `SETTLE_PAIR` needs, granted once per token and left standing as
+    ///      §4.1 specifies: the token approves Permit2 for the maximum, then Permit2 approves
+    ///      PositionManager for the maximum with the longest expiry — the pattern proven in
+    ///      `test/base/PositionMinter.sol`. PositionManager pays a locker's debt with
+    ///      `permit2.transferFrom`, so skipping either layer fails inside the settle with nothing
+    ///      to say which.
     ///
-    ///      The outer approval stands at the maximum, set once per token. On its own it gives
-    ///      Permit2 nothing to act on: Permit2 moves this contract's tokens only against an
-    ///      allowance granted here, or a signature a contract without ERC-1271 cannot make.
+    ///      A standing allowance is safe on a contract that also holds lenders' USDG because of
+    ///      who can draw on it. PositionManager charges only the locker — whoever called
+    ///      `modifyLiquidities` — so nothing but this market's own calls can use it, and a mint
+    ///      settles at most its maxima, which the caller has already paid in. `_returnChange`
+    ///      reverts should a settle ever reach further than that.
     ///
-    ///      The inner one is deliberately narrower than the `max` §4.1 sketches: exactly this
-    ///      leg's maximum, expiring with this block. The market also holds lenders' USDG, and
-    ///      sizing the allowance to what the caller has just paid in is what confines a mint to
-    ///      the caller's tokens — as a property of the allowance, rather than of every later
-    ///      code path that settles through PositionManager. It is also what `_refundUnspent`
-    ///      reads the change from.
+    ///      The outer layer is renewed only once it falls below what this leg could spend, not
+    ///      whenever it is short of the maximum. Some tokens draw even an unlimited allowance down
+    ///      on every `transferFrom` — this chain's USDG does, checked at the pinned block — and
+    ///      checking for the exact maximum would re-approve on every mint.
     function _allowPositionManager(
         IPermit2 permit2,
         Currency currency,
-        uint128 amount
+        uint256 amount
     ) private {
         IERC20 token = IERC20(Currency.unwrap(currency));
         if (token.allowance(address(this), address(permit2)) < amount) {
             token.forceApprove(address(permit2), type(uint256).max);
         }
-        // Safe: 48 bits of seconds outlast the chain by millions of years.
-        // forge-lint: disable-next-line(unsafe-typecast)
-        permit2.approve(address(token), address(positionManager), amount, uint48(block.timestamp));
+
+        (uint160 allowed, uint48 expiration,) =
+            permit2.allowance(address(this), address(token), address(positionManager));
+        if (allowed != type(uint160).max || expiration != type(uint48).max) {
+            permit2.approve(address(token), address(positionManager), type(uint160).max, type(uint48).max);
+        }
     }
 
     /// @dev `[MINT_POSITION, SETTLE_PAIR, SWEEP, SWEEP]`, minted to this market (§4.1).
@@ -575,7 +594,7 @@ contract FarmentaMarket is
     ///      Permit2 allowance, ETH out of the `msg.value` sent along with the call. Each `SWEEP`
     ///      sends PositionManager's balance of one currency to the caller, which is how unspent
     ///      ETH comes back. An ERC-20 leg never passes through PositionManager, so its sweep
-    ///      finds none of the caller's tokens, and its change is returned by `_refundUnspent`.
+    ///      finds none of the caller's tokens, and its change is returned by `_returnChange`.
     function _mintActions(
         MintParams calldata p
     ) private view returns (bytes memory) {
@@ -594,22 +613,24 @@ contract FarmentaMarket is
         return abi.encode(actions, params);
     }
 
-    /// @dev Returns what the mint did not spend of an ERC-20 leg.
+    /// @dev Sends back what the mint did not spend of an ERC-20 leg: whatever the market holds
+    ///      above `held`, its balance from before the caller paid in.
     ///
-    ///      The amount is the allowance left over, not a balance difference. Permit2 lowers a
-    ///      finite allowance by exactly what it moves, so what remains of the leg's maximum is
-    ///      precisely the change. A balance difference would also count anything that reached
-    ///      the market during the mint — a vault deposit made from inside a pool hook, say,
-    ///      which would be paid out to the caller while its depositor kept the shares. The
-    ///      leftover allowance expires with the block, and the next mint overwrites it before
-    ///      settling.
-    function _refundUnspent(
-        IPermit2 permit2,
-        Currency currency
+    ///      The subtraction is checked on purpose. Ending below `held` would mean the settle was
+    ///      paid partly out of what the market already had — lenders' USDG — so the whole mint
+    ///      reverts instead.
+    ///
+    ///      A balance difference counts everything that reached the market during the mint, not
+    ///      only the caller's change. An inflow that hands its sender something back would be
+    ///      paid out as change while the sender kept the proceeds. The one such inflow is a vault
+    ///      deposit made from inside a pool hook, which is why `_deposit` refuses re-entry.
+    function _returnChange(
+        Currency currency,
+        uint256 held
     ) private {
-        address token = Currency.unwrap(currency);
-        (uint160 unspent,,) = permit2.allowance(address(this), token, address(positionManager));
-        if (unspent != 0) IERC20(token).safeTransfer(msg.sender, unspent);
+        IERC20 token = IERC20(Currency.unwrap(currency));
+        uint256 change = token.balanceOf(address(this)) - held;
+        if (change != 0) token.safeTransfer(msg.sender, change);
     }
 
     /// @inheritdoc UUPSUpgradeable
@@ -624,12 +645,17 @@ contract FarmentaMarket is
     ///      collateral side: what takes on risk stops, what hands assets back does not. §5.2
     ///      makes pausing the only sequencer-downtime lever this chain offers, and continuing
     ///      to accept deposits during one would be the wrong half to leave running.
+    ///
+    ///      It also refuses re-entry. `mintAndDeposit` measures its change by balance, so a vault
+    ///      deposit made from inside a mint — a pool hook calling back — would be paid out as the
+    ///      minter's change while the hook kept the shares. Nothing legitimate deposits from
+    ///      inside another market call.
     function _deposit(
         address caller,
         address receiver,
         uint256 assets,
         uint256 shares
-    ) internal override whenNotPaused {
+    ) internal override whenNotPaused nonReentrant {
         super._deposit(caller, receiver, assets, shares);
     }
 

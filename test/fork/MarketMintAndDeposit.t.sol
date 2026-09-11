@@ -159,24 +159,30 @@ contract MarketMintAndDepositForkTest is MarketForkTest {
         assertEq(afterMint.marketUsdg, before.marketUsdg, "lenders' USDG moved");
     }
 
-    /// @notice What remains of the market's settle allowance is exactly the change, and it
-    ///         dies with the block.
-    /// @dev The allowance PositionManager holds over the market is sized to one mint's
-    ///      maximum, so it can never reach lenders' USDG. Its remainder is what the market read
-    ///      the refund from; if the two disagreed, the change paid out would be wrong.
-    function test_theSettleAllowanceIsSpentOrExpired() public {
+    /// @notice Both approval layers are granted the first time a token is minted with, then left
+    ///         standing.
+    /// @dev The pattern §4.1 specifies and `test/base/PositionMinter.sol` proves: the token
+    ///      approves Permit2, and Permit2 approves PositionManager for the maximum with the
+    ///      longest expiry. The allowance is read at the §18 Permit2 address, which also shows
+    ///      PositionManager pays through that one. A second mint with the same tokens approves
+    ///      nothing.
+    function test_approvesEachLayerOncePerToken() public {
         _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
         FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
-
-        Balances memory before = _balances();
         _mintAndDeposit(p, 0);
-        Balances memory afterMint = _balances();
 
-        (uint160 left, uint48 expiration,) = IAllowanceTransfer(RobinhoodChain.PERMIT2)
-            .allowance(address(market), RobinhoodChain.USDG, RobinhoodChain.POSITION_MANAGER);
-        uint256 usdgSpent = afterMint.poolManagerUsdg - before.poolManagerUsdg;
-        assertEq(left, USDG_BUDGET - usdgSpent, "the leftover allowance is not the change");
-        assertEq(expiration, block.timestamp, "the allowance outlives the block");
+        _assertStandingApproval(RobinhoodChain.WETH);
+        _assertStandingApproval(RobinhoodChain.USDG);
+
+        deal(RobinhoodChain.WETH, borrower, WETH_BUDGET);
+        deal(RobinhoodChain.USDG, borrower, USDG_BUDGET);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 1);
+
+        vm.expectCall(RobinhoodChain.PERMIT2, abi.encodeWithSelector(IAllowanceTransfer.approve.selector), 0);
+        vm.expectCall(RobinhoodChain.WETH, abi.encodeWithSelector(IERC20.approve.selector), 0);
+        vm.expectCall(RobinhoodChain.USDG, abi.encodeWithSelector(IERC20.approve.selector), 0);
+        vm.prank(borrower);
+        market.mintAndDeposit(p, permit, signature);
     }
 
     /// @notice Minting in ends in the same state as depositing an equivalent position.
@@ -432,6 +438,24 @@ contract MarketMintAndDepositForkTest is MarketForkTest {
         assertEq(now_.marketUsdg, before.marketUsdg, "the market's USDG moved");
         assertEq(now_.poolManagerWeth, before.poolManagerWeth, "WETH reached the pool");
         assertEq(now_.poolManagerUsdg, before.poolManagerUsdg, "USDG reached the pool");
+    }
+
+    /// @dev Both layers of the settle approval stand at the maximum, and the inner one never
+    ///      expires. The token layer is allowed to have been drawn down by the mint that set it:
+    ///      this chain's USDG decrements even an unlimited allowance (WETH does not), while
+    ///      Permit2 never does.
+    function _assertStandingApproval(
+        address token
+    ) internal view {
+        assertGe(
+            IERC20(token).allowance(address(market), RobinhoodChain.PERMIT2),
+            type(uint256).max - type(uint128).max,
+            "token -> Permit2 is not standing at the maximum"
+        );
+        (uint160 amount, uint48 expiration,) = IAllowanceTransfer(RobinhoodChain.PERMIT2)
+            .allowance(address(market), token, RobinhoodChain.POSITION_MANAGER);
+        assertEq(amount, type(uint160).max, "Permit2 -> PositionManager is not the maximum");
+        assertEq(expiration, type(uint48).max, "Permit2 -> PositionManager expires");
     }
 
     /// @dev A range ten spacings either side of the oracle price, with the given maxima.
