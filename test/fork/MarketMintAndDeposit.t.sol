@@ -218,6 +218,68 @@ contract MarketMintAndDepositForkTest is MarketForkTest {
         assertEq(market.loanOf(minted).owner, address(0), "the minted record was not cleared");
     }
 
+    /* --------------------------------- native ETH ----------------------------- */
+
+    /// @notice A native-ETH pool spends from `msg.value` and sends the rest back.
+    /// @dev ETH is currency0 and never touches Permit2. The market forwards `msg.value` to
+    ///      PositionManager, `SETTLE_PAIR` pays the pool out of it, and `SWEEP` returns what is
+    ///      left straight to the borrower. PoolManager's balance is again the witness. The
+    ///      market must hold no more ETH afterwards than before, because ETH left there has no
+    ///      way out (§15 no. 12).
+    ///
+    ///      `SWEEP` hands over PositionManager's whole ETH balance, so any stray ETH already
+    ///      sitting there reaches the borrower too; the borrower's side is measured net of it.
+    ///      The pool has tick spacing 1, so ten spacings are a tenth as wide as in the WETH
+    ///      pool, and the liquidity is raised to keep the position above the floor.
+    function test_nativePoolSpendsEthAndReturnsTheRest() public {
+        PoolKey memory ethKey = _keyOf(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        _listPool(ethKey, TierPresets.blueChip().minPositionUsd, 0);
+        uint256 ethBudget = 10 ether;
+        vm.deal(borrower, ethBudget);
+        FarmentaMarket.MintParams memory p = _inRange(ethKey, 10 * LIQUIDITY, ethBudget, USDG_BUDGET);
+
+        uint256 borrowerEth = borrower.balance;
+        uint256 marketEth = address(market).balance;
+        uint256 strayEth = RobinhoodChain.POSITION_MANAGER.balance;
+        uint256 poolManagerEth = RobinhoodChain.POOL_MANAGER.balance;
+        Balances memory before = _balances();
+
+        uint256 tokenId = _mintAndDeposit(p, 0);
+
+        uint256 ethSpent = RobinhoodChain.POOL_MANAGER.balance - poolManagerEth;
+        assertGt(ethSpent, 0, "an in-range mint costs ETH");
+        assertLt(ethSpent, ethBudget, "the ETH maximum should leave change");
+        assertEq(borrower.balance, borrowerEth - ethSpent + strayEth, "borrower paid other than the ETH cost");
+        assertEq(RobinhoodChain.POSITION_MANAGER.balance, 0, "ETH was left in PositionManager");
+        assertEq(address(market).balance, marketEth, "ETH was left in the market");
+
+        Balances memory afterMint = _balances();
+        uint256 usdgSpent = afterMint.poolManagerUsdg - before.poolManagerUsdg;
+        assertGt(usdgSpent, 0, "an in-range mint costs USDG");
+        assertEq(before.borrowerUsdg - afterMint.borrowerUsdg, usdgSpent, "borrower paid other than the USDG cost");
+        assertEq(afterMint.marketUsdg, before.marketUsdg, "lenders' USDG moved");
+
+        assertEq(nft.ownerOf(tokenId), address(market), "market does not own the position");
+        assertEq(market.loanOf(tokenId).owner, borrower, "caller not recorded");
+    }
+
+    /// @notice An ETH leg that would cost more than `amount0Max` reverts, and the ETH comes back.
+    /// @dev ETH settles along a different path from an ERC-20 leg — out of the value sent, not
+    ///      through Permit2 — so its maximum is checked on its own.
+    function test_nativeCostAboveTheEthMaximumReverts() public {
+        PoolKey memory ethKey = _keyOf(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        _listPool(ethKey, TierPresets.blueChip().minPositionUsd, 0);
+        vm.deal(borrower, 1);
+        FarmentaMarket.MintParams memory p = _inRange(ethKey, 10 * LIQUIDITY, 1, USDG_BUDGET);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 0);
+
+        vm.prank(borrower);
+        vm.expectPartialRevert(SlippageCheck.MaximumAmountExceeded.selector);
+        market.mintAndDeposit{value: 1}(p, permit, signature);
+
+        assertEq(borrower.balance, 1, "a refused mint kept the borrower's ETH");
+    }
+
     /* ---------------------------------- refusals ------------------------------ */
 
     /// @notice A pool nobody listed is refused, and the whole mint unwinds.
