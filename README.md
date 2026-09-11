@@ -155,13 +155,15 @@ mechanics are easy to get wrong, and `test/fork/MarketMintAndDeposit.t.sol` pins
 - **The tokenId is read before minting.** `modifyLiquidities` returns nothing, so the id comes
   from `PositionManager.nextTokenId()`. Read afterwards, it names the next position, which
   does not exist yet.
-- **Two approval layers.** PositionManager pays the market's debt with
-  `permit2.transferFrom`, so the token approves Permit2 and Permit2 approves PositionManager.
-  The inner allowance is sized to the caller's maximum and expires with the block, so a mint
-  can never spend lenders' USDG.
+- **Two approval layers, granted once per token.** PositionManager pays the market's debt with
+  `permit2.transferFrom`, so the token approves Permit2 and Permit2 approves PositionManager,
+  both for the maximum (§4.1). The standing allowance can only be drawn by the market's own
+  calls, because PositionManager charges whoever called it.
 - **Change comes back two ways.** `SWEEP` only moves what PositionManager holds, which is
-  unspent ETH. ERC-20 change never leaves the market, so the market returns it itself, reading
-  the amount from the unspent Permit2 allowance rather than from its own balance.
+  unspent ETH. ERC-20 change never leaves the market, so the market returns whatever it holds
+  above its balance from before the mint. This is the one departure from §4.1, which credits
+  `SWEEP` with both legs. The subtraction reverts if a mint ever spent lenders' USDG, and the
+  vault refuses deposits that re-enter mid-mint, so none can be counted as change.
 
 The signature is a Permit2 `PermitBatchTransferFrom` with the market as spender. It lists the
 pool's ERC-20 currencies in pool order: both for an ERC-20 pair, or only currency1 beside
