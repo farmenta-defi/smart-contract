@@ -117,11 +117,11 @@ contract TwapRecorderTest is Test {
     function test_ringBufferOverwritesOldestObservation() public {
         _record(100);
         for (uint256 i = 0; i < 1024; ++i) {
-            _recordAfter(1, 100);
+            _recordAfter(1, int24(uint24(100 + (i % 3))));
         }
 
         assertEq(recorder.observationCount(poolId), 1024);
-        assertEq(recorder.consult(poolId, 900), 100);
+        assertEq(recorder.consult(poolId, 900), 101);
 
         vm.expectRevert(TwapRecorder.TwapUnavailable.selector);
         recorder.consult(poolId, 1025);
