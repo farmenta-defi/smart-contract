@@ -309,6 +309,27 @@ contract MarketMintAndDepositForkTest is MarketForkTest {
         _assertNothingMoved(before, nextId);
     }
 
+    /// @notice A frozen pool takes no new positions by minting either.
+    /// @dev §6.5 names `mintAndDeposit` among what delisting stops, next to `depositCollateral`.
+    ///      Freezing is how a pool is wound down, so a mint that slipped past it would be adding
+    ///      exposure to the very pool the owner is emptying.
+    function test_frozenPoolRevertsAndLeavesNothingBehind() public {
+        _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
+        vm.prank(owner);
+        policy.setFrozen(wethKey.toId(), true);
+
+        FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 0);
+        Balances memory before = _balances();
+        uint256 nextId = positionManager.nextTokenId();
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.PoolFrozenForNewPositions.selector, wethKey.toId()));
+        market.mintAndDeposit(p, permit, signature);
+
+        _assertNothingMoved(before, nextId);
+    }
+
     /// @notice A listed pool whose hook no longer passes is refused at mint time.
     /// @dev §6.1 is checked again at intake, not only at listing: an allowlisting can be
     ///      revoked, and a mint must not be the way around that. No pool on the chain pairs
