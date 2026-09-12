@@ -55,7 +55,24 @@ contract MarketBorrowForkTest is MarketForkTest {
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
 
         vm.prank(holder);
-        vm.expectRevert(FarmentaMarket.UsdgPriceOutOfBounds.selector);
+        vm.expectPartialRevert(FarmentaMarket.UsdgPriceOutOfBounds.selector);
+        market.borrow(tokenId, 10e6, holder);
+    }
+
+    function test_borrowRejectsFreshPythDeviation() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        oracle.setPythPrice(2600e18, block.timestamp);
+
+        vm.prank(holder);
+        vm.expectPartialRevert(FarmentaMarket.PythPriceDeviation.selector);
+        market.borrow(tokenId, 10e6, holder);
+    }
+
+    function test_borrowIgnoresStalePyth() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        oracle.setPythPrice(1e18, block.timestamp - 10 minutes - 1);
+
+        vm.prank(holder);
         market.borrow(tokenId, 10e6, holder);
     }
 

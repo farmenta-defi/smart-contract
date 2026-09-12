@@ -79,7 +79,8 @@ contract AddressesForkTest is ForkTest {
         assertGt(RobinhoodChain.PYTH.code.length, 0, "Pyth has no code");
     }
 
-    function test_pythEthUsdPriceIdIsRecognized() public view {
+    function test_pythEthUsdPriceIdIsRecognized() public {
+        vm.createSelectFork("robinhood", 54_600_000);
         (bool ok, bytes memory data) = RobinhoodChain.PYTH
             .staticcall(abi.encodeWithSignature("getPriceUnsafe(bytes32)", RobinhoodChain.PYTH_ETH_USD_PRICE_ID));
         assertTrue(ok, "Pyth ETH/USD price ID is not recognized");
