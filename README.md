@@ -49,9 +49,10 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
 3. **Lantai reserve tidak mengikat pemegang kunci upgrade.** Aturan §7 membatasi
    penarikan rutin oleh owner lewat `withdrawReserves`: lantai dihitung dari
    `totalAssets × reserveFloorBps / 10_000` (1% blue-chip, 2,5% meme), dan hanya reserve
-   di atas lantai yang boleh ditarik, sebatas kas tersedia. Bad debt tetap dapat
-   menghabiskan reserve, termasuk bagian di bawah lantai. **`withdrawReserves` dan
-   lantai ini belum diimplementasikan pada versi kustodi saat ini**.
+   di atas lantai yang boleh ditarik, sebatas kas tersedia. `reserveFloor()` dan
+   `withdrawableReserves()` memperlihatkan buffer dan surplus saat ini, sedangkan
+   `totalReservesWithdrawn()` mencatat total yang telah ditarik protokol. Bad debt tetap dapat
+   menghabiskan reserve, termasuk bagian di bawah lantai.
    Setelah diterapkan pun, owner dapat mengganti aturan lantai melalui upgrade dan
    mengambil aset dalam satu transaksi. Lantai mencegah penarikan rutin melewati batas;
    ia bukan jaminan terhadap pemegang kunci upgrade. Risiko ini diterima hanya untuk
