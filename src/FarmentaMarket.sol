@@ -25,6 +25,7 @@ import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
 import {IInterestRateModel} from "./interfaces/IInterestRateModel.sol";
 import {IPositionValuer} from "./interfaces/IPositionValuer.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
+import {DebtMath} from "./libraries/DebtMath.sol";
 import {TierPresets} from "./libraries/TierPresets.sol";
 
 /// @title FarmentaMarket
@@ -493,9 +494,8 @@ contract FarmentaMarket is
         uint256 cash = IERC20(asset()).balanceOf(address(this));
         uint256 utilization = $.totalBorrows * WAD / (cash + $.totalBorrows);
         uint256 rate = interestRateModel.ratePerSecond($.tier, utilization);
-        uint256 newIndex = $.borrowIndex + $.borrowIndex * rate * elapsed / WAD;
-        uint256 newTotalBorrows = $.totalBorrowShares.mulDiv(newIndex, WAD);
-        uint256 interest = newTotalBorrows - $.totalBorrows;
+        (uint256 newIndex, uint256 newTotalBorrows, uint256 interest) =
+            DebtMath.accrue($.borrowIndex, $.totalBorrowShares, $.totalBorrows, rate, elapsed);
 
         $.borrowIndex = newIndex;
         $.totalBorrows = newTotalBorrows;
@@ -535,11 +535,11 @@ contract FarmentaMarket is
             revert MarketDebtCapExceeded($.totalBorrows + amount, marketDebtCap);
         }
 
-        uint256 shares = amount.mulDiv(WAD, $.borrowIndex, Math.Rounding.Ceil);
+        uint256 shares = DebtMath.sharesForBorrow(amount, $.borrowIndex);
         loan.debtShares += shares;
         $.totalBorrowShares += shares;
         $.poolDebtShares[loan.poolKeyId] += shares;
-        $.totalBorrows = $.totalBorrowShares.mulDiv($.borrowIndex, WAD);
+        $.totalBorrows = DebtMath.debtOf($.totalBorrowShares, $.borrowIndex);
         IERC20(asset()).safeTransfer(to, amount);
         emit Borrow(tokenId, amount);
     }
@@ -552,16 +552,16 @@ contract FarmentaMarket is
         accrue();
         MarketStorage storage $ = _marketStorage();
         Loan storage loan = $.loans[tokenId];
-        uint256 debt = loan.debtShares.mulDiv($.borrowIndex, WAD);
+        uint256 debt = DebtMath.debtOf(loan.debtShares, $.borrowIndex);
         if (amount == type(uint256).max || amount > debt) amount = debt;
         if (amount == 0) return 0;
 
-        uint256 shares = amount == debt ? loan.debtShares : amount.mulDiv(WAD, $.borrowIndex);
-        repaid = shares.mulDiv($.borrowIndex, WAD);
+        uint256 shares = amount == debt ? loan.debtShares : DebtMath.sharesForRepay(amount, $.borrowIndex);
+        repaid = DebtMath.debtOf(shares, $.borrowIndex);
         loan.debtShares -= shares;
         $.totalBorrowShares -= shares;
         $.poolDebtShares[loan.poolKeyId] -= shares;
-        $.totalBorrows = $.totalBorrowShares.mulDiv($.borrowIndex, WAD);
+        $.totalBorrows = DebtMath.debtOf($.totalBorrowShares, $.borrowIndex);
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), repaid);
         emit Repay(tokenId, repaid);
     }
@@ -570,7 +570,7 @@ contract FarmentaMarket is
         uint256 tokenId
     ) public view returns (uint256) {
         MarketStorage storage $ = _marketStorage();
-        return $.loans[tokenId].debtShares.mulDiv($.borrowIndex, WAD);
+        return DebtMath.debtOf($.loans[tokenId].debtShares, $.borrowIndex);
     }
 
     function positionValue(
@@ -599,9 +599,10 @@ contract FarmentaMarket is
     ) external view returns (uint256) {
         MarketStorage storage $ = _marketStorage();
         Loan storage loan = $.loans[tokenId];
-        uint256 debtUsd = _debtUsd(debtOf(tokenId));
-        if (debtUsd == 0) return type(uint256).max;
-        return positionValue(tokenId) * policy.termsOf(loan.poolKeyId).ltBps * WAD / (debtUsd * BPS);
+        uint256 debt = debtOf(tokenId);
+        if (debt == 0) return type(uint256).max;
+        uint256 debtUsd = _debtUsd(debt);
+        return DebtMath.healthFactor(positionValue(tokenId), policy.termsOf(loan.poolKeyId).ltBps, debtUsd);
     }
 
     function totalBorrows() external view returns (uint256) {
@@ -750,7 +751,7 @@ contract FarmentaMarket is
         uint256 debt
     ) private view returns (uint256) {
         Currency assetCurrency = Currency.wrap(asset());
-        return debt.mulDiv(oracle.price(assetCurrency), 10 ** oracle.decimals(assetCurrency));
+        return DebtMath.debtUsd(debt, oracle.price(assetCurrency), oracle.decimals(assetCurrency));
     }
 
     /// @dev Floors a USD value to the amount of USDG that can be borrowed without exceeding it.
@@ -758,14 +759,14 @@ contract FarmentaMarket is
         uint256 usdValue
     ) private view returns (uint256) {
         Currency assetCurrency = Currency.wrap(asset());
-        return usdValue.mulDiv(10 ** oracle.decimals(assetCurrency), oracle.price(assetCurrency));
+        return DebtMath.usdToDebt(usdValue, oracle.price(assetCurrency), oracle.decimals(assetCurrency));
     }
 
     function _poolDebt(
         PoolId poolId
     ) private view returns (uint256) {
         MarketStorage storage $ = _marketStorage();
-        return $.poolDebtShares[poolId].mulDiv($.borrowIndex, WAD);
+        return DebtMath.debtOf($.poolDebtShares[poolId], $.borrowIndex);
     }
 
     /// @dev One leg of a mint, by its place in the pool: 0 is currency0, 1 is currency1.
