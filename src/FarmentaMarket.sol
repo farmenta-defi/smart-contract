@@ -30,26 +30,24 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 /// @title FarmentaMarket
 /// @notice Custodies Uniswap v4 LP position NFTs and lends USDG against them
 ///         (ARCHITECTURE §4.1). One implementation, two proxies: Blue-chip and Meme.
-/// @dev **This contract currently implements the custody half only.** Collateral can be
-///      deposited and withdrawn; the debt ledger, interest accrual, borrowing, repayment and
-///      liquidation land in Phase 1 (§16). The ERC-4626 side is inherited and functional, but
-///      earns nothing yet: with no borrows, `totalAssets` is simply the USDG this contract
-///      holds. §7 overrides it once `totalBorrows` and `reserves` exist.
+/// @dev **The lending side is whole as of §8.** Collateral goes in and comes back out, the
+///      index-based ledger of §7 accrues against it, and an underwater position can now be
+///      liquidated — which is what makes a lent dollar a dollar with a way home. What §4.1
+///      still owes: `collectFees` and `decreaseLiquidity` (FAR-7, FAR-8), the borrow price
+///      gate of §5.2 (FAR-20), and the meme price path (FAR-16).
 ///
-///      **Two more overrides land with that ledger, and are owed now so they are not
-///      discovered later.** §4.1 limits a lender's withdrawal to the cash actually on hand.
-///      The inherited `maxWithdraw` and `maxRedeem` measure against `totalAssets`, which is
-///      harmless while nothing is borrowed — cash *is* `totalAssets` — but once borrows exist
-///      they would advertise more than the vault can pay, and `withdraw` would fail inside the
-///      token transfer instead of reverting as `ERC4626ExceededMaxWithdraw`. Both must be
-///      bounded by cash in the same change that introduces `totalBorrows`.
+///      **Room is the constraint on what lands here next.** The implementation compiles to
+///      about 24 KB against EIP-170's 24,576, so §8's seizure runs from `MarketLiquidation`
+///      by `delegatecall` — the market's storage, the market's address, the liquidator's
+///      `msg.sender`, code at its own address. The two functions still owed will not fit
+///      inline either; moving the arithmetic out for good is FAR-26.
 ///
-///      **ETH that arrives has no way out.** `receive()` accepts it because the payout
-///      functions will need it (see the note there), but nothing in this version sends it
-///      anywhere, and §4.1's owner-function list has no ETH rescue. Nothing today can make
-///      ETH arrive legitimately, so this is a question for the §8 work that first produces a
-///      payout rather than a defect here; it is recorded as spec open item §15 no. 12 so the
-///      answer is decided with those functions and not after them.
+///      **ETH arrives and leaves through liquidation now, but stray ETH still has no exit.**
+///      A native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather
+///      than ahead of it. What is unchanged is that ETH sent here by anything other than a
+///      payout has no accounting and no rescue — §4.1's owner-function list still has none.
+///      Spec open item §15 no. 12, now with one more case attached: a contract borrower that
+///      refuses ETH can make its own partial liquidation revert (see `MarketLiquidation`).
 ///
 ///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` with no timelock (§4.1, decided
 ///      4 Sep 2026). This contract custodies collateral NFTs and holds USDG deposits, so
@@ -390,16 +388,16 @@ contract FarmentaMarket is
     }
 
     /// @notice Accepts native ETH (§4.1).
-    /// @dev Pools whose `currency0` is `address(0)` pay out in ETH, so `TAKE_PAIR` will send it
-    ///      here when collecting fees, decreasing liquidity or liquidating. None of those exist
-    ///      yet and nothing in this version can make ETH arrive, but the alternative is a
-    ///      market that rejects the first payout it is ever handed.
+    /// @dev Pools whose `currency0` is `address(0)` pay out in ETH, and §8's partial seizure is
+    ///      the first path that takes delivery here: `TAKE_PAIR` pays the market, which forwards
+    ///      the liquidator's share and returns the borrower's. Both legs leave in the same call,
+    ///      so nothing a liquidation brings in is left sitting.
     ///
-    ///      ETH that turns up before then has no accounting and no way out. That is the same
+    ///      ETH that turns up any other way still has no accounting and no way out. That is the
     ///      trapped-asset hole `rescueUnaccountedToken` closes, one asset class over, and it
-    ///      is left open deliberately: §4.1 gives the owner no ETH rescue, and adding one
-    ///      before there is any legitimate ETH flow would decide by accident how ETH payouts
-    ///      are accounted for. Open item §15 no. 12, to be answered by the §8 work.
+    ///      stays open deliberately: §4.1 gives the owner no ETH rescue, and adding one now
+    ///      would decide by accident how ETH the protocol never expected is accounted for.
+    ///      Open item §15 no. 12.
     receive() external payable {}
 
     /* ---------------------------------- views --------------------------------- */
