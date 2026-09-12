@@ -10,6 +10,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
+import {InterestRateModel} from "../../src/InterestRateModel.sol";
 import {PositionValuer} from "../../src/PositionValuer.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
@@ -36,6 +37,7 @@ abstract contract MarketForkTest is PositionMinter {
     PositionValuer internal valuer;
     CollateralPolicy internal policy;
     FarmentaMarket internal market;
+    InterestRateModel internal interestRateModel;
     IERC721 internal nft;
 
     function setUp() public virtual override {
@@ -59,6 +61,7 @@ abstract contract MarketForkTest is PositionMinter {
         );
         vm.stopPrank();
 
+        interestRateModel = new InterestRateModel();
         market = _deployMarket(ICollateralPolicy.Tier.BLUE_CHIP);
         nft = IERC721(RobinhoodChain.POSITION_MANAGER);
     }
@@ -127,7 +130,7 @@ abstract contract MarketForkTest is PositionMinter {
     function _deployMarket(
         ICollateralPolicy.Tier tier_
     ) internal returns (FarmentaMarket) {
-        FarmentaMarket implementation = new FarmentaMarket(positionManager, policy, valuer);
+        FarmentaMarket implementation = new FarmentaMarket(positionManager, policy, valuer, oracle, interestRateModel);
         return FarmentaMarket(
             payable(address(
                     new ERC1967Proxy(

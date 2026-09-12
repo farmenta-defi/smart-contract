@@ -16,7 +16,8 @@ contract TierPresetsTest is Test {
         assertEq(p.maxLtvBps, 6500, "max LTV");
         assertEq(p.ltBps, 7500, "liquidation threshold");
         assertEq(p.minLiquidatorBonusBps, 500, "liquidator bonus");
-        assertEq(p.maxDebtCapUsdg, 500_000e6, "market debt cap");
+        assertEq(p.maxDebtCapUsdg, 500_000e6, "pool cap ceiling");
+        assertEq(p.marketDebtCapUsdg, 500_000e6, "market debt cap");
         assertEq(p.minPositionUsd, 50e18, "minimum position");
     }
 
@@ -25,7 +26,8 @@ contract TierPresetsTest is Test {
         assertEq(p.maxLtvBps, 3000, "max LTV");
         assertEq(p.ltBps, 4000, "liquidation threshold");
         assertEq(p.minLiquidatorBonusBps, 1000, "liquidator bonus");
-        assertEq(p.maxDebtCapUsdg, 50_000e6, "market debt cap");
+        assertEq(p.maxDebtCapUsdg, 20_000e6, "pool cap ceiling");
+        assertEq(p.marketDebtCapUsdg, 50_000e6, "market debt cap");
         assertEq(p.minPositionUsd, 50e18, "minimum position");
     }
 
