@@ -45,7 +45,7 @@ contract Deploy is Script {
         Config memory config = _config();
 
         vm.startBroadcast();
-        address owner = vm.envOr("OWNER", msg.sender);
+        address owner = msg.sender;
 
         CollateralPolicy policy = new CollateralPolicy(Currency.wrap(config.usdg), owner);
         policy.setTokenConfig(Currency.wrap(config.usdg), true, ICollateralPolicy.Tier.BLUE_CHIP, 6, config.usdgUsdFeed);
