@@ -18,8 +18,9 @@ import {RobinhoodChain} from "../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../src/interfaces/ICollateralPolicy.sol";
 
 /// @notice Deploys the shared UUPS implementation and its Blue-chip and Meme proxies.
-/// @dev Environment addresses override Robinhood mainnet defaults, keeping the release path
-///      usable on a fork or a future chain without source edits.
+/// @dev Environment values override Robinhood mainnet defaults, keeping the release path
+///      usable on a fork or a future chain without source edits. `OWNER` must be the
+///      broadcaster because it writes the initial policy configuration.
 contract Deploy is Script {
     struct Deployment {
         address priceOracle;
@@ -38,19 +39,27 @@ contract Deploy is Script {
         address weth;
         address ethUsdFeed;
         address usdgUsdFeed;
+        uint8 usdgDecimals;
+        uint8 wethDecimals;
         string outputPath;
     }
 
     function run() external returns (Deployment memory deployment) {
         Config memory config = _config();
+        address owner = vm.envAddress("OWNER");
 
         vm.startBroadcast();
-        address owner = msg.sender;
 
         CollateralPolicy policy = new CollateralPolicy(Currency.wrap(config.usdg), owner);
-        policy.setTokenConfig(Currency.wrap(config.usdg), true, ICollateralPolicy.Tier.BLUE_CHIP, 6, config.usdgUsdFeed);
-        policy.setTokenConfig(Currency.wrap(config.weth), true, ICollateralPolicy.Tier.BLUE_CHIP, 18, config.ethUsdFeed);
-        policy.setTokenConfig(Currency.wrap(address(0)), true, ICollateralPolicy.Tier.BLUE_CHIP, 18, config.ethUsdFeed);
+        policy.setTokenConfig(
+            Currency.wrap(config.usdg), true, ICollateralPolicy.Tier.BLUE_CHIP, config.usdgDecimals, config.usdgUsdFeed
+        );
+        policy.setTokenConfig(
+            Currency.wrap(config.weth), true, ICollateralPolicy.Tier.BLUE_CHIP, config.wethDecimals, config.ethUsdFeed
+        );
+        policy.setTokenConfig(
+            Currency.wrap(address(0)), true, ICollateralPolicy.Tier.BLUE_CHIP, config.wethDecimals, config.ethUsdFeed
+        );
 
         PriceOracle oracle = new PriceOracle(policy);
         InterestRateModel rateModel = new InterestRateModel();
@@ -93,6 +102,8 @@ contract Deploy is Script {
         config.weth = vm.envOr("WETH", RobinhoodChain.WETH);
         config.ethUsdFeed = vm.envOr("CHAINLINK_ETH_USD", RobinhoodChain.CHAINLINK_ETH_USD);
         config.usdgUsdFeed = vm.envOr("CHAINLINK_USDG_USD", RobinhoodChain.CHAINLINK_USDG_USD);
+        config.usdgDecimals = uint8(vm.envOr("USDG_DECIMALS", uint256(RobinhoodChain.USDG_DECIMALS)));
+        config.wethDecimals = uint8(vm.envOr("WETH_DECIMALS", uint256(RobinhoodChain.WETH_DECIMALS)));
         config.outputPath = vm.envOr("DEPLOYMENT_OUT", string("deployments/farmenta.json"));
     }
 
