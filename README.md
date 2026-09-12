@@ -77,6 +77,13 @@ make test-fork            # fork tests, needs the RPC key
 
 Cloned without `--recursive`? Run `git submodule update --init --recursive`.
 
+## Deployments and linked libraries
+
+`FarmentaMarket` links the external `DebtMath` library. Deploy `DebtMath` first and link its
+address into every market implementation bytecode. The library has no storage and adds no owner
+surface, but its address is part of the implementation bytecode: an upgrade that changes
+`DebtMath` requires deploying the new library and a newly linked market implementation.
+
 ### Why the RPC has to be an archive endpoint
 
 Fork tests pin a block so their results stay reproducible. The public RPC
