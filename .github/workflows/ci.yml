@@ -37,6 +37,13 @@ jobs:
       - name: Build
         run: forge build
 
+      - name: Reject source address literals
+        run: |
+          if grep -R -nP '(?<![0-9A-Fa-f])0x[0-9A-Fa-f]{40}(?![0-9A-Fa-f])' src --exclude=RobinhoodChain.sol; then
+            echo "::error::Address literals belong only in src/constants/RobinhoodChain.sol"
+            exit 1
+          fi
+
       # Size is gated on the profile that ships, not on `lite`: with the optimizer off the
       # market compiles to ~29 KB and would fail EIP-170 in a build nobody deploys. This is
       # the only via-IR compile in the fast lane, so it is a separate step that names the
