@@ -19,8 +19,9 @@ import {ICollateralPolicy} from "../src/interfaces/ICollateralPolicy.sol";
 
 /// @notice Deploys the shared UUPS implementation and its Blue-chip and Meme proxies.
 /// @dev Environment values override Robinhood mainnet defaults, keeping the release path
-///      usable on a fork or a future chain without source edits. `OWNER` must be the
-///      broadcaster because it writes the initial policy configuration.
+///      usable on a fork or a future chain without source edits. `DEPLOYER` signs the
+///      initial policy configuration; when it differs from `OWNER`, the script begins the
+///      policy's two-step ownership transfer and the designated owner must accept it.
 contract Deploy is Script {
     struct Deployment {
         address priceOracle;
@@ -30,9 +31,11 @@ contract Deploy is Script {
         address implementation;
         address blueChipProxy;
         address memeProxy;
+        address owner;
     }
 
     struct Config {
+        address deployer;
         address positionManager;
         address stateView;
         address usdg;
@@ -48,9 +51,9 @@ contract Deploy is Script {
         Config memory config = _config();
         address owner = vm.envAddress("OWNER");
 
-        vm.startBroadcast();
+        vm.startBroadcast(config.deployer);
 
-        CollateralPolicy policy = new CollateralPolicy(Currency.wrap(config.usdg), owner);
+        CollateralPolicy policy = new CollateralPolicy(Currency.wrap(config.usdg), config.deployer);
         policy.setTokenConfig(
             Currency.wrap(config.usdg), true, ICollateralPolicy.Tier.BLUE_CHIP, config.usdgDecimals, config.usdgUsdFeed
         );
@@ -60,6 +63,7 @@ contract Deploy is Script {
         policy.setTokenConfig(
             Currency.wrap(address(0)), true, ICollateralPolicy.Tier.BLUE_CHIP, config.wethDecimals, config.ethUsdFeed
         );
+        if (config.deployer != owner) policy.transferOwnership(owner);
 
         PriceOracle oracle = new PriceOracle(policy);
         InterestRateModel rateModel = new InterestRateModel();
@@ -90,12 +94,14 @@ contract Deploy is Script {
             collateralPolicy: address(policy),
             implementation: address(implementation),
             blueChipProxy: address(blueChipProxy),
-            memeProxy: address(memeProxy)
+            memeProxy: address(memeProxy),
+            owner: owner
         });
         _writeDeployment(deployment, config.outputPath);
     }
 
     function _config() private view returns (Config memory config) {
+        config.deployer = vm.envAddress("DEPLOYER");
         config.positionManager = vm.envOr("POSITION_MANAGER", RobinhoodChain.POSITION_MANAGER);
         config.stateView = vm.envOr("STATE_VIEW", RobinhoodChain.STATE_VIEW);
         config.usdg = vm.envOr("USDG", RobinhoodChain.USDG);
@@ -119,9 +125,8 @@ contract Deploy is Script {
         json = vm.serializeAddress(json, "implementation", deployment.implementation);
         json = vm.serializeAddress(json, "blueChipProxy", deployment.blueChipProxy);
         json = vm.serializeAddress(json, "memeProxy", deployment.memeProxy);
-        vm.writeJson(json, outputPath);
+        json = vm.serializeAddress(json, "owner", deployment.owner);
 
-        console2.log("Farmenta deployment written to", outputPath);
         console2.log("PriceOracle", deployment.priceOracle);
         console2.log("InterestRateModel", deployment.interestRateModel);
         console2.log("PositionValuer", deployment.positionValuer);
@@ -129,5 +134,9 @@ contract Deploy is Script {
         console2.log("FarmentaMarket implementation", deployment.implementation);
         console2.log("Blue-chip proxy", deployment.blueChipProxy);
         console2.log("Meme proxy", deployment.memeProxy);
+        console2.log("Market owner", deployment.owner);
+        console2.log("CollateralPolicy owner target", deployment.owner);
+        vm.writeJson(json, outputPath);
+        console2.log("Farmenta deployment written to", outputPath);
     }
 }
