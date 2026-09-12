@@ -6,6 +6,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
@@ -87,6 +88,23 @@ contract MarketLiquidateForkTest is MarketForkTest {
         vm.prank(liquidator);
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
         market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+    }
+
+    /// @notice §6.5: freezing a pool stops new collateral and new borrowing, and nothing else.
+    /// @dev Liquidation in particular must stay open. A freeze that switched it off would
+    ///      manufacture the bad debt the freeze was called to contain.
+    function test_freezingThePoolDoesNotStopLiquidation() public {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        PoolId poolId = _keyOf(tokenId).toId();
+        vm.prank(owner);
+        policy.setFrozen(poolId, true);
+
+        vm.prank(liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+        assertGt(repaid, 0, "a frozen pool must still be liquidatable");
     }
 
     /* ------------------------------- close factor ----------------------------- */
