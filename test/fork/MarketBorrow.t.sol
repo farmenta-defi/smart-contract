@@ -88,8 +88,11 @@ contract MarketBorrowForkTest is MarketForkTest {
         vm.prank(holder);
         market.borrow(tokenId, amount, holder);
 
-        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 900e18, 18);
-        assertLt(market.healthFactor(tokenId), 1e18, "a sufficiently lower collateral price must make HF unhealthy");
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2200e18, 18);
+        assertGt(market.healthFactor(tokenId), 1e18, "a price just above the boundary must remain healthy");
+
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2100e18, 18);
+        assertLt(market.healthFactor(tokenId), 1e18, "a price just below the boundary must become unhealthy");
     }
 
     function test_maxWithdrawNeverExceedsCashAfterBorrow() public {

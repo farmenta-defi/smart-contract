@@ -38,4 +38,16 @@ contract InterestRateModelTest is Test {
             "meme kink should be 8% annualized"
         );
     }
+
+    function test_noneTierIsRejected() public {
+        InterestRateModel model = new InterestRateModel();
+        vm.expectRevert(InterestRateModel.TierNotSet.selector);
+        model.ratePerSecond(ICollateralPolicy.Tier.NONE, 0);
+    }
+
+    function test_utilizationAboveOneIsRejected() public {
+        InterestRateModel model = new InterestRateModel();
+        vm.expectRevert(abi.encodeWithSelector(InterestRateModel.UtilizationTooHigh.selector, 1e18 + 1));
+        model.ratePerSecond(ICollateralPolicy.Tier.BLUE_CHIP, 1e18 + 1);
+    }
 }

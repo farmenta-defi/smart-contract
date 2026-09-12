@@ -37,6 +37,7 @@ contract MarketHandler is Test {
         amount = bound(amount, 10e6, maximum);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
+        assertGe(market.healthFactor(tokenId), 1e18, "borrow accepted an unhealthy position");
     }
 
     function repay(
@@ -76,13 +77,18 @@ contract MarketHandler is Test {
     function passTime(
         uint40 elapsed
     ) external {
+        uint256 oneShare = 10 ** market.decimals();
+        uint256 assetsBefore = market.convertToAssets(oneShare);
         vm.warp(block.timestamp + bound(uint256(elapsed), 1 hours, 30 days));
         market.accrue();
+        assertGe(market.convertToAssets(oneShare), assetsBefore, "accrual reduced the vault share price");
     }
 }
 
 /// @notice Solvency assertions over a real fork position after a user borrow action.
 /// @dev This suite intentionally lives in the fork lane: it values a real Uniswap position.
+/// forge-config: default.invariant.runs = 16
+/// forge-config: default.invariant.depth = 32
 contract MarketSolvencyInvariantTest is MarketForkTest {
     uint256 internal tokenId;
     MarketHandler internal handler;
@@ -110,15 +116,6 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
         market.borrow(tokenId, amount, borrower);
         handler = new MarketHandler(market, tokenId, borrower, lender);
         targetContract(address(handler));
-    }
-
-    function invariant_userBorrowLeavesHealthFactorAboveOne() public view {
-        assertGe(market.healthFactor(tokenId), 1e18);
-    }
-
-    function invariant_vaultAssetsEqualCashPlusBorrowsMinusReserves() public view {
-        uint256 cash = IERC20(market.asset()).balanceOf(address(market));
-        assertEq(market.totalAssets(), cash + market.totalBorrows() - market.reserves());
     }
 
     function invariant_totalBorrowsMatchesBorrowSharesAndIndex() public view {

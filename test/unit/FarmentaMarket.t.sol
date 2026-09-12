@@ -16,6 +16,7 @@ import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionMa
 import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol";
 
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
+import {InterestRateModel} from "../../src/InterestRateModel.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IInterestRateModel} from "../../src/interfaces/IInterestRateModel.sol";
@@ -34,7 +35,8 @@ contract FarmentaMarketTest is Test {
     address internal policy = address(0xC0DE);
     address internal valuer = address(0xDEAD);
     address internal oracle = address(0x0A11CE);
-    address internal interestRateModel = address(0x1A7E);
+    InterestRateModel internal rateModel;
+    address internal interestRateModel;
 
     MockERC20 internal usdg;
     FarmentaMarket internal implementation;
@@ -42,6 +44,8 @@ contract FarmentaMarketTest is Test {
 
     function setUp() public {
         usdg = new MockERC20("Paxos USDG", "USDG", RobinhoodChain.USDG_DECIMALS);
+        rateModel = new InterestRateModel();
+        interestRateModel = address(rateModel);
         implementation = _deployImplementation();
         market = _deployProxy(ICollateralPolicy.Tier.BLUE_CHIP);
     }
@@ -62,6 +66,30 @@ contract FarmentaMarketTest is Test {
         assertEq(address(market.positionManager()), posm, "positionManager");
         assertEq(address(market.policy()), policy, "policy");
         assertEq(address(market.valuer()), valuer, "valuer");
+    }
+
+    function test_oneImplementationServesBothTierCurves() public {
+        FarmentaMarket memeMarket = _deployProxy(ICollateralPolicy.Tier.MEME);
+        bytes32 implementationSlot = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+
+        assertEq(vm.load(address(market), implementationSlot), vm.load(address(memeMarket), implementationSlot));
+        assertEq(
+            vm.load(address(market), implementationSlot),
+            bytes32(uint256(uint160(address(implementation)))),
+            "proxies must share one market implementation"
+        );
+        assertApproxEqAbs(
+            rateModel.ratePerSecond(market.tier(), 70e16) * 365 days,
+            35e15,
+            1e8,
+            "blue-chip market should use its 3.5% curve point"
+        );
+        assertApproxEqAbs(
+            rateModel.ratePerSecond(memeMarket.tier(), 70e16) * 365 days,
+            8e16,
+            1e8,
+            "meme market should use its 8% curve point"
+        );
     }
 
     /// @dev Share decimals are the asset's plus the offset. USDG has 6, so 9 is the answer;

@@ -74,9 +74,7 @@ contract FarmentaMarket is
 
     /// @notice A position held as collateral, and what is owed against it.
     /// @param owner The address that deposited it, and the only one who may take it back.
-    /// @param debtShares Share of `totalBorrows` owed. Always zero until the debt ledger
-    ///        lands in Phase 1; `withdrawCollateral` already refuses a non-zero value, so
-    ///        that gate does not have to be retrofitted later.
+    /// @param debtShares Share of `totalBorrows` owed by this collateral position.
     /// @dev §4.1 also lists `poolKeyId` and `tier` on this struct. Both exist to serve the
     ///      per-pool debt cap and the market-tier check at borrow time, and neither is
     ///      readable state today: the pool is recoverable from `getPoolAndPositionInfo`, and
@@ -447,9 +445,7 @@ contract FarmentaMarket is
         Loan memory loan = $.loans[tokenId];
 
         if (loan.owner != msg.sender) revert NotTheDepositor(tokenId, loan.owner);
-        // Vacuous until Phase 1 writes the ledger, and deliberately here anyway: the gate that
-        // stops a borrower walking away with their collateral should not be one that has to be
-        // remembered later.
+        // Collateral remains locked until its debt shares have been fully repaid.
         if (loan.debtShares != 0) revert OutstandingDebt(tokenId, loan.debtShares);
 
         delete $.loans[tokenId];
