@@ -14,8 +14,12 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Permit2Forwarder} from "@uniswap/v4-periphery/src/base/Permit2Forwarder.sol";
 import {IERC721Permit_v4} from "@uniswap/v4-periphery/src/interfaces/IERC721Permit_v4.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
+import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol";
 
 import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
 import {IInterestRateModel} from "./interfaces/IInterestRateModel.sol";
@@ -82,6 +86,25 @@ contract FarmentaMarket is
         uint256 debtShares;
         PoolId poolKeyId;
         ICollateralPolicy.Tier tier;
+    }
+
+    /// @notice The position `mintAndDeposit` creates (§4.1).
+    /// @param poolKey Pool to mint into. It passes the same §6.1 admission as any deposit.
+    /// @param tickLower Lower tick of the range, on the pool's spacing.
+    /// @param tickUpper Upper tick of the range, on the pool's spacing.
+    /// @param liquidity Liquidity to mint.
+    /// @param amount0Max The most currency0 the mint may cost. For a native-ETH pool this is
+    ///        also exactly the `msg.value` to send.
+    /// @param amount1Max The most currency1 the mint may cost.
+    /// @param hookData Passed through to the pool's hook.
+    struct MintParams {
+        PoolKey poolKey;
+        int24 tickLower;
+        int24 tickUpper;
+        uint256 liquidity;
+        uint128 amount0Max;
+        uint128 amount1Max;
+        bytes hookData;
     }
 
     /// @custom:storage-location erc7201:farmenta.storage.Market
@@ -159,6 +182,8 @@ contract FarmentaMarket is
     error PoolDebtCapExceeded(PoolId poolId, uint256 requestedDebt, uint256 debtCap);
     error MarketDebtCapExceeded(uint256 requestedDebt, uint256 debtCap);
     error PoolNotOpenForBorrowing(PoolId poolId);
+    error NativeValueMismatch(uint256 expected, uint256 sent);
+    error PermitDoesNotMatchPool();
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -286,6 +311,91 @@ contract FarmentaMarket is
 
         nft.transferFrom(depositor, address(this), tokenId);
         _acceptCollateral(depositor, tokenId);
+    }
+
+    /// @notice Mints a new position straight into custody and records it as the caller's
+    ///         collateral, in one transaction (§3, §4.1).
+    /// @param p The position to mint.
+    /// @param permit A Permit2 batch transfer naming this market as spender. It lists the
+    ///        pool's ERC-20 currencies in pool order, each for at least its maximum: both for an
+    ///        ERC-20 pair, only currency1 for a native-ETH pool.
+    /// @param signature The caller's signature over `permit`.
+    /// @return tokenId The position minted, now held as the caller's collateral.
+    /// @dev Ends in exactly the state `depositCollateral` leaves for the same position: the
+    ///      market owns the NFT, the loan is recorded to the caller, `CollateralDeposited` is
+    ///      emitted, and `withdrawCollateral` hands it back. Admission is the same function,
+    ///      run on the minted id. A position gets no leniency for having been created here —
+    ///      if it did, this would be the way into pools the policy itself refuses. A refusal
+    ///      reverts everything, so no orphaned position is left here and the caller keeps
+    ///      their tokens.
+    ///
+    ///      **The id is read before minting.** `modifyLiquidities` returns nothing, and
+    ///      PositionManager hands the new position `nextTokenId` and then increments it. Read
+    ///      afterwards, the id is one past the position just minted: a token that does not
+    ///      exist yet and will belong to whoever mints next. Nothing can mint in between,
+    ///      because PositionManager stays locked for the whole call.
+    ///
+    ///      **The caller is the signer.** The permit is spent with `owner = msg.sender`, because
+    ///      whoever submits is who the position is recorded to. Accepting any signer would let
+    ///      a broadcast permit spend someone else's tokens on a position in the submitter's
+    ///      name. That is the difference from `depositCollateralWithPermit`, where the NFT's
+    ///      owner is the only possible beneficiary and a relayer costs nobody anything.
+    ///
+    ///      Each leg brings its maximum and gets the change back. ERC-20 legs are pulled in
+    ///      full through the permit; ETH arrives as `msg.value`, which must equal `amount0Max`
+    ///      for a native pool and be zero otherwise. A mint that would cost more than either
+    ///      maximum reverts inside PositionManager, which is handed the permit's deadline — the
+    ///      one the caller signed.
+    ///
+    ///      **§4.1 says the change comes back through `SWEEP`; for an ERC-20 leg it cannot.**
+    ///      `SWEEP` sends PositionManager's own balance, while `SETTLE_PAIR` pays an ERC-20 leg
+    ///      straight from this market through Permit2, so that change never leaves the market.
+    ///      Both sweeps are still encoded and return the unspent ETH; ERC-20 change is sent back
+    ///      by `_returnChange`.
+    function mintAndDeposit(
+        MintParams calldata p,
+        ISignatureTransfer.PermitBatchTransferFrom calldata permit,
+        bytes calldata signature
+    ) external payable whenNotPaused nonReentrant returns (uint256 tokenId) {
+        accrue();
+
+        // ETH can only ever be currency0, since `address(0)` sorts first. It comes in as
+        // `msg.value`, so a native pool has one ERC-20 leg to pull and an ERC-20 pair has two.
+        uint256 firstLeg = p.poolKey.currency0.isAddressZero() ? 1 : 0;
+        {
+            uint256 expectedValue = firstLeg == 1 ? p.amount0Max : 0;
+            if (msg.value != expectedValue) revert NativeValueMismatch(expectedValue, msg.value);
+        }
+
+        ISignatureTransfer.SignatureTransferDetails[] memory transfers = _transfersFor(p, permit, firstLeg);
+
+        // Read from PositionManager rather than configured here: the allowance has to sit on
+        // the Permit2 it pays through, and this way the two cannot disagree.
+        IPermit2 permit2 = IPermit2(address(Permit2Forwarder(address(positionManager)).permit2()));
+
+        // What the market already held of each ERC-20 leg before the caller paid in. The change
+        // is whatever sits above this once the mint is done.
+        uint256[2] memory held;
+        for (uint256 i = firstLeg; i < 2; ++i) {
+            (Currency currency,) = _leg(p, i);
+            held[i] = IERC20(Currency.unwrap(currency)).balanceOf(address(this));
+        }
+
+        permit2.permitTransferFrom(permit, transfers, msg.sender, signature);
+        for (uint256 i = firstLeg; i < 2; ++i) {
+            (Currency currency, uint128 amountMax) = _leg(p, i);
+            _allowPositionManager(permit2, currency, amountMax);
+        }
+
+        tokenId = positionManager.nextTokenId();
+        positionManager.modifyLiquidities{value: msg.value}(_mintActions(p), permit.deadline);
+
+        _acceptCollateral(msg.sender, tokenId);
+
+        for (uint256 i = firstLeg; i < 2; ++i) {
+            (Currency currency,) = _leg(p, i);
+            _returnChange(currency, held[i]);
+        }
     }
 
     /// @notice Accepts a position pushed here directly with `safeTransferFrom`.
@@ -418,13 +528,13 @@ contract FarmentaMarket is
         uint256 requestedDebtUsd = _debtUsd(requestedDebt);
         uint256 maximumDebtUsd = _borrowValue(tokenId) * terms.maxLtvBps / BPS;
         if (requestedDebtUsd > maximumDebtUsd) revert BorrowExceedsMaxLtv(requestedDebtUsd, maximumDebtUsd);
-        if (requestedDebtUsd < 10e18) revert BorrowBelowMinimum(requestedDebtUsd);
+        if (requestedDebt < 10e6) revert BorrowBelowMinimum(requestedDebt);
         uint256 requestedPoolDebt = _poolDebt(loan.poolKeyId) + amount;
         if (requestedPoolDebt > terms.debtCapUsdg) {
             revert PoolDebtCapExceeded(loan.poolKeyId, requestedPoolDebt, terms.debtCapUsdg);
         }
 
-        uint256 marketDebtCap = TierPresets.forTier($.tier).maxDebtCapUsdg;
+        uint256 marketDebtCap = TierPresets.forTier($.tier).marketDebtCapUsdg;
         if ($.totalBorrows + amount > marketDebtCap) {
             revert MarketDebtCapExceeded($.totalBorrows + amount, marketDebtCap);
         }
@@ -473,9 +583,7 @@ contract FarmentaMarket is
         MarketStorage storage $ = _marketStorage();
         Loan storage loan = $.loans[tokenId];
         if (loan.owner == address(0)) return 0;
-        ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
-        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
-        return valuation.principalUsd * (BPS - terms.removeHaircutBps) / BPS;
+        return _borrowValue(tokenId);
     }
 
     function maxBorrow(
@@ -502,6 +610,10 @@ contract FarmentaMarket is
 
     function totalBorrows() external view returns (uint256) {
         return _marketStorage().totalBorrows;
+    }
+
+    function totalBorrowShares() external view returns (uint256) {
+        return _marketStorage().totalBorrowShares;
     }
 
     function borrowIndex() external view returns (uint256) {
@@ -579,7 +691,7 @@ contract FarmentaMarket is
     /* -------------------------------- internals ------------------------------- */
 
     /// @dev Runs every §6.1 admission rule and records the loan. Called once the market
-    ///      already owns the NFT, which both intake paths guarantee.
+    ///      already owns the NFT, which every intake path guarantees.
     ///
     ///      The pool-level rules live in `CollateralPolicy.checkPool`: listed, not frozen,
     ///      right tier, both tokens enabled, quoted in USDG, hook permitted. The two rules
@@ -595,13 +707,13 @@ contract FarmentaMarket is
         uint256 tokenId
     ) private {
         MarketStorage storage $ = _marketStorage();
-        // Unreachable today, since a recorded position is one this contract already owns and
-        // so cannot be handed to it again. Kept because it guards the single record that must
-        // never be silently overwritten, and `mintAndDeposit` (§4.1, Phase 2) adds an intake
-        // path that does not start from a transfer.
+        // Unreachable today. A recorded position is one this contract already owns, so it cannot
+        // be handed over again, and `mintAndDeposit` — the one intake path that does not start
+        // from a transfer — records a token that did not exist before its own call. Kept
+        // because it guards the single record that must never be silently overwritten.
         if ($.loans[tokenId].owner != address(0)) revert PositionAlreadyHeld(tokenId);
 
-        // No existence check: both intake paths reach here holding the NFT, and
+        // No existence check: every intake path reaches here holding the NFT, and
         // `PositionManager` clears a position's info in the same call that burns its token.
         // Owning it therefore implies it exists. Were that ever untrue, the zeroed key names
         // a pool that cannot be listed anyway, since neither of its currencies is USDG.
@@ -625,8 +737,7 @@ contract FarmentaMarket is
         emit CollateralDeposited(tokenId, depositor);
     }
 
-    /// @dev Borrow capacity admits at most 10% of principal in unclaimed fees. Health factor
-    ///      deliberately excludes fees: their owner may claim them at any time.
+    /// @dev Borrow capacity and health factor count capped LP fees as collateral.
     function _borrowValue(
         uint256 tokenId
     ) private view returns (uint256) {
@@ -661,6 +772,116 @@ contract FarmentaMarket is
         return $.poolDebtShares[poolId].mulDiv($.borrowIndex, WAD);
     }
 
+    /// @dev One leg of a mint, by its place in the pool: 0 is currency0, 1 is currency1.
+    function _leg(
+        MintParams calldata p,
+        uint256 i
+    ) private pure returns (Currency currency, uint128 amountMax) {
+        if (i == 0) return (p.poolKey.currency0, p.amount0Max);
+        return (p.poolKey.currency1, p.amount1Max);
+    }
+
+    /// @dev Checks the permit names exactly the pool's ERC-20 currencies, in pool order, and
+    ///      asks Permit2 for each leg's maximum. The check is not optional: Permit2 moves
+    ///      whichever token the signed permit names, not the one the market expects. Without
+    ///      it a permit for some other token would be spent while the mint still settled in the
+    ///      pool's currency — out of what the market already holds, which for USDG is lenders'
+    ///      money.
+    function _transfersFor(
+        MintParams calldata p,
+        ISignatureTransfer.PermitBatchTransferFrom calldata permit,
+        uint256 firstLeg
+    ) private view returns (ISignatureTransfer.SignatureTransferDetails[] memory transfers) {
+        uint256 count = 2 - firstLeg;
+        if (permit.permitted.length != count) revert PermitDoesNotMatchPool();
+
+        transfers = new ISignatureTransfer.SignatureTransferDetails[](count);
+        for (uint256 i = firstLeg; i < 2; ++i) {
+            (Currency currency, uint128 amountMax) = _leg(p, i);
+            if (permit.permitted[i - firstLeg].token != Currency.unwrap(currency)) revert PermitDoesNotMatchPool();
+            transfers[i - firstLeg] =
+                ISignatureTransfer.SignatureTransferDetails({to: address(this), requestedAmount: amountMax});
+        }
+    }
+
+    /// @dev The two approvals `SETTLE_PAIR` needs, granted once per token and left standing as
+    ///      §4.1 specifies: the token approves Permit2 for the maximum, then Permit2 approves
+    ///      PositionManager for the maximum with the longest expiry — the pattern proven in
+    ///      `test/base/PositionMinter.sol`. PositionManager pays a locker's debt with
+    ///      `permit2.transferFrom`, so skipping either layer fails inside the settle with nothing
+    ///      to say which.
+    ///
+    ///      A standing allowance is safe on a contract that also holds lenders' USDG because of
+    ///      who can draw on it. PositionManager charges only the locker — whoever called
+    ///      `modifyLiquidities` — so nothing but this market's own calls can use it, and a mint
+    ///      settles at most its maxima, which the caller has already paid in. `_returnChange`
+    ///      reverts should a settle ever reach further than that.
+    ///
+    ///      The outer layer is renewed only once it falls below what this leg could spend, not
+    ///      whenever it is short of the maximum. Some tokens draw even an unlimited allowance down
+    ///      on every `transferFrom` — this chain's USDG does, checked at the pinned block — and
+    ///      checking for the exact maximum would re-approve on every mint.
+    function _allowPositionManager(
+        IPermit2 permit2,
+        Currency currency,
+        uint256 amount
+    ) private {
+        IERC20 token = IERC20(Currency.unwrap(currency));
+        if (token.allowance(address(this), address(permit2)) < amount) {
+            token.forceApprove(address(permit2), type(uint256).max);
+        }
+
+        (uint160 allowed, uint48 expiration,) =
+            permit2.allowance(address(this), address(token), address(positionManager));
+        if (allowed != type(uint160).max || expiration != type(uint48).max) {
+            permit2.approve(address(token), address(positionManager), type(uint160).max, type(uint48).max);
+        }
+    }
+
+    /// @dev `[MINT_POSITION, SETTLE_PAIR, SWEEP, SWEEP]`, minted to this market (§4.1).
+    ///      `SETTLE_PAIR` pays as the locker, which is this contract: ERC-20 legs through the
+    ///      Permit2 allowance, ETH out of the `msg.value` sent along with the call. Each `SWEEP`
+    ///      sends PositionManager's balance of one currency to the caller, which is how unspent
+    ///      ETH comes back. An ERC-20 leg never passes through PositionManager, so its sweep
+    ///      finds none of the caller's tokens, and its change is returned by `_returnChange`.
+    function _mintActions(
+        MintParams calldata p
+    ) private view returns (bytes memory) {
+        bytes memory actions = abi.encodePacked(
+            uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP), uint8(Actions.SWEEP)
+        );
+
+        bytes[] memory params = new bytes[](4);
+        params[0] = abi.encode(
+            p.poolKey, p.tickLower, p.tickUpper, p.liquidity, p.amount0Max, p.amount1Max, address(this), p.hookData
+        );
+        params[1] = abi.encode(p.poolKey.currency0, p.poolKey.currency1);
+        params[2] = abi.encode(p.poolKey.currency0, msg.sender);
+        params[3] = abi.encode(p.poolKey.currency1, msg.sender);
+
+        return abi.encode(actions, params);
+    }
+
+    /// @dev Sends back what the mint did not spend of an ERC-20 leg: whatever the market holds
+    ///      above `held`, its balance from before the caller paid in.
+    ///
+    ///      The subtraction is checked on purpose. Ending below `held` would mean the settle was
+    ///      paid partly out of what the market already had — lenders' USDG — so the whole mint
+    ///      reverts instead.
+    ///
+    ///      A balance difference counts everything that reached the market during the mint, not
+    ///      only the caller's change. An inflow that hands its sender something back would be
+    ///      paid out as change while the sender kept the proceeds. The one such inflow is a vault
+    ///      deposit made from inside a pool hook, which is why `_deposit` refuses re-entry.
+    function _returnChange(
+        Currency currency,
+        uint256 held
+    ) private {
+        IERC20 token = IERC20(Currency.unwrap(currency));
+        uint256 change = token.balanceOf(address(this)) - held;
+        if (change != 0) token.safeTransfer(msg.sender, change);
+    }
+
     /// @inheritdoc UUPSUpgradeable
     /// @dev Owner-only, no timelock. See the trust note on this contract.
     function _authorizeUpgrade(
@@ -673,12 +894,17 @@ contract FarmentaMarket is
     ///      collateral side: what takes on risk stops, what hands assets back does not. §5.2
     ///      makes pausing the only sequencer-downtime lever this chain offers, and continuing
     ///      to accept deposits during one would be the wrong half to leave running.
+    ///
+    ///      It also refuses re-entry. `mintAndDeposit` measures its change by balance, so a vault
+    ///      deposit made from inside a mint — a pool hook calling back — would be paid out as the
+    ///      minter's change while the hook kept the shares. Nothing legitimate deposits from
+    ///      inside another market call.
     function _deposit(
         address caller,
         address receiver,
         uint256 assets,
         uint256 shares
-    ) internal override whenNotPaused {
+    ) internal override whenNotPaused nonReentrant {
         super._deposit(caller, receiver, assets, shares);
     }
 

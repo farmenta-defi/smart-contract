@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {ERC4626Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC4626Upgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
@@ -9,17 +11,27 @@ import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
-import {MarketCustodyForkTest} from "./MarketCustody.t.sol";
+import {MarketForkTest} from "../base/MarketForkTest.sol";
 
 /// @notice Fork coverage for the debt ledger and ERC-4626 cash constraints.
-/// @dev Reuses the custody harness so every test values a real Uniswap position.
-contract MarketBorrowForkTest is MarketCustodyForkTest {
+/// @dev Uses the shared fork harness without re-running the custody suite.
+contract MarketBorrowForkTest is MarketForkTest {
+    address internal lender = address(0x1E4DE2);
+
     function _prepareLoan() internal returns (uint256 tokenId, address holder) {
         tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
         _listPoolOf(tokenId, 50e18);
         holder = nft.ownerOf(tokenId);
-        _deposit(tokenId, holder);
-        deal(address(RobinhoodChain.USDG), address(market), 1_000_000e6);
+        vm.startPrank(holder);
+        nft.approve(address(market), tokenId);
+        market.depositCollateral(tokenId);
+        vm.stopPrank();
+
+        deal(address(RobinhoodChain.USDG), lender, 300e6);
+        vm.startPrank(lender);
+        IERC20(address(RobinhoodChain.USDG)).approve(address(market), type(uint256).max);
+        market.deposit(300e6, lender);
+        vm.stopPrank();
     }
 
     function test_borrowUsesOracleValueAndRejectsAboveMaxLtv() public {
@@ -32,7 +44,7 @@ contract MarketBorrowForkTest is MarketCustodyForkTest {
         assertEq(market.debtOf(tokenId), allowed);
 
         vm.prank(holder);
-        vm.expectRevert();
+        vm.expectPartialRevert(FarmentaMarket.BorrowExceedsMaxLtv.selector);
         market.borrow(tokenId, 200e6, holder);
     }
 
@@ -54,12 +66,13 @@ contract MarketBorrowForkTest is MarketCustodyForkTest {
         assertEq(market.debtOf(tokenId), 0);
     }
 
-    function test_healthFactorUsesPrincipalOnly() public {
+    function test_healthFactorUsesCappedFeesAndOraclePricedDebt() public {
         (uint256 tokenId, address holder) = _prepareLoan();
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.98e18, RobinhoodChain.USDG_DECIMALS);
         uint256 amount = market.maxBorrow(tokenId) / 2;
         vm.prank(holder);
         market.borrow(tokenId, amount, holder);
-        uint256 debtUsd = market.debtOf(tokenId) * 1e12;
+        uint256 debtUsd = market.debtOf(tokenId) * 0.98e18 / 1e6;
         uint256 expected = market.positionValue(tokenId) * 7500 * 1e18 / (debtUsd * 10_000);
         assertApproxEqRel(market.healthFactor(tokenId), expected, 1e12);
     }
@@ -69,15 +82,25 @@ contract MarketBorrowForkTest is MarketCustodyForkTest {
         uint256 amount = market.maxBorrow(tokenId) / 2;
         vm.prank(holder);
         market.borrow(tokenId, amount, holder);
-        assertLe(market.maxWithdraw(holder), IERC20(market.asset()).balanceOf(address(market)));
-        assertLe(market.maxRedeem(holder), market.balanceOf(holder));
+        uint256 cash = IERC20(market.asset()).balanceOf(address(market));
+        assertEq(market.maxWithdraw(lender), cash);
+        assertEq(market.maxRedeem(lender), market.convertToShares(cash));
+
+        vm.prank(lender);
+        vm.expectRevert(
+            abi.encodeWithSelector(ERC4626Upgradeable.ERC4626ExceededMaxWithdraw.selector, lender, cash + 1, cash)
+        );
+        market.withdraw(cash + 1, lender, lender);
     }
 
     function test_borrowBelowTenDollarsReverts() public {
         (uint256 tokenId, address holder) = _prepareLoan();
         vm.prank(holder);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.BorrowBelowMinimum.selector, 9e6));
         market.borrow(tokenId, 9e6, holder);
+
+        vm.prank(holder);
+        market.borrow(tokenId, 10e6, holder);
     }
 
     function test_poolDebtCapRejectsAnotherBorrow() public {
@@ -97,13 +120,16 @@ contract MarketBorrowForkTest is MarketCustodyForkTest {
             })
         );
         address holder = nft.ownerOf(tokenId);
-        _deposit(tokenId, holder);
+        vm.startPrank(holder);
+        nft.approve(address(market), tokenId);
+        market.depositCollateral(tokenId);
+        vm.stopPrank();
         deal(address(RobinhoodChain.USDG), address(market), 1_000_000e6);
 
         vm.prank(holder);
         market.borrow(tokenId, 50e6, holder);
         vm.prank(holder);
-        vm.expectRevert();
+        vm.expectPartialRevert(FarmentaMarket.PoolDebtCapExceeded.selector);
         market.borrow(tokenId, 60e6, holder);
     }
 
@@ -115,7 +141,12 @@ contract MarketBorrowForkTest is MarketCustodyForkTest {
         uint256 before = market.totalBorrows();
         vm.warp(block.timestamp + 365 days);
         market.accrue();
-        assertGt(market.totalBorrows(), before);
-        assertGt(market.reserves(), 0);
+        uint256 afterBorrows = market.totalBorrows();
+        uint256 interest = afterBorrows - before;
+        uint256 utilization = before * 1e18 / (300e6 - amount + before);
+        uint256 rate = market.interestRateModel().ratePerSecond(utilization);
+        uint256 expectedInterest = before * rate * 365 days / 1e18;
+        assertApproxEqAbs(interest, expectedInterest, 1, "interest follows the rate curve");
+        assertEq(market.reserves(), interest * 1500 / 10_000, "reserves are 15% of interest");
     }
 }

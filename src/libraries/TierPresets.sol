@@ -24,12 +24,14 @@ library TierPresets {
     ///        price. §6.2 states the pool rule as a share of pool TVL, which is not
     ///        computable on-chain; the market cap is the enforceable bound, and the
     ///        percentage rule stays an off-chain input to the number the owner writes.
+    /// @param marketDebtCapUsdg Market-wide debt cap, in USDG (6 decimals).
     /// @param minPositionUsd Floor on a listing's minimum position value, USD 1e18.
     struct Preset {
         uint16 maxLtvBps;
         uint16 ltBps;
         uint16 minLiquidatorBonusBps;
         uint128 maxDebtCapUsdg;
+        uint128 marketDebtCapUsdg;
         uint128 minPositionUsd;
     }
 
@@ -38,14 +40,24 @@ library TierPresets {
     /// @notice Blue-chip: ETH/USDG and WETH/USDG.
     function blueChip() internal pure returns (Preset memory) {
         return Preset({
-            maxLtvBps: 6500, ltBps: 7500, minLiquidatorBonusBps: 500, maxDebtCapUsdg: 500_000e6, minPositionUsd: 50e18
+            maxLtvBps: 6500,
+            ltBps: 7500,
+            minLiquidatorBonusBps: 500,
+            maxDebtCapUsdg: 500_000e6,
+            marketDebtCapUsdg: 500_000e6,
+            minPositionUsd: 50e18
         });
     }
 
     /// @notice Meme: xyz/USDG on allowlisted pools.
     function meme() internal pure returns (Preset memory) {
         return Preset({
-            maxLtvBps: 3000, ltBps: 4000, minLiquidatorBonusBps: 1000, maxDebtCapUsdg: 50_000e6, minPositionUsd: 50e18
+            maxLtvBps: 3000,
+            ltBps: 4000,
+            minLiquidatorBonusBps: 1000,
+            maxDebtCapUsdg: 20_000e6,
+            marketDebtCapUsdg: 50_000e6,
+            minPositionUsd: 50e18
         });
     }
 

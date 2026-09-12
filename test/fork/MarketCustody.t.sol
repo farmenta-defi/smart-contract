@@ -2,10 +2,6 @@
 pragma solidity 0.8.26;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IERC721Permit_v4} from "@uniswap/v4-periphery/src/interfaces/IERC721Permit_v4.sol";
@@ -14,15 +10,11 @@ import {ERC721PermitHash} from "@uniswap/v4-periphery/src/libraries/ERC721Permit
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
-import {InterestRateModel} from "../../src/InterestRateModel.sol";
-import {PositionValuer} from "../../src/PositionValuer.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
-import {PriceMath} from "../../src/libraries/PriceMath.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
-import {PositionMinter} from "../base/PositionMinter.sol";
-import {MockPriceOracle} from "../mocks/MockPriceOracle.sol";
+import {MarketForkTest} from "../base/MarketForkTest.sol";
 
 /// @notice The EIP-712 domain separator, which `IPositionManager` does not expose.
 interface IEIP712Domain {
@@ -33,14 +25,7 @@ interface IEIP712Domain {
 /// @dev Custody is the one thing that cannot be proved against a mock. These positions belong
 ///      to strangers, sit in pools with live hooks, and hold native ETH on one side — the
 ///      shapes a hand-built ERC-721 double would quietly get wrong.
-contract MarketCustodyForkTest is PositionMinter {
-    /// @dev ETH price implied by the fixture pool's own spot price at the pinned block, so
-    ///      oracle and pool agree and the valuation is the one the chain would give.
-    uint256 internal constant ETH_AT_POOL_SPOT = 2520.1324440246868e18;
-    uint256 internal constant ONE_USD = 1e18;
-
-    address internal owner = address(0xA11CE);
-
+contract MarketCustodyForkTest is MarketForkTest {
     /// @dev Keys the test can sign with. Fixture positions belong to strangers, so a position
     ///      is handed to `vm.addr(SIGNER_PK)` before any permit is exercised.
     uint256 internal constant SIGNER_PK = 0xA11CE5EED;
@@ -50,37 +35,6 @@ contract MarketCustodyForkTest is PositionMinter {
     ///      ERC-7201 slot for `farmenta.storage.Market`.
     bytes32 internal constant MARKET_STORAGE_LOCATION =
         0x7264a1ba9a51633de6d083d092b5001ae1c4b527f9b0578321c709cd9ac3df00;
-
-    MockPriceOracle internal oracle;
-    PositionValuer internal valuer;
-    CollateralPolicy internal policy;
-    FarmentaMarket internal market;
-    IERC721 internal nft;
-
-    function setUp() public virtual override {
-        super.setUp();
-
-        oracle = new MockPriceOracle();
-        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT, 18);
-        oracle.set(Currency.wrap(RobinhoodChain.WETH), ETH_AT_POOL_SPOT, 18);
-        oracle.set(Currency.wrap(RobinhoodChain.USDG), ONE_USD, RobinhoodChain.USDG_DECIMALS);
-
-        valuer = new PositionValuer(positionManager, stateView, oracle);
-        policy = new CollateralPolicy(Currency.wrap(RobinhoodChain.USDG), owner);
-
-        vm.startPrank(owner);
-        policy.setTokenConfig(Currency.wrap(RobinhoodChain.USDG), true, ICollateralPolicy.Tier.BLUE_CHIP, 6, address(1));
-        policy.setTokenConfig(
-            Currency.wrap(RobinhoodChain.WETH), true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(1)
-        );
-        policy.setTokenConfig(
-            Currency.wrap(RobinhoodChain.NATIVE), true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(1)
-        );
-        vm.stopPrank();
-
-        market = _deployMarket(ICollateralPolicy.Tier.BLUE_CHIP);
-        nft = IERC721(RobinhoodChain.POSITION_MANAGER);
-    }
 
     /* --------------------------------- happy path ----------------------------- */
 
@@ -648,15 +602,6 @@ contract MarketCustodyForkTest is PositionMinter {
         vm.stopPrank();
     }
 
-    function _keyOf(
-        uint256 tokenId
-    ) internal view returns (PoolKey memory key) {
-        (key,) = positionManager.getPoolAndPositionInfo(tokenId);
-    }
-
-    /// @dev The key is read before `vm.prank`, not inside the call. `getPoolAndPositionInfo`
-    ///      is an external call, so evaluating it as an argument would spend the prank and
-    ///      leave `list` to be called by this test contract, which is not the owner.
     /// @dev Empties a position without burning it, which is the only way to reach a live NFT
     ///      that holds nothing.
     function _drain(
@@ -669,68 +614,5 @@ contract MarketCustodyForkTest is PositionMinter {
         params[0] = abi.encode(tokenId, liquidity, uint128(0), uint128(0), bytes(""));
         params[1] = abi.encode(key.currency0, key.currency1, address(this));
         positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp + 60);
-    }
-
-    /// @dev The tick the oracle implies, snapped down onto the pool's spacing. Ranges are
-    ///      placed against this rather than the pool's own tick because the valuer decides
-    ///      in or out of range at the oracle price (§5.1).
-    function _alignedOracleTick(
-        int24 spacing
-    ) internal pure returns (int24) {
-        int24 tick = TickMath.getTickAtSqrtPrice(
-            PriceMath.derivedSqrtPriceX96(ETH_AT_POOL_SPOT, ONE_USD, 18, RobinhoodChain.USDG_DECIMALS)
-        );
-        // Dividing before multiplying is the point: it snaps the tick down onto the spacing.
-        // forge-lint: disable-next-line(divide-before-multiply)
-        int24 aligned = (tick / spacing) * spacing;
-        if (tick < 0 && aligned != tick) aligned -= spacing;
-        return aligned;
-    }
-
-    function _listPoolOf(
-        uint256 tokenId,
-        uint128 minPositionUsd
-    ) internal {
-        _listPoolOf(tokenId, minPositionUsd, 0);
-    }
-
-    function _listPoolOf(
-        uint256 tokenId,
-        uint128 minPositionUsd,
-        uint16 removeHaircutBps
-    ) internal {
-        PoolKey memory key = _keyOf(tokenId);
-        TierPresets.Preset memory preset = TierPresets.blueChip();
-
-        vm.prank(owner);
-        policy.list(
-            key,
-            CollateralPolicy.ListingParams({
-                maxLtvBps: preset.maxLtvBps,
-                ltBps: preset.ltBps,
-                liquidatorBonusBps: preset.minLiquidatorBonusBps,
-                removeHaircutBps: removeHaircutBps,
-                debtCapUsdg: preset.maxDebtCapUsdg,
-                minPositionUsd: minPositionUsd
-            })
-        );
-    }
-
-    function _deployMarket(
-        ICollateralPolicy.Tier tier_
-    ) internal returns (FarmentaMarket) {
-        FarmentaMarket implementation =
-            new FarmentaMarket(positionManager, policy, valuer, oracle, new InterestRateModel(tier_));
-        return FarmentaMarket(
-            payable(address(
-                    new ERC1967Proxy(
-                        address(implementation),
-                        abi.encodeCall(
-                            FarmentaMarket.initialize,
-                            (IERC20(RobinhoodChain.USDG), "Farmenta USDG", "fUSDG", tier_, owner)
-                        )
-                    )
-                ))
-        );
     }
 }
