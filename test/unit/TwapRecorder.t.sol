@@ -55,6 +55,20 @@ contract TwapRecorderTest is Test {
         assertEq(recorder.consult(poolId), 125);
     }
 
+    function test_consultLimitsOneTenXTickIntervalToOneSixthOfTheWindow() public {
+        // ln(10) / ln(1.0001) rounds to 23,026 ticks. It applies for one of six
+        // five-minute intervals, so the 30-minute geometric TWAP rises by 3,837 ticks.
+        _record(0);
+        _recordAfter(300, 23_026);
+        _recordAfter(300, 0);
+        _recordAfter(300, 0);
+        _recordAfter(300, 0);
+        _recordAfter(300, 0);
+        _recordAfter(300, 0);
+
+        assertEq(recorder.consult(poolId, 1800), 3837);
+    }
+
     function test_secondRecordInSameTimestampIsIgnored() public {
         _record(100);
         _recordAfter(300, 200);
@@ -143,20 +157,6 @@ contract TwapRecorderTest is Test {
         for (uint256 i = 0; i < keys.length; ++i) {
             assertEq(recorder.consult(keys[i].toId(), 300), int24(uint24(i)));
         }
-    }
-
-    function test_recordBatchKeepsRoutinePerPoolCostNearThirtyThousandGas() public {
-        PoolKey[] memory keys = _batchKeys();
-        recorder.recordBatch(keys);
-
-        vm.warp(block.timestamp + 300);
-        uint256 gasBefore = gasleft();
-        recorder.recordBatch(keys);
-        uint256 gasUsed = gasBefore - gasleft();
-
-        // The unit harness measures the call body only, not transaction or calldata costs.
-        // Five routine updates consume about 181k with the mock StateView, within §13's ~30k target.
-        assertLt(gasUsed, 190_000, "routine batch exceeded the keeper gas budget");
     }
 
     function testFuzz_consultTracksConstantTickAcrossRecordSpacing(

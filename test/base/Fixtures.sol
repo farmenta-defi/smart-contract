@@ -6,6 +6,8 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
+import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
+
 /// @title Fixtures
 /// @notice Real Robinhood Chain pools and hooks used as test fixtures.
 /// @dev Pool ids come from ARCHITECTURE.md §18; hook addresses and their permission bits
@@ -29,9 +31,19 @@ library Fixtures {
     PoolId internal constant POOL_WETH_USDG_PLAIN =
         PoolId.wrap(0x84bd4e2d8be11aeb0afc1195b38f587b61e90068548f1063fdbe448fb8cad0b6);
 
-    /// @notice A pools.trade/Doppler meme pool initialized before the pinned fork block.
-    /// @dev Its complete key comes from PoolManager's Initialize event at block 54,190,095;
-    ///      keeping the key (not merely its id) lets recorder tests exercise `record` too.
+    /// @notice ETH/USDG, dynamic fee, tickSpacing 60, with `HOOK_ETH_USDG_TS60`.
+    PoolId internal constant POOL_ETH_USDG_TS60 =
+        PoolId.wrap(0x30dac7167c36242d1bacfd30561d444cf014529ee55978991d03e4ee178e725a);
+
+    /// @notice ETH/USDG, no hook, fee 500 (0.05%), tickSpacing 10.
+    PoolId internal constant POOL_ETH_USDG_PLAIN_TS10 =
+        PoolId.wrap(0x387bf619da4d3fb62bb276482693dba1b9b3520f573cabdfe033384a24125982);
+
+    /// @notice A pools.trade/Doppler pool initialized before the pinned fork block.
+    /// @dev This is FIG/BALLS, not a USDG-quoted pool, so it is a recorder-only fixture.
+    ///      FAR-16 must mint its own USDG-quoted pool on the fork. Its complete key comes from
+    ///      PoolManager's Initialize event at block 54,190,095; keeping the key (not merely
+    ///      its id) lets recorder tests exercise `record` too.
     PoolId internal constant POOL_MEME_DOPPLER =
         PoolId.wrap(0xc6451046bf06c20295032cf6e05e85bb1ca35fd7aebaf30c59c33350fe3c776e);
 
@@ -40,9 +52,60 @@ library Fixtures {
             currency0: Currency.wrap(0x41F4267525a8AFf329540eF24fD83d9044758B33),
             currency1: Currency.wrap(0x7384d1F183526d83aad28bA5A5eD6dceeA211E18),
             fee: 0x800000,
-            tickSpacing: 128,
+            tickSpacing: 8,
             hooks: IHooks(HOOK_DOPPLER)
         });
+    }
+
+    /// @notice The five initialized pools used to measure the recorder batch on the pinned fork.
+    /// @dev Keep the keys and their expected ids together so an incorrect fixture fails before
+    ///      `recordBatch` can surface the unhelpful generic `TwapUnavailable` error.
+    function liveRecorderPoolKeys() internal pure returns (PoolKey[] memory keys) {
+        keys = new PoolKey[](5);
+        keys[0] = PoolKey({
+            currency0: Currency.wrap(RobinhoodChain.NATIVE),
+            currency1: Currency.wrap(RobinhoodChain.USDG),
+            fee: 0x800000,
+            tickSpacing: 1,
+            hooks: IHooks(HOOK_ETH_USDG_DYN)
+        });
+        keys[1] = PoolKey({
+            currency0: Currency.wrap(RobinhoodChain.NATIVE),
+            currency1: Currency.wrap(RobinhoodChain.USDG),
+            fee: 460,
+            tickSpacing: 9,
+            hooks: IHooks(address(0))
+        });
+        keys[2] = PoolKey({
+            currency0: Currency.wrap(RobinhoodChain.WETH),
+            currency1: Currency.wrap(RobinhoodChain.USDG),
+            fee: 200,
+            tickSpacing: 4,
+            hooks: IHooks(address(0))
+        });
+        keys[3] = PoolKey({
+            currency0: Currency.wrap(RobinhoodChain.NATIVE),
+            currency1: Currency.wrap(RobinhoodChain.USDG),
+            fee: 0x800000,
+            tickSpacing: 60,
+            hooks: IHooks(HOOK_ETH_USDG_TS60)
+        });
+        keys[4] = PoolKey({
+            currency0: Currency.wrap(RobinhoodChain.NATIVE),
+            currency1: Currency.wrap(RobinhoodChain.USDG),
+            fee: 500,
+            tickSpacing: 10,
+            hooks: IHooks(address(0))
+        });
+    }
+
+    function liveRecorderPoolIds() internal pure returns (PoolId[] memory ids) {
+        ids = new PoolId[](5);
+        ids[0] = POOL_ETH_USDG_DYN;
+        ids[1] = POOL_ETH_USDG_PLAIN;
+        ids[2] = POOL_WETH_USDG_PLAIN;
+        ids[3] = POOL_ETH_USDG_TS60;
+        ids[4] = POOL_ETH_USDG_PLAIN_TS10;
     }
 
     /* ---------------------------------- Hooks --------------------------------- */
