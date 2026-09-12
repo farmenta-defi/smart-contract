@@ -24,6 +24,7 @@ import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {DebtMath} from "./libraries/DebtMath.sol";
 import {MarketDebt} from "./libraries/MarketDebt.sol";
 import {MarketLedger} from "./libraries/MarketLedger.sol";
+import {MarketLiquidation} from "./libraries/MarketLiquidation.sol";
 import {MarketMint} from "./libraries/MarketMint.sol";
 
 /// @title FarmentaMarket
@@ -124,6 +125,10 @@ contract FarmentaMarket is
     event UnaccountedTokenRescued(uint256 indexed tokenId, address indexed to);
     event Borrow(uint256 indexed tokenId, uint256 amount);
     event Repay(uint256 indexed tokenId, uint256 amount);
+    event Liquidate(
+        uint256 indexed tokenId, address indexed liquidator, uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt
+    );
+    event BadDebtSocialized(uint256 amount);
     event ReservesUpdated(uint256 reserves);
     event ReservesWithdrawn(uint256 amount, address indexed to);
 
@@ -433,6 +438,73 @@ contract FarmentaMarket is
         return MarketDebt.repay(_debtEnv(), tokenId, amount);
     }
 
+    /// @notice Repays an unhealthy position's debt on its behalf and seizes collateral for it.
+    /// @param tokenId The position to liquidate.
+    /// @param repayAmount USDG the caller offers against the debt. Cut down by the close
+    ///        factor (§6.2), and again by what the position can actually pay for.
+    /// @param minOut0 Least currency0 the caller accepts, measured on what **they** receive.
+    /// @param minOut1 Least currency1 the caller accepts, on the same basis.
+    /// @param to Where the seized tokens go.
+    /// @return repaid USDG actually taken off the debt, the borrower's own fees included.
+    /// @return out0 currency0 the liquidator received.
+    /// @return out1 currency1 the liquidator received.
+    /// @return badDebt Debt the position could not cover, absorbed under §9.
+    /// @dev One function with two branches, as §8 steps 4 and 5 describe them, because the
+    ///      branch is not a mode the caller picks: it is whatever is left when the repay cap
+    ///      has been applied. A seizure that reaches past everything the position holds takes
+    ///      the position whole; anything smaller takes a slice.
+    ///
+    ///      **Nothing on this path touches the borrow price gate of §5.2, and that is the
+    ///      point.** Collateral is valued through `valueForLiquidation`, and the debt side is
+    ///      priced with `priceForLiquidation` too, so a USDG outside [0,97; 1,03], a fresh
+    ///      Pyth quote 3% away from Chainlink, or a pool 2% off the oracle all stop borrowing
+    ///      and leave liquidation running. Revert Lend blocks both; Farmenta blocks only
+    ///      borrowing, so there is never a window where an underwater position cannot be
+    ///      cleared (§5.2).
+    ///
+    ///      **The partial branch routes the payout through this contract, and must keep
+    ///      doing so.** `_decrease` realises the position's *entire* fee balance no matter how
+    ///      little liquidity it pulls, so a `TAKE_PAIR` addressed straight to the liquidator
+    ///      hands them every fee in the position for the price of a one-wei repay — the v0.2
+    ///      gap, closed in v0.3. The market takes delivery, forwards the principal slice plus
+    ///      fees worth `feeCredit`, and keeps the rest for the borrower. It is also why this
+    ///      cannot reuse `decreaseLiquidity` (FAR-8), which pays its caller directly.
+    ///
+    ///      **The work itself runs from `MarketLiquidation`, by `delegatecall`.** It is the
+    ///      market's storage, the market's address and the liquidator's `msg.sender` either
+    ///      way; what changes is where the code sits, and it has to sit elsewhere — this
+    ///      implementation had 1,474 bytes left under EIP-170 and §8 needs about five thousand
+    ///      (foundry.toml's `deploy` note). What stays here is what has to be visible from
+    ///      outside: the pause, the reentrancy guard, the accrual, and every event.
+    ///
+    ///      §8 step 1 also asks for a TWAP `record` on meme pools. That belongs with the meme
+    ///      price path (FAR-16) and arrives with it: this market has no recorder to call yet,
+    ///      and a liquidation priced off a TWAP nothing reads would be worse than one priced
+    ///      off Chainlink.
+    function liquidate(
+        uint256 tokenId,
+        uint256 repayAmount,
+        uint128 minOut0,
+        uint128 minOut1,
+        address to
+    ) external whenNotPaused nonReentrant returns (uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt) {
+        accrue();
+
+        MarketLiquidation.Outcome memory outcome = MarketLiquidation.execute(
+            MarketLiquidation.Env({
+                positionManager: positionManager, policy: policy, valuer: valuer, oracle: oracle, asset: asset()
+            }),
+            MarketLiquidation.Request({
+                tokenId: tokenId, repayAmount: repayAmount, minOut0: minOut0, minOut1: minOut1, to: to
+            })
+        );
+
+        (repaid, out0, out1, badDebt) = (outcome.repaid, outcome.out0, outcome.out1, outcome.badDebt);
+        emit ReservesUpdated(_marketStorage().reserves);
+        if (outcome.socialized != 0) emit BadDebtSocialized(outcome.socialized);
+        emit Liquidate(tokenId, msg.sender, repaid, out0, out1, badDebt);
+    }
+
     function debtOf(
         uint256 tokenId
     ) public view returns (uint256) {
@@ -644,6 +716,8 @@ contract FarmentaMarket is
         return DECIMALS_OFFSET;
     }
 
+    /// @dev The layout itself lives in `MarketLedger`, so `MarketLiquidation` can write the
+    ///      same slots from its own compilation unit without a second copy of the struct.
     function _marketStorage() private pure returns (MarketLedger.Layout storage $) {
         return MarketLedger.layout();
     }
