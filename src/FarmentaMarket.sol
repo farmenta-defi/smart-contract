@@ -119,6 +119,7 @@ contract FarmentaMarket is
         uint256 reserves;
         uint16 reserveFactorBps;
         uint16 reserveFloorBps;
+        uint256 totalReservesWithdrawn;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("farmenta.storage.Market")) - 1)) & ~bytes32(uint256(0xff))
@@ -160,6 +161,7 @@ contract FarmentaMarket is
     event Borrow(uint256 indexed tokenId, uint256 amount);
     event Repay(uint256 indexed tokenId, uint256 amount);
     event ReservesUpdated(uint256 reserves);
+    event ReservesWithdrawn(uint256 amount, address indexed to);
 
     error ZeroAddress();
     error TierNotSet();
@@ -182,6 +184,7 @@ contract FarmentaMarket is
     error PoolNotOpenForBorrowing(PoolId poolId);
     error NativeValueMismatch(uint256 expected, uint256 sent);
     error PermitDoesNotMatchPool();
+    error ReserveWithdrawalExceedsAvailable(uint256 amount, uint256 available);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -620,6 +623,41 @@ contract FarmentaMarket is
         return _marketStorage().reserves;
     }
 
+    /// @notice Cumulative reserve revenue withdrawn by the owner.
+    function totalReservesWithdrawn() external view returns (uint256) {
+        return _marketStorage().totalReservesWithdrawn;
+    }
+
+    /// @notice The reserve buffer that remains unavailable to the owner.
+    /// @dev The floor tracks lender assets, not borrows: repaying a loan moves value from debt
+    ///      to cash, but does not reduce what lenders have at risk (§7).
+    function reserveFloor() public view returns (uint256) {
+        return _reserveFloor(IERC20(asset()).balanceOf(address(this)));
+    }
+
+    /// @notice Reserve revenue currently available for owner withdrawal.
+    /// @dev Reserves are commingled with lender cash, so cash is a physical cap rather than a
+    ///      withdrawal priority. The result is zero whenever the reserve buffer is underfilled.
+    function withdrawableReserves() public view returns (uint256) {
+        return _withdrawableReserves(IERC20(asset()).balanceOf(address(this)));
+    }
+
+    function _withdrawableReserves(
+        uint256 cash
+    ) private view returns (uint256) {
+        MarketStorage storage $ = _marketStorage();
+        uint256 floor = _reserveFloor(cash);
+        if ($.reserves <= floor) return 0;
+        return Math.min($.reserves - floor, cash);
+    }
+
+    function _reserveFloor(
+        uint256 cash
+    ) private view returns (uint256) {
+        MarketStorage storage $ = _marketStorage();
+        return (cash + $.totalBorrows - $.reserves) * $.reserveFloorBps / BPS;
+    }
+
     function poolDebt(
         PoolId poolId
     ) external view returns (uint256) {
@@ -659,6 +697,28 @@ contract FarmentaMarket is
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @notice Transfers reserve revenue above the tier's lender-protection floor.
+    /// @param amount USDG amount to transfer.
+    /// @param to Recipient of the reserve withdrawal.
+    /// @dev The floor is calculated before reserve accounting and cash are reduced, so this
+    ///      transfer leaves `totalAssets` and the lender buffer unchanged (§7).
+    function withdrawReserves(
+        uint256 amount,
+        address to
+    ) external onlyOwner nonReentrant {
+        if (to == address(0) || to == address(this)) revert InvalidRecipient(to);
+        accrue();
+
+        uint256 available = withdrawableReserves();
+        if (amount > available) revert ReserveWithdrawalExceedsAvailable(amount, available);
+
+        MarketStorage storage $ = _marketStorage();
+        $.reserves -= amount;
+        $.totalReservesWithdrawn += amount;
+        IERC20(asset()).safeTransfer(to, amount);
+        emit ReservesWithdrawn(amount, to);
     }
 
     /// @notice Recovers a position that reached this contract without being recorded.
