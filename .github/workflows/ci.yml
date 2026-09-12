@@ -35,7 +35,16 @@ jobs:
         run: forge fmt --check
 
       - name: Build
+        run: forge build
+
+      # Size is gated on the profile that ships, not on `lite`: with the optimizer off the
+      # market compiles to ~29 KB and would fail EIP-170 in a build nobody deploys. This is
+      # the only via-IR compile in the fast lane, so it is a separate step that names the
+      # profile rather than a flag on the one above.
+      - name: Contract sizes (shipping profile)
         run: forge build --sizes
+        env:
+          FOUNDRY_PROFILE: deploy
 
       - name: Unit tests (no network)
         run: forge test --no-match-path "test/fork/**" -vv
