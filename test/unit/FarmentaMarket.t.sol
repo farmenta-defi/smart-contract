@@ -265,6 +265,129 @@ contract FarmentaMarketTest is Test {
         assertEq(market.owner(), stranger, "ownership did not move");
     }
 
+    /* ----------------------------- reserve withdrawal ---------------------------- */
+
+    function test_withdrawReservesLeavesTheTotalAssetsFloorUntouched() public {
+        address treasury = address(0x7EA5);
+        usdg.mint(address(market), 1_000_000e6);
+        _setReserves(market, 20_000e6);
+
+        // Assets are 980,000 USDG after reserves, so the blue-chip floor is 9,800 USDG.
+        assertEq(market.withdrawableReserves(), 10_200e6, "surplus above the total-assets floor");
+        uint256 sharePriceBefore = market.convertToAssets(1e18);
+
+        vm.prank(owner);
+        vm.expectEmit(false, false, false, true, address(market));
+        emit FarmentaMarket.ReservesUpdated(9800e6);
+        vm.expectEmit(true, false, false, true, address(market));
+        emit FarmentaMarket.ReservesWithdrawn(10_200e6, treasury);
+        market.withdrawReserves(10_200e6, treasury);
+
+        assertEq(usdg.balanceOf(treasury), 10_200e6, "treasury did not receive the surplus");
+        assertEq(market.reserves(), 9800e6, "reserve floor was not retained");
+        assertEq(market.totalReservesWithdrawn(), 10_200e6, "withdrawal history was not recorded");
+        assertEq(market.totalAssets(), 980_000e6, "reserve transfer changed lender assets");
+        assertEq(market.convertToAssets(1e18), sharePriceBefore, "reserve transfer changed share price");
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.ReserveWithdrawalExceedsAvailable.selector, 1, 0));
+        market.withdrawReserves(1, treasury);
+    }
+
+    function test_withdrawReservesIsLimitedByCash() public {
+        address treasury = address(0x7EA5);
+        address lender = address(0x1E4DE2);
+        usdg.mint(lender, 8000e6);
+        vm.startPrank(lender);
+        usdg.approve(address(market), type(uint256).max);
+        market.deposit(8000e6, lender);
+        vm.stopPrank();
+        _setTotalBorrows(market, 100_000e6);
+        _setReserves(market, 30_000e6);
+
+        // Reserve surplus is 29,220 USDG, but only 8,000 USDG exists as cash.
+        assertEq(market.withdrawableReserves(), 8000e6, "cash cap was not applied");
+
+        vm.prank(owner);
+        market.withdrawReserves(8000e6, treasury);
+
+        assertEq(usdg.balanceOf(treasury), 8000e6, "cash-limited amount was not transferred");
+        assertEq(market.reserves(), 22_000e6, "only withdrawn reserve should decrease");
+        assertEq(market.maxWithdraw(lender), 0, "cash cap should close lender withdrawals");
+        assertEq(market.totalAssets(), 78_000e6, "cash withdrawal changed lender value");
+    }
+
+    function test_withdrawReservesClosesBelowTheFloorAndReopensAfterReplenishment() public {
+        address treasury = address(0x7EA5);
+        usdg.mint(address(market), 1_000_000e6);
+        _setReserves(market, 9000e6);
+
+        assertEq(market.reserveFloor(), 9910e6, "floor should track lender assets");
+        assertEq(market.withdrawableReserves(), 0, "underfilled reserve must stay locked");
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.ReserveWithdrawalExceedsAvailable.selector, 1, 0));
+        market.withdrawReserves(1, treasury);
+
+        _setReserves(market, 20_000e6);
+        assertEq(market.withdrawableReserves(), 10_200e6, "replenishment should reopen withdrawal automatically");
+    }
+
+    function test_depositRaisesFloorAndReducesWithdrawableReserves() public {
+        address lender = address(0x1E4DE2);
+        usdg.mint(address(market), 1_000_000e6);
+        _setReserves(market, 20_000e6);
+        uint256 withdrawableBefore = market.withdrawableReserves();
+
+        usdg.mint(lender, 100_000e6);
+        vm.startPrank(lender);
+        usdg.approve(address(market), type(uint256).max);
+        market.deposit(100_000e6, lender);
+        vm.stopPrank();
+
+        assertEq(market.totalAssets(), 1_080_000e6, "deposit did not raise total assets");
+        assertEq(market.withdrawableReserves(), withdrawableBefore - 1000e6, "floor did not rise with lender assets");
+    }
+
+    function test_withdrawReservesAccruesBeforeCalculatingAvailability() public {
+        usdg.mint(address(market), 100_000e6);
+        _setTotalBorrowShares(market, 100_000e6);
+        _setTotalBorrows(market, 100_000e6);
+        _setReserves(market, 10_000e6);
+        uint256 withdrawableBefore = market.withdrawableReserves();
+        vm.warp(block.timestamp + 1 days);
+
+        vm.prank(owner);
+        market.withdrawReserves(withdrawableBefore + 1, address(0x7EA5));
+
+        assertEq(market.totalReservesWithdrawn(), withdrawableBefore + 1, "withdrawal amount was not recorded");
+        assertGe(market.reserves(), market.reserveFloor(), "withdrawal crossed the accrued floor");
+    }
+
+    function test_withdrawReservesUsesTheMemeFloor() public {
+        FarmentaMarket memeMarket = _deployProxy(ICollateralPolicy.Tier.MEME);
+        usdg.mint(address(memeMarket), 1_000_000e6);
+        _setReserves(memeMarket, 30_000e6);
+
+        // 2.5% of 970,000 USDG is 24,250 USDG, leaving 5,750 USDG withdrawable.
+        assertEq(memeMarket.withdrawableReserves(), 5750e6, "meme floor is not 2.5%");
+    }
+
+    function test_onlyOwnerCanWithdrawReserves() public {
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        market.withdrawReserves(0, stranger);
+    }
+
+    function test_withdrawReservesRejectsInvalidRecipient() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.InvalidRecipient.selector, address(0)));
+        market.withdrawReserves(0, address(0));
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.InvalidRecipient.selector, address(market)));
+        market.withdrawReserves(0, address(market));
+    }
+
     /* ----------------------------- mint and deposit --------------------------- */
 
     /// @notice ETH sent along with an ERC-20 pair is refused before anything moves.
@@ -449,6 +572,27 @@ contract FarmentaMarketTest is Test {
 
     function _marketStorageLocation() internal pure returns (bytes32) {
         return 0x7264a1ba9a51633de6d083d092b5001ae1c4b527f9b0578321c709cd9ac3df00;
+    }
+
+    function _setTotalBorrows(
+        FarmentaMarket target,
+        uint256 amount
+    ) internal {
+        vm.store(address(target), bytes32(uint256(_marketStorageLocation()) + 4), bytes32(amount));
+    }
+
+    function _setTotalBorrowShares(
+        FarmentaMarket target,
+        uint256 amount
+    ) internal {
+        vm.store(address(target), bytes32(uint256(_marketStorageLocation()) + 3), bytes32(amount));
+    }
+
+    function _setReserves(
+        FarmentaMarket target,
+        uint256 amount
+    ) internal {
+        vm.store(address(target), bytes32(uint256(_marketStorageLocation()) + 7), bytes32(amount));
     }
 
     function _deployImplementation() internal returns (FarmentaMarket) {

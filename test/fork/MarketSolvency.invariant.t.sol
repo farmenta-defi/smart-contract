@@ -15,18 +15,23 @@ contract MarketHandler is Test {
     uint256 internal immutable tokenId;
     address internal immutable borrower;
     address internal immutable lender;
+    address internal immutable owner;
+    /// @dev Ghost state is asserted by an invariant function; handler reverts are discarded.
+    bool public sawFloorBreach;
 
     constructor(
         FarmentaMarket market_,
         uint256 tokenId_,
         address borrower_,
-        address lender_
+        address lender_,
+        address owner_
     ) {
         market = market_;
         usdg = IERC20(market_.asset());
         tokenId = tokenId_;
         borrower = borrower_;
         lender = lender_;
+        owner = owner_;
     }
 
     function borrow(
@@ -74,6 +79,17 @@ contract MarketHandler is Test {
         market.withdraw(amount, lender, lender);
     }
 
+    function withdrawReserves(
+        uint256 amount
+    ) external {
+        uint256 maximum = market.withdrawableReserves();
+        if (maximum == 0) return;
+        amount = bound(amount, 1, maximum);
+        vm.prank(owner);
+        market.withdrawReserves(amount, owner);
+        if (market.reserves() < market.reserveFloor()) sawFloorBreach = true;
+    }
+
     function passTime(
         uint40 elapsed
     ) external {
@@ -114,11 +130,19 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
         uint256 amount = market.maxBorrow(tokenId) / 2;
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
-        handler = new MarketHandler(market, tokenId, borrower, lender);
+        handler = new MarketHandler(market, tokenId, borrower, lender, market.owner());
         targetContract(address(handler));
     }
 
     function invariant_totalBorrowsMatchesBorrowSharesAndIndex() public view {
         assertEq(market.totalBorrows(), market.totalBorrowShares() * market.borrowIndex() / 1e18);
+    }
+
+    function invariant_withdrawableNeverExceedsCash() public view {
+        assertLe(market.withdrawableReserves(), IERC20(market.asset()).balanceOf(address(market)));
+    }
+
+    function invariant_withdrawalNeverBreachesTheFloor() public view {
+        assertFalse(handler.sawFloorBreach(), "a withdrawal left reserves below the floor");
     }
 }
