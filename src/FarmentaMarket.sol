@@ -522,7 +522,7 @@ contract FarmentaMarket is
         ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
         oracle.checkBorrowPrice($.tier);
         IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
-        if (valuation.spotDeviationBps > 200) {
+        if ($.tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > 200) {
             revert SpotPriceDeviation(valuation.spotDeviationBps, 200);
         }
         uint256 requestedDebt = debtOf(tokenId) + amount;
