@@ -47,15 +47,34 @@ contract TwapRecorderForkTest is ForkTest {
         recorder.recordBatch(keys);
 
         vm.warp(block.timestamp + 300);
+        vm.cool(address(recorder));
+        vm.cool(address(stateView));
+        vm.cool(address(poolManager));
         uint256 gasBefore = gasleft();
         recorder.recordBatch(keys);
-        uint256 gasUsed = gasBefore - gasleft();
+        uint256 bufferFillGas = gasBefore - gasleft();
+
+        uint256 capacity = recorder.OBSERVATION_CAPACITY();
+        for (uint256 i = 2; i < capacity; ++i) {
+            vm.warp(block.timestamp + 300);
+            recorder.recordBatch(keys);
+        }
+
+        vm.warp(block.timestamp + 300);
+        vm.cool(address(recorder));
+        vm.cool(address(stateView));
+        vm.cool(address(poolManager));
+        gasBefore = gasleft();
+        recorder.recordBatch(keys);
+        uint256 steadyStateGas = gasBefore - gasleft();
 
         // This measures the recorder call body against the deployed StateView, excluding
-        // transaction base and calldata. At ForkTest.FORK_BLOCK it measured 155,648 gas on
-        // Foundry nightly and 221,184 on stable for these five pools. Keep the bound loose
-        // across stable bumps; ARCHITECTURE.md §13 records the toolchain split and baseline.
-        emit log_named_uint("routine recordBatch gas", gasUsed);
-        assertLt(gasUsed, 500_000, "routine batch exceeded 100k gas per live pool");
+        // transaction base and calldata. The stable reference budgets are about 36k gas per
+        // pool while filling fresh observation slots and 18.5k after the buffer wraps. The
+        // difference is the first-write SSTORE cost; each phase has its own regression bound.
+        emit log_named_uint("buffer-fill recordBatch gas", bufferFillGas);
+        emit log_named_uint("steady-state recordBatch gas", steadyStateGas);
+        assertLt(bufferFillGas, keys.length * 36_000, "buffer-fill batch exceeded 36k gas per live pool");
+        assertLt(steadyStateGas, keys.length * 18_500, "steady-state batch exceeded 18.5k gas per live pool");
     }
 }
