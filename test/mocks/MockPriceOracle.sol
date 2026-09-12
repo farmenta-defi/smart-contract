@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
+import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
 
 /// @notice Oracle stub with settable prices, for testing valuation independently of feeds.
@@ -13,6 +14,9 @@ contract MockPriceOracle is IPriceOracle {
 
     mapping(Currency currency => uint256) internal _price;
     mapping(Currency currency => uint8) internal _decimals;
+    bool internal _borrowPriceValid = true;
+
+    error BorrowPriceRejected();
 
     function set(
         Currency currency,
@@ -37,6 +41,18 @@ contract MockPriceOracle is IPriceOracle {
         Currency currency
     ) external view returns (uint8) {
         return _decimals[currency];
+    }
+
+    function setBorrowPriceValid(
+        bool valid
+    ) external {
+        _borrowPriceValid = valid;
+    }
+
+    function checkBorrowPrice(
+        ICollateralPolicy.Tier
+    ) external view {
+        if (!_borrowPriceValid) revert BorrowPriceRejected();
     }
 
     function priceForLiquidation(

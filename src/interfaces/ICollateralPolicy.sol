@@ -21,6 +21,9 @@ interface ICollateralPolicy {
         MEME
     }
 
+    /// @notice The MVP borrow asset and required quote currency for every accepted pool.
+    function quote() external view returns (Currency);
+
     /// @notice The terms a listed pool lends on.
     /// @param maxLtvBps Highest LTV a borrow may reach, in basis points.
     /// @param ltBps Liquidation threshold **as of now** — already resolved through any ramp.
