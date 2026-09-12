@@ -180,6 +180,7 @@ contract FarmentaMarket is
     error PoolDebtCapExceeded(PoolId poolId, uint256 requestedDebt, uint256 debtCap);
     error MarketDebtCapExceeded(uint256 requestedDebt, uint256 debtCap);
     error PoolNotOpenForBorrowing(PoolId poolId);
+    error SpotPriceDeviation(uint256 deviationBps, uint256 maximumDeviationBps);
     error NativeValueMismatch(uint256 expected, uint256 sent);
     error PermitDoesNotMatchPool();
 
@@ -518,11 +519,15 @@ contract FarmentaMarket is
         if (loan.owner != msg.sender) revert BorrowerNotAuthorized(tokenId, msg.sender);
         if (!policy.acceptsNewPositions(loan.poolKeyId)) revert PoolNotOpenForBorrowing(loan.poolKeyId);
 
-        // FAR-20 installs fresh-price, USDG-bound, and spot-deviation checks at this boundary.
         ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
+        oracle.checkBorrowPrice($.tier);
+        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
+        if (valuation.spotDeviationBps > 200) {
+            revert SpotPriceDeviation(valuation.spotDeviationBps, 200);
+        }
         uint256 requestedDebt = debtOf(tokenId) + amount;
         uint256 requestedDebtUsd = _debtUsd(requestedDebt);
-        uint256 maximumDebtUsd = _borrowValue(tokenId) * terms.maxLtvBps / BPS;
+        uint256 maximumDebtUsd = _collateralValue(valuation, terms) * terms.maxLtvBps / BPS;
         if (requestedDebtUsd > maximumDebtUsd) revert BorrowExceedsMaxLtv(requestedDebtUsd, maximumDebtUsd);
         if (requestedDebt < 10e6) revert BorrowBelowMinimum(requestedDebt);
         uint256 requestedPoolDebt = _poolDebt(loan.poolKeyId) + amount;
@@ -741,6 +746,13 @@ contract FarmentaMarket is
         Loan storage loan = $.loans[tokenId];
         ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
         IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
+        return _collateralValue(valuation, terms);
+    }
+
+    function _collateralValue(
+        IPositionValuer.Valuation memory valuation,
+        ICollateralPolicy.Terms memory terms
+    ) private pure returns (uint256) {
         uint256 cappedFees = Math.min(valuation.feesUsd, valuation.principalUsd / 10);
         return (valuation.principalUsd + cappedFees) * (BPS - terms.removeHaircutBps) / BPS;
     }

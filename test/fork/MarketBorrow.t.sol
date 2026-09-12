@@ -13,6 +13,7 @@ import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
+import {MockPriceOracle} from "../mocks/MockPriceOracle.sol";
 
 /// @notice Fork coverage for the debt ledger and ERC-4626 cash constraints.
 /// @dev Uses the shared fork harness without re-running the custody suite.
@@ -47,6 +48,24 @@ contract MarketBorrowForkTest is MarketForkTest {
         vm.prank(holder);
         vm.expectPartialRevert(FarmentaMarket.BorrowExceedsMaxLtv.selector);
         market.borrow(tokenId, 200e6, holder);
+    }
+
+    function test_borrowRejectsAnUnverifiedOraclePrice() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        oracle.setBorrowPriceValid(false);
+
+        vm.prank(holder);
+        vm.expectRevert(MockPriceOracle.BorrowPriceRejected.selector);
+        market.borrow(tokenId, 10e6, holder);
+    }
+
+    function test_borrowRejectsSpotOutsideTheTwoPercentGate() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2400e18, 18);
+
+        vm.prank(holder);
+        vm.expectPartialRevert(FarmentaMarket.SpotPriceDeviation.selector);
+        market.borrow(tokenId, 10e6, holder);
     }
 
     function test_repayMaxAfterAccrualClearsDebtAndAllowsWithdrawal() public {
