@@ -353,12 +353,14 @@ contract FarmentaMarketTest is Test {
         _setTotalBorrowShares(market, 100_000e6);
         _setTotalBorrows(market, 100_000e6);
         _setReserves(market, 10_000e6);
+        uint256 withdrawableBefore = market.withdrawableReserves();
         vm.warp(block.timestamp + 1 days);
 
         vm.prank(owner);
-        market.withdrawReserves(0, address(0x7EA5));
+        market.withdrawReserves(withdrawableBefore + 1, address(0x7EA5));
 
-        assertGt(market.reserves(), 10_000e6, "withdrawal did not accrue reserve interest first");
+        assertEq(market.totalReservesWithdrawn(), withdrawableBefore + 1, "withdrawal amount was not recorded");
+        assertGe(market.reserves(), market.reserveFloor(), "withdrawal crossed the accrued floor");
     }
 
     function test_withdrawReservesUsesTheMemeFloor() public {
