@@ -10,7 +10,7 @@ import {IStateView} from "@uniswap/v4-periphery/src/interfaces/IStateView.sol";
 /// @dev StateView reads slot0 through Uniswap's StateLibrary. Recording uses the previous
 ///      tick for elapsed time, matching Uniswap v3's cumulative-observation convention.
 contract TwapRecorder {
-    uint16 public constant OBSERVATION_CAPACITY = 1024;
+    uint16 public constant OBSERVATION_CAPACITY = 2048;
     uint32 public constant DEFAULT_WINDOW = 1800;
     uint32 public constant STALE_THRESHOLD = 900;
 

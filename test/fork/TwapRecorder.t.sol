@@ -47,15 +47,35 @@ contract TwapRecorderForkTest is ForkTest {
         recorder.recordBatch(keys);
 
         vm.warp(block.timestamp + 300);
+        vm.cool(address(recorder));
+        vm.cool(address(stateView));
+        vm.cool(address(poolManager));
         uint256 gasBefore = gasleft();
         recorder.recordBatch(keys);
-        uint256 gasUsed = gasBefore - gasleft();
+        uint256 bufferFillGas = gasBefore - gasleft();
+
+        uint256 capacity = recorder.OBSERVATION_CAPACITY();
+        for (uint256 i = 2; i < capacity; ++i) {
+            vm.warp(block.timestamp + 300);
+            recorder.recordBatch(keys);
+        }
+
+        vm.warp(block.timestamp + 300);
+        vm.cool(address(recorder));
+        vm.cool(address(stateView));
+        vm.cool(address(poolManager));
+        gasBefore = gasleft();
+        recorder.recordBatch(keys);
+        uint256 steadyStateGas = gasBefore - gasleft();
 
         // This measures the recorder call body against the deployed StateView, excluding
-        // transaction base and calldata. At ForkTest.FORK_BLOCK it measured 155,648 gas on
-        // Foundry nightly and 221,184 on stable for these five pools. Keep the bound loose
-        // across stable bumps; ARCHITECTURE.md §13 records the toolchain split and baseline.
-        emit log_named_uint("routine recordBatch gas", gasUsed);
-        assertLt(gasUsed, 500_000, "routine batch exceeded 100k gas per live pool");
+        // transaction base and calldata. The measured batch costs are about 190k while filling
+        // fresh observation slots and 102k after the buffer wraps. Keep loose 2x ceilings so
+        // toolchain and fork-account-access variance does not recreate FAR-25's false failure;
+        // the phase split still catches an order-of-magnitude regression in either path.
+        emit log_named_uint("buffer-fill recordBatch gas", bufferFillGas);
+        emit log_named_uint("steady-state recordBatch gas", steadyStateGas);
+        assertLt(bufferFillGas, 2 * 189_648, "buffer-fill batch exceeded loose regression ceiling");
+        assertLt(steadyStateGas, 2 * 102_338, "steady-state batch exceeded loose regression ceiling");
     }
 }

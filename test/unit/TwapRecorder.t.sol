@@ -128,17 +128,32 @@ contract TwapRecorderTest is Test {
         assertEq(recorder.consult(poolId, 1800), -51);
     }
 
+    function test_observationCapacityIs2048() public {
+        assertEq(recorder.OBSERVATION_CAPACITY(), 2048);
+    }
+
+    function test_fullBufferRetainsThirtyMinuteHistory() public {
+        _record(100);
+        for (uint256 i = 1; i < 2048; ++i) {
+            _recordAfter(1, 100);
+        }
+
+        assertEq(recorder.consult(poolId, 1800), 100);
+        assertEq(recorder.observationCount(poolId), 2048);
+    }
+
     function test_ringBufferOverwritesOldestObservation() public {
         _record(100);
-        for (uint256 i = 0; i < 1024; ++i) {
+        for (uint256 i = 0; i < 2048; ++i) {
             _recordAfter(1, int24(uint24(100 + (i % 3))));
         }
 
-        assertEq(recorder.observationCount(poolId), 1024);
         assertEq(recorder.consult(poolId, 900), 101);
+        assertEq(recorder.consult(poolId, 2047), 100);
+        assertEq(recorder.observationCount(poolId), 2048);
 
         vm.expectRevert(TwapRecorder.TwapUnavailable.selector);
-        recorder.consult(poolId, 1025);
+        recorder.consult(poolId, 2048);
     }
 
     function test_recordBatchRecordsEveryPool() public {
