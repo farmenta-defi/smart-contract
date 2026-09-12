@@ -53,7 +53,7 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    `withdrawableReserves()` memperlihatkan buffer dan surplus saat ini, sedangkan
    `totalReservesWithdrawn()` mencatat total yang telah ditarik protokol. Bad debt tetap dapat
    menghabiskan reserve, termasuk bagian di bawah lantai.
-   Setelah diterapkan pun, owner dapat mengganti aturan lantai melalui upgrade dan
+   Meski sudah diterapkan, owner dapat mengganti aturan lantai melalui upgrade dan
    mengambil aset dalam satu transaksi. Lantai mencegah penarikan rutin melewati batas;
    ia bukan jaminan terhadap pemegang kunci upgrade. Risiko ini diterima hanya untuk
    MVP tanpa TVL nyata, dengan syarat yang sama seperti kuasa upgrade: timelock pada

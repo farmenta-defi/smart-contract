@@ -274,8 +274,11 @@ contract FarmentaMarketTest is Test {
 
         // Assets are 980,000 USDG after reserves, so the blue-chip floor is 9,800 USDG.
         assertEq(market.withdrawableReserves(), 10_200e6, "surplus above the total-assets floor");
+        uint256 sharePriceBefore = market.convertToAssets(1e18);
 
         vm.prank(owner);
+        vm.expectEmit(false, false, false, true, address(market));
+        emit FarmentaMarket.ReservesUpdated(9800e6);
         vm.expectEmit(true, false, false, true, address(market));
         emit FarmentaMarket.ReservesWithdrawn(10_200e6, treasury);
         market.withdrawReserves(10_200e6, treasury);
@@ -284,6 +287,7 @@ contract FarmentaMarketTest is Test {
         assertEq(market.reserves(), 9800e6, "reserve floor was not retained");
         assertEq(market.totalReservesWithdrawn(), 10_200e6, "withdrawal history was not recorded");
         assertEq(market.totalAssets(), 980_000e6, "reserve transfer changed lender assets");
+        assertEq(market.convertToAssets(1e18), sharePriceBefore, "reserve transfer changed share price");
 
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.ReserveWithdrawalExceedsAvailable.selector, 1, 0));
@@ -326,6 +330,22 @@ contract FarmentaMarketTest is Test {
 
         _setReserves(market, 20_000e6);
         assertEq(market.withdrawableReserves(), 10_200e6, "replenishment should reopen withdrawal automatically");
+    }
+
+    function test_depositRaisesFloorAndReducesWithdrawableReserves() public {
+        address lender = address(0x1E4DE2);
+        usdg.mint(address(market), 1_000_000e6);
+        _setReserves(market, 20_000e6);
+        uint256 withdrawableBefore = market.withdrawableReserves();
+
+        usdg.mint(lender, 100_000e6);
+        vm.startPrank(lender);
+        usdg.approve(address(market), type(uint256).max);
+        market.deposit(100_000e6, lender);
+        vm.stopPrank();
+
+        assertEq(market.totalAssets(), 1_080_000e6, "deposit did not raise total assets");
+        assertEq(market.withdrawableReserves(), withdrawableBefore - 1000e6, "floor did not rise with lender assets");
     }
 
     function test_withdrawReservesAccruesBeforeCalculatingAvailability() public {

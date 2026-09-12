@@ -718,6 +718,7 @@ contract FarmentaMarket is
         $.reserves -= amount;
         $.totalReservesWithdrawn += amount;
         IERC20(asset()).safeTransfer(to, amount);
+        emit ReservesUpdated($.reserves);
         emit ReservesWithdrawn(amount, to);
     }
 
