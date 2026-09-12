@@ -129,6 +129,7 @@ contract TwapRecorderTest is Test {
     }
 
     function test_fullBufferRetainsThirtyMinuteHistory() public {
+        assertEq(recorder.OBSERVATION_CAPACITY(), 2048);
         _record(100);
         for (uint256 i = 1; i < 2048; ++i) {
             _recordAfter(1, 100);
