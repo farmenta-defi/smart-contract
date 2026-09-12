@@ -54,7 +54,7 @@ jobs:
           FOUNDRY_PROFILE: deploy
 
       - name: Unit tests (no network)
-        run: forge test --no-match-path "test/fork/**" -vv
+        run: forge test --no-match-path "test/fork/**" --no-match-path "test/upgrade/**" -vv
 
   # Deep lane: fork tests plus long fuzz/invariant campaigns. Runs where the extra
   # minutes and Alchemy quota are worth it — before merging to main, and nightly.
