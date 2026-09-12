@@ -117,6 +117,24 @@ contract FarmentaMarketTest is Test {
             IPriceOracle(oracle),
             IInterestRateModel(interestRateModel)
         );
+
+        vm.expectRevert(FarmentaMarket.ZeroAddress.selector);
+        new FarmentaMarket(
+            IPositionManager(payable(posm)),
+            ICollateralPolicy(policy),
+            IPositionValuer(valuer),
+            IPriceOracle(address(0)),
+            IInterestRateModel(interestRateModel)
+        );
+
+        vm.expectRevert(FarmentaMarket.ZeroAddress.selector);
+        new FarmentaMarket(
+            IPositionManager(payable(posm)),
+            ICollateralPolicy(policy),
+            IPositionValuer(valuer),
+            IPriceOracle(oracle),
+            IInterestRateModel(address(0))
+        );
     }
 
     /* --------------------------------- upgrades ------------------------------- */

@@ -9,6 +9,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
+import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
@@ -73,8 +74,22 @@ contract MarketBorrowForkTest is MarketForkTest {
         vm.prank(holder);
         market.borrow(tokenId, amount, holder);
         uint256 debtUsd = market.debtOf(tokenId) * 0.98e18 / 1e6;
-        uint256 expected = market.positionValue(tokenId) * 7500 * 1e18 / (debtUsd * 10_000);
+        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
+        uint256 collateralValue = (valuation.principalUsd + _min(valuation.feesUsd, valuation.principalUsd / 10))
+            * (10_000 - policy.termsOf(_keyOf(tokenId).toId()).removeHaircutBps) / 10_000;
+        uint256 expected = collateralValue * 7500 * 1e18 / (debtUsd * 10_000);
+        assertEq(market.positionValue(tokenId), collateralValue, "position value is the specified collateral value");
         assertApproxEqRel(market.healthFactor(tokenId), expected, 1e12);
+    }
+
+    function test_healthFactorFallsBelowOneWhenCollateralPriceDrops() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        uint256 amount = market.maxBorrow(tokenId);
+        vm.prank(holder);
+        market.borrow(tokenId, amount, holder);
+
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 900e18, 18);
+        assertLt(market.healthFactor(tokenId), 1e18, "a sufficiently lower collateral price must make HF unhealthy");
     }
 
     function test_maxWithdrawNeverExceedsCashAfterBorrow() public {
@@ -144,9 +159,16 @@ contract MarketBorrowForkTest is MarketForkTest {
         uint256 afterBorrows = market.totalBorrows();
         uint256 interest = afterBorrows - before;
         uint256 utilization = before * 1e18 / (300e6 - amount + before);
-        uint256 rate = market.interestRateModel().ratePerSecond(utilization);
+        uint256 rate = market.interestRateModel().ratePerSecond(market.tier(), utilization);
         uint256 expectedInterest = before * rate * 365 days / 1e18;
         assertApproxEqAbs(interest, expectedInterest, 1, "interest follows the rate curve");
         assertEq(market.reserves(), interest * 1500 / 10_000, "reserves are 15% of interest");
+    }
+
+    function _min(
+        uint256 a,
+        uint256 b
+    ) private pure returns (uint256) {
+        return a < b ? a : b;
     }
 }

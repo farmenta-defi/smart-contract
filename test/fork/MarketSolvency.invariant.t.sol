@@ -5,7 +5,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
-import {MarketBorrowForkTest} from "./MarketBorrow.t.sol";
+import {Fixtures} from "../base/Fixtures.sol";
+import {MarketForkTest} from "../base/MarketForkTest.sol";
 
 /// @notice Restricts invariant fuzzing to valid lender and borrower actions.
 contract MarketHandler is Test {
@@ -71,22 +72,43 @@ contract MarketHandler is Test {
         vm.prank(lender);
         market.withdraw(amount, lender, lender);
     }
+
+    function passTime(
+        uint40 elapsed
+    ) external {
+        vm.warp(block.timestamp + bound(uint256(elapsed), 1 hours, 30 days));
+        market.accrue();
+    }
 }
 
 /// @notice Solvency assertions over a real fork position after a user borrow action.
 /// @dev This suite intentionally lives in the fork lane: it values a real Uniswap position.
-contract MarketSolvencyInvariantTest is MarketBorrowForkTest {
+contract MarketSolvencyInvariantTest is MarketForkTest {
     uint256 internal tokenId;
     MarketHandler internal handler;
+    address internal borrower;
+    address internal lender = address(0x1E4DE2);
 
     function setUp() public override {
         super.setUp();
-        address holder;
-        (tokenId, holder) = _prepareLoan();
+        tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, 50e18);
+        borrower = nft.ownerOf(tokenId);
+        vm.startPrank(borrower);
+        nft.approve(address(market), tokenId);
+        market.depositCollateral(tokenId);
+        vm.stopPrank();
+
+        deal(market.asset(), lender, 300e6);
+        vm.startPrank(lender);
+        IERC20(market.asset()).approve(address(market), type(uint256).max);
+        market.deposit(300e6, lender);
+        vm.stopPrank();
+
         uint256 amount = market.maxBorrow(tokenId) / 2;
-        vm.prank(holder);
-        market.borrow(tokenId, amount, holder);
-        handler = new MarketHandler(market, tokenId, holder, lender);
+        vm.prank(borrower);
+        market.borrow(tokenId, amount, borrower);
+        handler = new MarketHandler(market, tokenId, borrower, lender);
         targetContract(address(handler));
     }
 

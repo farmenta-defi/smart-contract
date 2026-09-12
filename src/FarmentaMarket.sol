@@ -83,9 +83,9 @@ contract FarmentaMarket is
     ///      a market serves exactly one tier. They arrive with the ledger that needs them.
     struct Loan {
         address owner;
+        ICollateralPolicy.Tier tier;
         uint256 debtShares;
         PoolId poolKeyId;
-        ICollateralPolicy.Tier tier;
     }
 
     /// @notice The position `mintAndDeposit` creates (§4.1).
@@ -496,7 +496,7 @@ contract FarmentaMarket is
 
         uint256 cash = IERC20(asset()).balanceOf(address(this));
         uint256 utilization = $.totalBorrows * WAD / (cash + $.totalBorrows);
-        uint256 rate = interestRateModel.ratePerSecond(utilization);
+        uint256 rate = interestRateModel.ratePerSecond($.tier, utilization);
         uint256 newIndex = $.borrowIndex + $.borrowIndex * rate * elapsed / WAD;
         uint256 newTotalBorrows = $.totalBorrowShares.mulDiv(newIndex, WAD);
         uint256 interest = newTotalBorrows - $.totalBorrows;

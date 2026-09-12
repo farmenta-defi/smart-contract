@@ -21,9 +21,7 @@ library TierPresets {
     /// @param maxDebtCapUsdg Ceiling on a listing's debt cap, in **USDG** (6 decimals), not
     ///        USD 1e18. §6.2 and §6.5 store the cap as an absolute USDG amount, and §4.1's
     ///        `poolDebt` ledger is denominated the same way — so capping debt never needs a
-    ///        price. §6.2 states the pool rule as a share of pool TVL, which is not
-    ///        computable on-chain; the market cap is the enforceable bound, and the
-    ///        percentage rule stays an off-chain input to the number the owner writes.
+    ///        price. The owner chooses each listing's cap within this tier-specific ceiling.
     /// @param marketDebtCapUsdg Market-wide debt cap, in USDG (6 decimals).
     /// @param minPositionUsd Floor on a listing's minimum position value, USD 1e18.
     struct Preset {
