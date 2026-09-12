@@ -16,6 +16,8 @@ contract MarketHandler is Test {
     address internal immutable borrower;
     address internal immutable lender;
     address internal immutable owner;
+    /// @dev Ghost state is asserted by an invariant function; handler reverts are discarded.
+    bool public sawFloorBreach;
 
     constructor(
         FarmentaMarket market_,
@@ -85,6 +87,7 @@ contract MarketHandler is Test {
         amount = bound(amount, 1, maximum);
         vm.prank(owner);
         market.withdrawReserves(amount, owner);
+        if (market.reserves() < market.reserveFloor()) sawFloorBreach = true;
     }
 
     function passTime(
@@ -135,11 +138,11 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
         assertEq(market.totalBorrows(), market.totalBorrowShares() * market.borrowIndex() / 1e18);
     }
 
-    function invariant_reservesStayNonNegative() public view {
-        assertGe(market.reserves(), 0);
-    }
-
     function invariant_withdrawableNeverExceedsCash() public view {
         assertLe(market.withdrawableReserves(), IERC20(market.asset()).balanceOf(address(market)));
+    }
+
+    function invariant_withdrawalNeverBreachesTheFloor() public view {
+        assertFalse(handler.sawFloorBreach(), "a withdrawal left reserves below the floor");
     }
 }
