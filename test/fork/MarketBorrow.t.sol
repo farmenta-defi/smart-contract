@@ -52,10 +52,10 @@ contract MarketBorrowForkTest is MarketForkTest {
 
     function test_borrowRejectsAnUnverifiedOraclePrice() public {
         (uint256 tokenId, address holder) = _prepareLoan();
-        oracle.setBorrowPriceValid(false);
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
 
         vm.prank(holder);
-        vm.expectRevert(MockPriceOracle.BorrowPriceRejected.selector);
+        vm.expectRevert(FarmentaMarket.UsdgPriceOutOfBounds.selector);
         market.borrow(tokenId, 10e6, holder);
     }
 

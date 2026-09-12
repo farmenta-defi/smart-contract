@@ -67,6 +67,12 @@ contract PriceOracleForkTest is ForkTest {
         assertEq(oracle.price(Currency.wrap(RobinhoodChain.NATIVE)), 252_657_000_000 * 1e10);
     }
 
+    function test_realPythEthUsdObservationIsReadable() public view {
+        (uint256 pythPrice, uint256 publishTime) = oracle.pythEthUsd();
+        assertGt(pythPrice, 0, "Pyth ETH/USD price unavailable");
+        assertGt(publishTime, 0, "Pyth ETH/USD publish time unavailable");
+    }
+
     function test_realOracleStaysWithinTheSpotDeviationGateForInRangeFixtures() public {
         PositionValuer productionValuer = new PositionValuer(positionManager, stateView, oracle);
 

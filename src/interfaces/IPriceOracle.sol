@@ -3,8 +3,6 @@ pragma solidity 0.8.26;
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
-import {ICollateralPolicy} from "./ICollateralPolicy.sol";
-
 /// @title IPriceOracle
 /// @notice USD prices for the currencies Farmenta accepts (ARCHITECTURE §4.3, §5.2).
 interface IPriceOracle {
@@ -22,14 +20,9 @@ interface IPriceOracle {
         Currency currency
     ) external view returns (uint256 usd1e18);
 
-    /// @notice Reverts when a new borrow would rely on a depegged USDG price or an
-    ///         uncorroborated fresh ETH price.
-    /// @dev The Pyth comparison applies only to blue-chip borrowing. A stale Pyth update is
-    ///      deliberately ignored: Pyth is a pull oracle and no borrower should be able to
-    ///      make Chainlink unavailable merely by not pushing a new Pyth update.
-    function checkBorrowPrice(
-        ICollateralPolicy.Tier tier
-    ) external view;
+    /// @notice Returns a normalized Pyth ETH/USD observation, or zero values when unavailable.
+    /// @dev Freshness and deviation are risk decisions owned by `FarmentaMarket`.
+    function pythEthUsd() external view returns (uint256 usd1e18, uint256 publishTime);
 
     /// @notice Decimals of `currency`, with native ETH reported as 18.
     /// @dev Read from `decimals()` at listing time and stored, never read live: a token that

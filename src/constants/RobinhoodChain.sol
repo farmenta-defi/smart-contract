@@ -44,6 +44,8 @@ library RobinhoodChain {
 
     /// @notice Verification source for the ETH price under the verify-if-fresh rule in §5.2.
     address internal constant PYTH = 0x8250f4aF4B972684F7b336503E2D6dFeDeB1487a;
+    bytes32 internal constant PYTH_ETH_USD_PRICE_ID =
+        0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
 
     /// @notice Chainlink's L2 Sequencer Uptime Feed does **not** exist on this chain
     ///         (checked 2026-08-26 against the official directory, 57 feeds). ARCHITECTURE

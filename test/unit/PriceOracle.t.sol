@@ -100,30 +100,32 @@ contract PriceOracleTest is Test {
         oracle.price(UNKNOWN);
     }
 
-    function test_checkBorrowPriceAcceptsFreshMatchingPythAndBoundedUsdg() public view {
-        oracle.checkBorrowPrice(ICollateralPolicy.Tier.BLUE_CHIP);
+    function test_pythEthUsdReturnsFreshNormalizedPrice() public view {
+        (uint256 price_, uint256 publishTime) = oracle.pythEthUsd();
+        assertEq(price_, 2520e18);
+        assertEq(publishTime, block.timestamp);
     }
 
-    function test_checkBorrowPriceIgnoresStalePyth() public {
+    function test_pythEthUsdReturnsStalePriceForMarketToEvaluate() public {
         pyth.setPrice(PYTH_ETH_USD_PRICE_ID, 1e8, -8, block.timestamp - 10 minutes - 1);
-        oracle.checkBorrowPrice(ICollateralPolicy.Tier.BLUE_CHIP);
+        (uint256 price_, uint256 publishTime) = oracle.pythEthUsd();
+        assertEq(price_, 1e18);
+        assertEq(publishTime, block.timestamp - 10 minutes - 1);
     }
 
-    function test_checkBorrowPriceRejectsFreshPythDeviation() public {
+    function test_pythEthUsdReturnsFreshDeviationForMarketToEvaluate() public {
         pyth.setPrice(PYTH_ETH_USD_PRICE_ID, 2600e8, -8, block.timestamp);
-        vm.expectRevert(abi.encodeWithSelector(PriceOracle.PythPriceDeviation.selector, 2520e18, 2600e18));
-        oracle.checkBorrowPrice(ICollateralPolicy.Tier.BLUE_CHIP);
+        (uint256 price_,) = oracle.pythEthUsd();
+        assertEq(price_, 2600e18);
     }
 
-    function test_checkBorrowPriceRejectsUsdgBelowTheDepegFloor() public {
-        usdgUsd.setAnswer(0.96999999e8, block.timestamp);
-        vm.expectRevert(abi.encodeWithSelector(PriceOracle.UsdgPriceOutOfBounds.selector, 0.96999999e18));
-        oracle.checkBorrowPrice(ICollateralPolicy.Tier.BLUE_CHIP);
+    function test_usdgPricePreservesA98CentDeviation() public {
+        usdgUsd.setAnswer(0.98e8, block.timestamp);
+        assertEq(oracle.price(USDG), 0.98e18);
     }
 
-    function test_checkBorrowPriceRejectsUsdgAboveTheDepegCeiling() public {
-        usdgUsd.setAnswer(1.03000001e8, block.timestamp);
-        vm.expectRevert(abi.encodeWithSelector(PriceOracle.UsdgPriceOutOfBounds.selector, 1.03000001e18));
-        oracle.checkBorrowPrice(ICollateralPolicy.Tier.MEME);
+    function test_pythEthUsdIsIndependentOfTier() public view {
+        (uint256 price_,) = oracle.pythEthUsd();
+        assertEq(price_, 2520e18);
     }
 }

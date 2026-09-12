@@ -21,6 +21,7 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
 import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol";
 
+import {RobinhoodChain} from "./constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
 import {IInterestRateModel} from "./interfaces/IInterestRateModel.sol";
 import {IPositionValuer} from "./interfaces/IPositionValuer.sol";
@@ -130,6 +131,11 @@ contract FarmentaMarket is
 
     uint256 private constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
+    uint256 private constant MAX_SPOT_DEVIATION_BPS = 200;
+    uint256 private constant MAX_PYTH_PRICE_AGE = 10 minutes;
+    uint256 private constant MAX_PYTH_DEVIATION_BPS = 300;
+    uint256 private constant USDG_MIN_PRICE = 0.97e18;
+    uint256 private constant USDG_MAX_PRICE = 1.03e18;
 
     /// @notice The Uniswap position NFT this market custodies.
     /// @dev Immutable in the implementation and changed by upgrading, like every other
@@ -181,6 +187,8 @@ contract FarmentaMarket is
     error MarketDebtCapExceeded(uint256 requestedDebt, uint256 debtCap);
     error PoolNotOpenForBorrowing(PoolId poolId);
     error SpotPriceDeviation(uint256 deviationBps, uint256 maximumDeviationBps);
+    error UsdgPriceOutOfBounds(uint256 price);
+    error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
     error NativeValueMismatch(uint256 expected, uint256 sent);
     error PermitDoesNotMatchPool();
 
@@ -520,10 +528,10 @@ contract FarmentaMarket is
         if (!policy.acceptsNewPositions(loan.poolKeyId)) revert PoolNotOpenForBorrowing(loan.poolKeyId);
 
         ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
-        oracle.checkBorrowPrice($.tier);
+        _checkBorrowPrice($.tier);
         IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
-        if ($.tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > 200) {
-            revert SpotPriceDeviation(valuation.spotDeviationBps, 200);
+        if ($.tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > MAX_SPOT_DEVIATION_BPS) {
+            revert SpotPriceDeviation(valuation.spotDeviationBps, MAX_SPOT_DEVIATION_BPS);
         }
         uint256 requestedDebt = debtOf(tokenId) + amount;
         uint256 requestedDebtUsd = _debtUsd(requestedDebt);
@@ -755,6 +763,26 @@ contract FarmentaMarket is
     ) private pure returns (uint256) {
         uint256 cappedFees = Math.min(valuation.feesUsd, valuation.principalUsd / 10);
         return (valuation.principalUsd + cappedFees) * (BPS - terms.removeHaircutBps) / BPS;
+    }
+
+    function _checkBorrowPrice(
+        ICollateralPolicy.Tier borrowTier
+    ) private view {
+        uint256 usdgPrice = oracle.price(policy.quote());
+        if (usdgPrice < USDG_MIN_PRICE || usdgPrice > USDG_MAX_PRICE) {
+            revert UsdgPriceOutOfBounds(usdgPrice);
+        }
+        if (borrowTier != ICollateralPolicy.Tier.BLUE_CHIP) return;
+
+        (uint256 pythPrice, uint256 publishTime) = oracle.pythEthUsd();
+        if (publishTime == 0 || publishTime > block.timestamp || block.timestamp - publishTime > MAX_PYTH_PRICE_AGE) {
+            return;
+        }
+        uint256 chainlinkPrice = oracle.price(Currency.wrap(RobinhoodChain.NATIVE));
+        uint256 difference = chainlinkPrice > pythPrice ? chainlinkPrice - pythPrice : pythPrice - chainlinkPrice;
+        if (Math.mulDiv(difference, BPS, chainlinkPrice) > MAX_PYTH_DEVIATION_BPS) {
+            revert PythPriceDeviation(chainlinkPrice, pythPrice);
+        }
     }
 
     /// @dev Converts USDG-denominated debt to USD 1e18 using the configured oracle price.

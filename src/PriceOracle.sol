@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {RobinhoodChain} from "./constants/RobinhoodChain.sol";
@@ -17,11 +16,6 @@ import {IPyth} from "./interfaces/IPyth.sol";
 ///      otherwise alter every position's valuation after it has been accepted as collateral.
 contract PriceOracle is IPriceOracle {
     uint256 public constant MAX_PRICE_AGE = 25 hours;
-    uint256 public constant MAX_PYTH_PRICE_AGE = 10 minutes;
-    uint256 public constant MAX_PYTH_DEVIATION_BPS = 300;
-    uint256 public constant USDG_MIN_PRICE = 0.97e18;
-    uint256 public constant USDG_MAX_PRICE = 1.03e18;
-    bytes32 public constant PYTH_ETH_USD_PRICE_ID = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
     uint8 internal constant USD_DECIMALS = 18;
     uint256 internal constant BPS = 10_000;
 
@@ -33,8 +27,6 @@ contract PriceOracle is IPriceOracle {
     error StalePrice(Currency currency, uint256 updatedAt);
     error PythNotConfigured();
     error InvalidPythPrice(int64 price, int32 expo, uint256 publishTime);
-    error UsdgPriceOutOfBounds(uint256 price);
-    error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
 
     constructor(
         ICollateralPolicy policy_,
@@ -72,27 +64,14 @@ contract PriceOracle is IPriceOracle {
     }
 
     /// @inheritdoc IPriceOracle
-    function checkBorrowPrice(
-        ICollateralPolicy.Tier tier
-    ) external view {
-        uint256 usdgPrice = price(policy.quote());
-        if (usdgPrice < USDG_MIN_PRICE || usdgPrice > USDG_MAX_PRICE) {
-            revert UsdgPriceOutOfBounds(usdgPrice);
-        }
-
-        if (tier != ICollateralPolicy.Tier.BLUE_CHIP) return;
-
-        IPyth.Price memory pythPrice = pyth.getPriceUnsafe(PYTH_ETH_USD_PRICE_ID);
-        if (pythPrice.publishTime > block.timestamp) {
-            revert InvalidPythPrice(pythPrice.price, pythPrice.expo, pythPrice.publishTime);
-        }
-        if (block.timestamp - pythPrice.publishTime > MAX_PYTH_PRICE_AGE) return;
-
-        uint256 pythUsd = _pythUsd1e18(pythPrice);
-        uint256 chainlinkUsd = price(Currency.wrap(RobinhoodChain.NATIVE));
-        uint256 difference = chainlinkUsd > pythUsd ? chainlinkUsd - pythUsd : pythUsd - chainlinkUsd;
-        if (Math.mulDiv(difference, BPS, chainlinkUsd) > MAX_PYTH_DEVIATION_BPS) {
-            revert PythPriceDeviation(chainlinkUsd, pythUsd);
+    function pythEthUsd() external view returns (uint256 usd1e18, uint256 publishTime) {
+        try pyth.getPriceUnsafe(RobinhoodChain.PYTH_ETH_USD_PRICE_ID) returns (IPyth.Price memory observation) {
+            if (observation.publishTime > block.timestamp || observation.price <= 0) return (0, 0);
+            (bool valid, uint256 normalized) = _tryPythUsd1e18(observation);
+            if (!valid) return (0, 0);
+            return (normalized, observation.publishTime);
+        } catch {
+            return (0, 0);
         }
     }
 
@@ -123,20 +102,16 @@ contract PriceOracle is IPriceOracle {
     /// @dev Pyth's signed exponent is normalized here, after the value has passed its signed
     ///      positivity check. ETH/USD normally uses `expo = -8`; the bounds merely keep a
     ///      malformed response from turning an exponentiation into an overflow or zero price.
-    function _pythUsd1e18(
+    function _tryPythUsd1e18(
         IPyth.Price memory pythPrice
-    ) private pure returns (uint256) {
-        if (pythPrice.price <= 0) {
-            revert InvalidPythPrice(pythPrice.price, pythPrice.expo, pythPrice.publishTime);
-        }
+    ) private pure returns (bool valid, uint256 usd1e18) {
+        if (pythPrice.price <= 0) return (false, 0);
 
         int256 scale = int256(uint256(USD_DECIMALS)) + int256(pythPrice.expo);
-        if (scale > 58 || scale < -77) {
-            revert InvalidPythPrice(pythPrice.price, pythPrice.expo, pythPrice.publishTime);
-        }
+        if (scale > 58 || scale < -77) return (false, 0);
 
         uint256 unsignedPrice = uint64(pythPrice.price);
-        if (scale >= 0) return unsignedPrice * 10 ** uint256(scale);
-        return unsignedPrice / 10 ** uint256(-scale);
+        if (scale >= 0) return (true, unsignedPrice * 10 ** uint256(scale));
+        return (true, unsignedPrice / 10 ** uint256(-scale));
     }
 }
