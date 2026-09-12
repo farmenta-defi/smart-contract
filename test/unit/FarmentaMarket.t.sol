@@ -378,6 +378,10 @@ contract FarmentaMarketTest is Test {
         assertEq(loan.debtShares, 0, "phantom debt");
     }
 
+    function test_healthFactorForDebtFreePositionIsUnlimited() public view {
+        assertEq(market.healthFactor(12_345), type(uint256).max);
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     /// @dev WETH sorts below USDG, so it is currency0.

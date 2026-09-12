@@ -14,7 +14,7 @@ library DebtMath {
         uint256 totalBorrows,
         uint256 ratePerSecond,
         uint256 elapsed
-    ) external pure returns (uint256 newIndex, uint256 newTotalBorrows, uint256 interest) {
+    ) internal pure returns (uint256 newIndex, uint256 newTotalBorrows, uint256 interest) {
         newIndex = borrowIndex + borrowIndex * ratePerSecond * elapsed / WAD;
         newTotalBorrows = Math.mulDiv(totalBorrowShares, newIndex, WAD);
         interest = newTotalBorrows - totalBorrows;
@@ -23,21 +23,21 @@ library DebtMath {
     function debtOf(
         uint256 debtShares,
         uint256 borrowIndex
-    ) external pure returns (uint256) {
+    ) internal pure returns (uint256) {
         return Math.mulDiv(debtShares, borrowIndex, WAD);
     }
 
     function sharesForBorrow(
         uint256 amount,
         uint256 borrowIndex
-    ) external pure returns (uint256) {
+    ) internal pure returns (uint256) {
         return Math.mulDiv(amount, WAD, borrowIndex, Math.Rounding.Ceil);
     }
 
     function sharesForRepay(
         uint256 amount,
         uint256 borrowIndex
-    ) external pure returns (uint256) {
+    ) internal pure returns (uint256) {
         return Math.mulDiv(amount, WAD, borrowIndex);
     }
 
@@ -45,7 +45,7 @@ library DebtMath {
         uint256 collateralUsd,
         uint256 ltBps,
         uint256 debtUsdValue
-    ) external pure returns (uint256) {
+    ) internal pure returns (uint256) {
         return debtUsdValue == 0 ? type(uint256).max : collateralUsd * ltBps * WAD / (debtUsdValue * 10_000);
     }
 
@@ -53,7 +53,7 @@ library DebtMath {
         uint256 debt,
         uint256 price,
         uint8 decimals
-    ) external pure returns (uint256) {
+    ) internal pure returns (uint256) {
         return Math.mulDiv(debt, price, 10 ** decimals);
     }
 
@@ -61,7 +61,7 @@ library DebtMath {
         uint256 usdValue,
         uint256 price,
         uint8 decimals
-    ) external pure returns (uint256) {
+    ) internal pure returns (uint256) {
         return Math.mulDiv(usdValue, 10 ** decimals, price);
     }
 }

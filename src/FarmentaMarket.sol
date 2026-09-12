@@ -599,7 +599,9 @@ contract FarmentaMarket is
     ) external view returns (uint256) {
         MarketStorage storage $ = _marketStorage();
         Loan storage loan = $.loans[tokenId];
-        uint256 debtUsd = _debtUsd(debtOf(tokenId));
+        uint256 debt = debtOf(tokenId);
+        if (debt == 0) return type(uint256).max;
+        uint256 debtUsd = _debtUsd(debt);
         return DebtMath.healthFactor(positionValue(tokenId), policy.termsOf(loan.poolKeyId).ltBps, debtUsd);
     }
 
