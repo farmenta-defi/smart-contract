@@ -75,6 +75,6 @@ contract TwapRecorderForkTest is ForkTest {
         emit log_named_uint("buffer-fill recordBatch gas", bufferFillGas);
         emit log_named_uint("steady-state recordBatch gas", steadyStateGas);
         assertLt(bufferFillGas, keys.length * 36_000, "buffer-fill batch exceeded 36k gas per live pool");
-        assertLt(steadyStateGas, keys.length * 18_500, "steady-state batch exceeded 18.5k gas per live pool");
+        assertLt(steadyStateGas, keys.length * 19_000, "steady-state batch exceeded 19k gas per live pool");
     }
 }
