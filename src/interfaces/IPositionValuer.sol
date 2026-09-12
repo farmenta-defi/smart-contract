@@ -34,4 +34,16 @@ interface IPositionValuer {
     function value(
         uint256 tokenId
     ) external view returns (Valuation memory);
+
+    /// @notice Values `tokenId` at the prices liquidation decides on (§4.3, §8 step 1).
+    /// @dev Identical arithmetic to `value`, reading `IPriceOracle.priceForLiquidation`
+    ///      instead of `price`. The two sources return the same number in the MVP, and the
+    ///      split exists so they can diverge without every liquidation caller changing:
+    ///      §5.2 gives the meme tier a liquidation price of its own (TWAP, or spot during a
+    ///      genuine crash), and §5.2 requires liquidation to keep working in exactly the
+    ///      conditions that block borrowing. A liquidation that read the borrow price would
+    ///      inherit that blocking, and a position that cannot be liquidated is bad debt.
+    function valueForLiquidation(
+        uint256 tokenId
+    ) external view returns (Valuation memory);
 }

@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Position} from "@uniswap/v4-core/src/libraries/Position.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
@@ -43,12 +44,30 @@ contract PositionValuer is IPositionValuer {
         oracle = oracle_;
     }
 
-    /// @dev Split across helpers purely to stay within the EVM's stack limit; the sequence is
-    ///      read position → derive price → split into amounts → add fees → price in USD.
     /// @inheritdoc IPositionValuer
     function value(
         uint256 tokenId
-    ) external view returns (Valuation memory v) {
+    ) external view returns (Valuation memory) {
+        return _value(tokenId, false);
+    }
+
+    /// @inheritdoc IPositionValuer
+    function valueForLiquidation(
+        uint256 tokenId
+    ) external view returns (Valuation memory) {
+        return _value(tokenId, true);
+    }
+
+    /// @dev Split across helpers purely to stay within the EVM's stack limit; the sequence is
+    ///      read position → derive price → split into amounts → add fees → price in USD.
+    ///
+    ///      `forLiquidation` picks the price source and nothing else. Both branches read the
+    ///      same two currencies from the same oracle in the same order, so a caller cannot end
+    ///      up with one leg priced for borrowing and the other for liquidation.
+    function _value(
+        uint256 tokenId,
+        bool forLiquidation
+    ) internal view returns (Valuation memory v) {
         (PoolKey memory key, PositionInfo info) = positionManager.getPoolAndPositionInfo(tokenId);
         if (PositionInfo.unwrap(info) == 0) revert PositionNotFound(tokenId);
 
@@ -56,8 +75,8 @@ contract PositionValuer is IPositionValuer {
         int24 tickLower = info.tickLower();
         int24 tickUpper = info.tickUpper();
 
-        uint256 price0 = oracle.price(key.currency0);
-        uint256 price1 = oracle.price(key.currency1);
+        uint256 price0 = _price(key.currency0, forLiquidation);
+        uint256 price1 = _price(key.currency1, forLiquidation);
         uint8 decimals0 = oracle.decimals(key.currency0);
         uint8 decimals1 = oracle.decimals(key.currency1);
 
@@ -76,6 +95,14 @@ contract PositionValuer is IPositionValuer {
 
         (uint160 sqrtSpotX96,,,) = stateView.getSlot0(poolId);
         v.spotDeviationBps = PriceMath.spotDeviationBps(sqrtSpotX96, derivedSqrtPriceX96);
+    }
+
+    /// @dev The one place the two price surfaces of §4.3 are told apart.
+    function _price(
+        Currency currency,
+        bool forLiquidation
+    ) internal view returns (uint256) {
+        return forLiquidation ? oracle.priceForLiquidation(currency) : oracle.price(currency);
     }
 
     /// @dev One read of the position's pool-side state, feeding both the principal and the
