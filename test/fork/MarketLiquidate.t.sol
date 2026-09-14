@@ -110,18 +110,19 @@ contract MarketLiquidateForkTest is MarketForkTest {
     /* ------------------------------- close factor ----------------------------- */
 
     /// @notice §6.2: while the shortfall is small, one liquidation may take half the debt and
-    ///         no more, however much the caller offers.
+    ///         no more — the ticket's case exactly, a liquidator offering the whole debt.
     function test_blueChipClosesHalfWhileTheShortfallIsSmall() public {
         _open(0);
         _fundLiquidator(1000e6);
         _ageUntilHealthFactorBelow(1e18);
         assertGt(market.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
 
+        // Read before the prank, and passed as a local: see the note on `usdg` above.
         uint256 debt = market.debtOf(tokenId);
         vm.prank(liquidator);
-        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, debt, 0, 0, liquidator);
 
-        assertEq(repaid, debt / 2, "half the debt, however much was offered");
+        assertEq(repaid, debt / 2, "half the debt, though the whole debt was offered");
         assertApproxEqAbs(market.debtOf(tokenId), debt - repaid, 1, "the rest stays owed");
         assertEq(market.loanOf(tokenId).owner, borrower, "a partial seizure leaves the position with its owner");
         assertEq(IERC721(RobinhoodChain.POSITION_MANAGER).ownerOf(tokenId), address(market), "the NFT stays in custody");
