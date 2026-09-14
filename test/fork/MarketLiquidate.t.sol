@@ -267,6 +267,28 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertLt(market.convertToAssets(1e9), sharePriceBefore, "bad debt beyond the reserve reaches depositors");
     }
 
+    /// @notice §8: native ETH reaches the liquidator on the full branch too, and it goes there
+    ///         directly — `TAKE_PAIR` addresses `to`, so none of it passes through the market.
+    /// @dev The partial branch has its own test above; this one exists because the two routes
+    ///      share nothing below `execute`, and only the full one relies on PositionManager
+    ///      paying ETH out to an address the market does not control.
+    function test_theFullSeizurePaysNativeEthStraightToTheLiquidator() public {
+        _open(0);
+        _fundLiquidator(2000e6);
+        _dropEthPrice(1200e18);
+
+        uint256 liquidatorEthBefore = liquidator.balance;
+        uint256 marketEthBefore = address(market).balance;
+
+        vm.prank(liquidator);
+        (, uint256 out0,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(badDebt, 0, "this test needs the full-seizure branch");
+        assertGt(out0, 0, "the ETH leg must actually be seized");
+        assertEq(liquidator.balance - liquidatorEthBefore, out0, "native ETH reaches the liquidator");
+        assertEq(address(market).balance, marketEthBefore, "and none of it stops at the market");
+    }
+
     /// @notice §9: bad debt takes the whole reserve first, including the part §7 keeps the
     ///         owner away from, and only the remainder touches depositors.
     function test_badDebtEmptiesTheReserveBeforeItReachesDepositors() public {
