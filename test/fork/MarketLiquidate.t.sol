@@ -355,6 +355,23 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertEq(address(market).balance, marketEthBefore, "and none of it stayed in the market");
     }
 
+    /// @notice A borrower that cannot receive a token — USDG's issuer can freeze an address —
+    ///         cannot block its own liquidation when the fees beyond its debt come back to it.
+    /// @dev Review of PR #16, point 2.3. The ETH leg already fell back to WETH, but the ERC-20 leg
+    ///      was a plain transfer, so a frozen borrower made the whole liquidation revert.
+    function test_aBorrowerThatCannotReceiveUsdgCannotBlockItsLiquidation() public {
+        _openWithDonatedFees(0, 2000e6);
+        uint256 borrowerUsdg = usdg.balanceOf(borrower);
+        vm.mockCallRevert(address(usdg), abi.encodeWithSelector(IERC20.transfer.selector, borrower), "frozen");
+
+        vm.prank(liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(repaid, 0, "the liquidation must go through");
+        assertEq(market.debtOf(tokenId), 0, "the USDG fees paid off the debt");
+        assertEq(usdg.balanceOf(borrower), borrowerUsdg, "the borrower got nothing it could not take");
+    }
+
     /* ------------------------------- full seizure ----------------------------- */
 
     /// @notice §8 step 4 and §9: when the position cannot cover the debt, it is taken whole,

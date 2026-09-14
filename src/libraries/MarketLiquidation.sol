@@ -492,7 +492,12 @@ library MarketLiquidation {
         if (toLiquidator != 0) currency.transfer(liquidator, toLiquidator);
         if (toBorrower == 0) return;
         if (Currency.unwrap(currency) != address(0)) {
-            currency.transfer(borrower, toBorrower);
+            // A token's issuer can stop an address receiving it (USDG has `isFrozen`), and a
+            // reverting transfer would take the liquidation down with it. What cannot be
+            // delivered stays in the market: USDG becomes cash that `totalAssets` counts. Any
+            // other leg is a listed token, and §6.3 refuses tokens that can blacklist, so the
+            // case does not arise for it.
+            IERC20(Currency.unwrap(currency)).trySafeTransfer(borrower, toBorrower);
             return;
         }
 
