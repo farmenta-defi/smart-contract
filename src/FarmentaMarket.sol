@@ -43,12 +43,14 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///      and this branch does not fit together with FAR-20's gate; the second round of making
 ///      room is FAR-32 (spec §15 no. 17), because FAR-26's first round no longer covers it.
 ///
-///      **ETH arrives and leaves through liquidation now, but stray ETH still has no exit.**
-///      A native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather
-///      than ahead of it. What is unchanged is that ETH sent here by anything other than a
-///      payout has no accounting and no rescue — §4.1's owner-function list still has none.
-///      Spec open item §15 no. 12. A borrower cannot use ETH to block its own liquidation:
-///      its share goes out as WETH when it refuses ETH (see `MarketLiquidation`).
+///      **ETH arrives and leaves through liquidation, and stray ETH has a way out.** A
+///      native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather than
+///      ahead of it. Nothing legitimate stays: liquidation forwards both legs in the same call,
+///      and `mintAndDeposit`'s change leaves through `SWEEP` straight from PositionManager. So
+///      ETH found here between transactions belongs to no one the market can name, and
+///      `rescueUnaccountedEth` sweeps it — spec open item §15 no. 12, decided with §8 as that
+///      item asked. Nor can a borrower use ETH to block its own liquidation: its share goes
+///      out as WETH when it refuses ETH (see `MarketLiquidation`).
 ///
 ///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` with no timelock (§4.1, decided
 ///      4 Sep 2026). This contract custodies collateral NFTs and holds USDG deposits, so
@@ -122,6 +124,9 @@ contract FarmentaMarket is
 
     /// @notice A position that arrived here unrecorded was swept out by the owner.
     event UnaccountedTokenRescued(uint256 indexed tokenId, address indexed to);
+
+    /// @notice ETH that belonged to no payout was swept out by the owner (§15 no. 12).
+    event UnaccountedEthRescued(uint256 amount, address indexed to);
     event Borrow(uint256 indexed tokenId, uint256 amount);
     event Repay(uint256 indexed tokenId, uint256 amount);
     event Liquidate(
@@ -394,11 +399,9 @@ contract FarmentaMarket is
     ///      the liquidator's share and returns the borrower's. Both legs leave in the same call,
     ///      so nothing a liquidation brings in is left sitting.
     ///
-    ///      ETH that turns up any other way still has no accounting and no way out. That is the
-    ///      trapped-asset hole `rescueUnaccountedToken` closes, one asset class over, and it
-    ///      stays open deliberately: §4.1 gives the owner no ETH rescue, and adding one now
-    ///      would decide by accident how ETH the protocol never expected is accounted for.
-    ///      Open item §15 no. 12.
+    ///      ETH that turns up any other way has no accounting, and `rescueUnaccountedEth` is its
+    ///      way out: the trapped-asset hole `rescueUnaccountedToken` closes, one asset class
+    ///      over (§15 no. 12).
     receive() external payable {}
 
     /* ---------------------------------- views --------------------------------- */
@@ -638,6 +641,28 @@ contract FarmentaMarket is
 
         emit UnaccountedTokenRescued(tokenId, to);
         IERC721(address(positionManager)).safeTransferFrom(address(this), to, tokenId);
+    }
+
+    /// @notice Recovers native ETH that reached this contract outside any payout (§15 no. 12).
+    /// @param to Where to send it.
+    /// @dev Sweeps the whole balance, which is sound only because no ETH here is owed to anyone
+    ///      between transactions. Every path that takes delivery of ETH pays all of it out
+    ///      before its own call returns: liquidation forwards the liquidator's and the
+    ///      borrower's legs, and `mintAndDeposit` returns change through `SWEEP` straight from
+    ///      PositionManager. What is left was sent by mistake or by force, and taking it takes
+    ///      nothing a lender or a borrower is owed.
+    ///
+    ///      `nonReentrant` keeps it out of the one place that premise does not hold: inside a
+    ///      liquidation, where the balance briefly belongs to the payout. A future path that
+    ///      holds ETH across transactions has to revisit this function.
+    function rescueUnaccountedEth(
+        address to
+    ) external onlyOwner nonReentrant {
+        if (to == address(0) || to == address(this)) revert InvalidRecipient(to);
+
+        uint256 amount = address(this).balance;
+        emit UnaccountedEthRescued(amount, to);
+        Currency.wrap(address(0)).transfer(to, amount);
     }
 
     /* -------------------------------- internals ------------------------------- */
