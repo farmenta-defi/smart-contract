@@ -313,6 +313,11 @@ library MarketLiquidation {
     ///      Slippage is checked by the market rather than passed into the burn: the caller's
     ///      minimums are written against what they receive, and on the other branch that is
     ///      not the number PositionManager would check.
+    ///
+    ///      The amounts are `to`'s balance change across the burn, so a contract `to` can move
+    ///      them: redeem vault shares when the ETH arrives, or forward the ETH elsewhere. That
+    ///      misstates only its own receipt, only in `Liquidate`, and nothing in the ledger reads
+    ///      it (review of PR #16).
     function _seizeWholePosition(
         Env memory env,
         Request memory r,

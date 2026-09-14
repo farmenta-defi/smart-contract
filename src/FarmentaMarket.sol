@@ -129,6 +129,13 @@ contract FarmentaMarket is
     event UnaccountedEthRescued(uint256 amount, address indexed to);
     event Borrow(uint256 indexed tokenId, uint256 amount);
     event Repay(uint256 indexed tokenId, uint256 amount);
+    /// @notice A position was liquidated (§8).
+    /// @dev `repaid` and `badDebt` are exact ledger figures. `out0`/`out1` are what the
+    ///      liquidator received, and on the full branch they are measured, not computed:
+    ///      PositionManager pays `to` directly, so they are `to`'s balance change across the
+    ///      burn. A contract `to` can distort that — redeem vault shares when the ETH lands, or
+    ///      pass the ETH straight on. Only its own figure moves and the ledger never reads it,
+    ///      but indexers and keepers (§13) must not treat `out0`/`out1` as the amount seized.
     event Liquidate(
         uint256 indexed tokenId, address indexed liquidator, uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt
     );
@@ -448,8 +455,9 @@ contract FarmentaMarket is
     /// @param minOut1 Least currency1 the caller accepts, on the same basis.
     /// @param to Where the seized tokens go.
     /// @return repaid USDG actually taken off the debt, the borrower's own fees included.
-    /// @return out0 currency0 the liquidator received.
-    /// @return out1 currency1 the liquidator received.
+    /// @return out0 currency0 the liquidator received, any fee leg it bought included. On the
+    ///         full branch a contract `to` can distort it; see `Liquidate`.
+    /// @return out1 currency1 the liquidator received, on the same basis.
     /// @return badDebt Debt the position could not cover, absorbed under §9.
     /// @dev One function with two branches, as §8 steps 4 and 5 describe them, because the
     ///      branch is not a mode the caller picks: it is whatever is left when the repay cap
