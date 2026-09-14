@@ -17,7 +17,6 @@ import {IPyth} from "./interfaces/IPyth.sol";
 contract PriceOracle is IPriceOracle {
     uint256 public constant MAX_PRICE_AGE = 25 hours;
     uint8 internal constant USD_DECIMALS = 18;
-    uint256 internal constant BPS = 10_000;
 
     ICollateralPolicy public immutable policy;
     IPyth public immutable pyth;
@@ -26,7 +25,6 @@ contract PriceOracle is IPriceOracle {
     error InvalidPrice(Currency currency, int256 answer);
     error StalePrice(Currency currency, uint256 updatedAt);
     error PythNotConfigured();
-    error InvalidPythPrice(int64 price, int32 expo, uint256 publishTime);
 
     constructor(
         ICollateralPolicy policy_,
@@ -105,8 +103,6 @@ contract PriceOracle is IPriceOracle {
     function _tryPythUsd1e18(
         IPyth.Price memory pythPrice
     ) private pure returns (bool valid, uint256 usd1e18) {
-        if (pythPrice.price <= 0) return (false, 0);
-
         int256 scale = int256(uint256(USD_DECIMALS)) + int256(pythPrice.expo);
         if (scale > 58 || scale < -77) return (false, 0);
 

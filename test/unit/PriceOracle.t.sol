@@ -119,11 +119,6 @@ contract PriceOracleTest is Test {
         assertEq(price_, 2600e18);
     }
 
-    function test_usdgPricePreservesA98CentDeviation() public {
-        usdgUsd.setAnswer(0.98e8, block.timestamp);
-        assertEq(oracle.price(USDG), 0.98e18);
-    }
-
     function test_pythEthUsdIsIndependentOfTier() public view {
         (uint256 price_,) = oracle.pythEthUsd();
         assertEq(price_, 2520e18);

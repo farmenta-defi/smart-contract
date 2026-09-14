@@ -9,6 +9,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
+import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
@@ -59,6 +60,27 @@ contract MarketBorrowForkTest is MarketForkTest {
         market.borrow(tokenId, 10e6, holder);
     }
 
+    function test_borrowRejectsUsdgAboveTheDepegCeiling() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 1.0301e18, RobinhoodChain.USDG_DECIMALS);
+
+        vm.prank(holder);
+        vm.expectPartialRevert(FarmentaMarket.UsdgPriceOutOfBounds.selector);
+        market.borrow(tokenId, 10e6, holder);
+    }
+
+    function test_borrowAcceptsInclusiveUsdgBounds() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.97e18, RobinhoodChain.USDG_DECIMALS);
+        vm.prank(holder);
+        market.borrow(tokenId, 10e6, holder);
+
+        (tokenId, holder) = _prepareLoan();
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 1.03e18, RobinhoodChain.USDG_DECIMALS);
+        vm.prank(holder);
+        market.borrow(tokenId, 10e6, holder);
+    }
+
     function test_borrowRejectsFreshPythDeviation() public {
         (uint256 tokenId, address holder) = _prepareLoan();
         oracle.setPythPrice(2600e18, block.timestamp);
@@ -76,6 +98,14 @@ contract MarketBorrowForkTest is MarketForkTest {
         market.borrow(tokenId, 10e6, holder);
     }
 
+    function test_borrowAcceptsFreshPythWithinThreePercent() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        oracle.setPythPrice(2550e18, block.timestamp);
+
+        vm.prank(holder);
+        market.borrow(tokenId, 10e6, holder);
+    }
+
     function test_borrowRejectsSpotOutsideTheTwoPercentGate() public {
         (uint256 tokenId, address holder) = _prepareLoan();
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2400e18, 18);
@@ -83,6 +113,62 @@ contract MarketBorrowForkTest is MarketForkTest {
         vm.prank(holder);
         vm.expectPartialRevert(FarmentaMarket.SpotPriceDeviation.selector);
         market.borrow(tokenId, 10e6, holder);
+    }
+
+    function test_borrowAcceptsSpotWithinTheTwoPercentGate() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2480e18, 18);
+
+        vm.prank(holder);
+        market.borrow(tokenId, 10e6, holder);
+    }
+
+    function test_borrowCapacityUsesNinetyEightCentUsdPrice() public {
+        (uint256 tokenId,) = _prepareLoan();
+        uint256 atPar = market.maxBorrow(tokenId);
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.98e18, RobinhoodChain.USDG_DECIMALS);
+        uint256 atNinetyEightCents = market.maxBorrow(tokenId);
+        assertApproxEqRel(atNinetyEightCents * 98, atPar * 100, 1e14, "USDG oracle price must scale borrow capacity");
+    }
+
+    function test_memeBorrowSkipsPythAndSpotGates() public {
+        vm.startPrank(owner);
+        policy.setTokenConfig(Currency.wrap(RobinhoodChain.NATIVE), true, ICollateralPolicy.Tier.MEME, 18, address(1));
+        vm.stopPrank();
+
+        FarmentaMarket memeMarket = _deployMarket(ICollateralPolicy.Tier.MEME);
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        PoolKey memory key = _keyOf(tokenId);
+        TierPresets.Preset memory preset = TierPresets.meme();
+        vm.prank(owner);
+        policy.list(
+            key,
+            CollateralPolicy.ListingParams({
+                maxLtvBps: preset.maxLtvBps,
+                ltBps: preset.ltBps,
+                liquidatorBonusBps: preset.minLiquidatorBonusBps,
+                removeHaircutBps: 0,
+                debtCapUsdg: preset.maxDebtCapUsdg,
+                minPositionUsd: 50e18
+            })
+        );
+
+        address holder = nft.ownerOf(tokenId);
+        vm.startPrank(holder);
+        nft.approve(address(memeMarket), tokenId);
+        memeMarket.depositCollateral(tokenId);
+        vm.stopPrank();
+
+        deal(address(RobinhoodChain.USDG), lender, 300e6);
+        vm.startPrank(lender);
+        IERC20(address(RobinhoodChain.USDG)).approve(address(memeMarket), type(uint256).max);
+        memeMarket.deposit(300e6, lender);
+        vm.stopPrank();
+
+        oracle.setPythPrice(100e18, block.timestamp);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2400e18, 18);
+        vm.prank(holder);
+        memeMarket.borrow(tokenId, 10e6, holder);
     }
 
     function test_repayMaxAfterAccrualClearsDebtAndAllowsWithdrawal() public {
