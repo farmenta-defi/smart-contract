@@ -20,10 +20,11 @@ import {DebtMath} from "./DebtMath.sol";
 ///      rounds the protocol's liquidation fee down "so the rounding difference always falls to
 ///      the liquidator", and the same reasoning applies to the rest: the liquidator is the
 ///      party the protocol needs to show up, and a wei of slack is cheaper than a seizure that
-///      does not happen. The one exception is `retainedFee`, which rounds **up** — what it
+///      does not happen. One exception is `retainedFee`, which rounds **up** — what it
 ///      measures is the borrower's share, kept back from the liquidator, and rounding that up
 ///      is what keeps the §8 step 5 invariant (payout ≤ `repay × (1 + bonus)`) true rather
-///      than true-to-within-a-wei.
+///      than true-to-within-a-wei. `purchase` is the other: it rounds the price of a fee leg
+///      up, so a purchase made without a bonus cannot become one through rounding.
 library LiquidationMath {
     uint256 internal constant BPS = 10_000;
 
@@ -159,6 +160,39 @@ library LiquidationMath {
     ) internal pure returns (uint256) {
         if (feeUsd <= feeCredit || feeAmount == 0) return 0;
         return Math.min(Math.mulDiv(feeAmount, feeUsd - feeCredit, feeUsd, Math.Rounding.Ceil), received);
+    }
+
+    /// @notice How much of the borrower's non-USDG fee leg a liquidator buys, and for what
+    ///         (§8 step 5, v0.26).
+    /// @param amount Units of the leg left over after the seizure took its fee credit.
+    /// @param priceUsd USD price of one whole unit of that currency, liquidation prices, 1e18.
+    /// @param decimals Decimals of that currency, from the listing.
+    /// @param usdgPrice USD price of one whole USDG, liquidation prices, 1e18.
+    /// @param usdgDecimals Decimals of the borrow asset.
+    /// @param remainingDebt Debt left once `repay` and the borrower's own USDG fees are applied.
+    /// @return bought Units of the leg the liquidator takes.
+    /// @return cost USDG the liquidator pays for them, all of it against the debt.
+    /// @dev At value, with no bonus and no protocol fee: this is a sale, not a seizure, so it
+    ///      counts toward neither the close factor nor the `repay x (1 + bonus)` ceiling.
+    ///
+    ///      Capped at the debt, because fees can only repay a debt that exists; what the debt
+    ///      cannot absorb stays the borrower's. Both rounding directions go against the
+    ///      liquidator — the price up, the capped amount down — so no purchase is ever a
+    ///      discount.
+    function purchase(
+        uint256 amount,
+        uint256 priceUsd,
+        uint8 decimals,
+        uint256 usdgPrice,
+        uint8 usdgDecimals,
+        uint256 remainingDebt
+    ) internal pure returns (uint256 bought, uint256 cost) {
+        if (amount == 0 || remainingDebt == 0) return (0, 0);
+
+        uint256 fullCost =
+            Math.mulDiv(amount * priceUsd, 10 ** usdgDecimals, (10 ** decimals) * usdgPrice, Math.Rounding.Ceil);
+        if (fullCost <= remainingDebt) return (amount, fullCost);
+        return (Math.mulDiv(amount, remainingDebt, fullCost), remainingDebt);
     }
 
     function _seizeValue(

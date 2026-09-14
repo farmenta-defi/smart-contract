@@ -170,6 +170,44 @@ contract LiquidationMathTest is Test {
         assertEq(LiquidationMath.retainedFee(10, 400, 100e18, 0), 10);
     }
 
+    /* ---------------------------- the fee leg purchase ------------------------ */
+
+    /// @notice §8 step 5 v0.26: the borrower's non-USDG fees are bought at their value, with no
+    ///         bonus, and every unit of USDG paid goes against the debt.
+    /// @dev 0.1 ETH at $2,500 with USDG at par is exactly 250 USDG.
+    function test_theFeeLegIsBoughtAtItsValueWithNoBonus() public pure {
+        (uint256 bought, uint256 cost) = LiquidationMath.purchase(0.1e18, 2500e18, 18, 1e18, 6, 1000e6);
+        assertEq(bought, 0.1e18, "the whole leg fits under the debt");
+        assertEq(cost, 250e6, "and costs exactly what it is worth");
+    }
+
+    /// @dev Fees can only repay a debt that exists. What the debt cannot absorb is not bought and
+    ///      stays the borrower's.
+    function test_thePurchaseStopsAtTheDebt() public pure {
+        (uint256 bought, uint256 cost) = LiquidationMath.purchase(0.1e18, 2500e18, 18, 1e18, 6, 100e6);
+        assertEq(cost, 100e6, "the liquidator pays off what is left of the debt");
+        assertEq(bought, 0.04e18, "for the part of the leg worth exactly that");
+    }
+
+    function test_nothingIsBoughtOnceTheDebtIsGone() public pure {
+        (uint256 bought, uint256 cost) = LiquidationMath.purchase(0.1e18, 2500e18, 18, 1e18, 6, 0);
+        assertEq(bought, 0, "no debt, nothing to buy");
+        assertEq(cost, 0, "and nothing to pay");
+    }
+
+    /// @dev A purchase with no bonus must not turn into a discount through rounding.
+    function test_thePurchasePriceRoundsUp() public pure {
+        (uint256 bought, uint256 cost) = LiquidationMath.purchase(1, 2500e18, 18, 1e18, 6, 100e6);
+        assertEq(bought, 1, "a single wei of ETH");
+        assertEq(cost, 1, "still costs a unit of USDG");
+    }
+
+    /// @dev §7: the debt is USDG at the oracle price, not at par.
+    function test_thePurchaseFollowsTheUsdgPrice() public pure {
+        (, uint256 cost) = LiquidationMath.purchase(0.1e18, 2450e18, 18, 0.98e18, 6, 1000e6);
+        assertEq(cost, 250e6, "$245 of ETH is 250 USDG at 0,98");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _closeFactor(
