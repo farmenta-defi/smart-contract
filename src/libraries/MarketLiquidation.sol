@@ -107,9 +107,28 @@ library MarketLiquidation {
     /// @notice The market is not holding this position as anyone's collateral.
     error PositionNotCollateral(uint256 tokenId);
 
-    /// @notice Runs §8 in full: value, gate, charge, seize, pay out, and settle the ledger.
+    /// @notice Runs §8 in full: value, gate, charge, seize, settle the ledger, and pay out.
     /// @dev The caller has already accrued interest and taken the reentrancy guard, and emits
     ///      the events from what this returns. Everything between is here.
+    ///
+    ///      **The ledger is written before anything leaves the market, and USDG leaves before
+    ///      anything else.** The market's guard covers the market's own functions but not the
+    ///      ERC-4626 exits: `withdraw` and `redeem` stay open, because nothing a lender does
+    ///      needs them closed. Meanwhile a native-ETH payout runs the recipient's code. If the
+    ///      ledger were still unwritten at that moment, `totalAssets` would count the
+    ///      liquidator's USDG as cash while the debt it repays — and, on the full branch, the
+    ///      bad debt about to be socialized — still sat in `totalBorrows`. A lender redeeming
+    ///      from inside the payout would be paid at that inflated price and leave the
+    ///      difference to every other depositor. So:
+    ///
+    ///      - partial branch: the slice comes into the market, which runs no code on receipt.
+    ///        Then the USDG is pulled and the ledger written, and only then is anything paid
+    ///        out, the borrow asset first, so no callback sees cash the ledger has not settled;
+    ///      - full branch: the USDG is pulled and the ledger written before the burn, whose
+    ///        `TAKE_PAIR` is the first thing that can call out.
+    ///
+    ///      Pool hooks run inside `modifyLiquidities` as well. On the partial branch they see the
+    ///      market untouched, on the full branch settled, and never a state in between.
     function execute(
         Env memory env,
         Request memory r
@@ -123,27 +142,32 @@ library MarketLiquidation {
         Context memory c = _plan(env, r, loan, debt);
         if (c.plan.repay == 0 && !c.plan.fullSeizure) revert NothingToRepay(r.tokenId);
 
-        // Step 3. `msg.sender` survives the delegatecall, so this is the liquidator paying.
-        IERC20(env.asset).safeTransferFrom(msg.sender, address(this), c.plan.repay + c.plan.protocolFee);
+        (PoolKey memory key,) = env.positionManager.getPoolAndPositionInfo(r.tokenId);
         o.fullSeizure = c.plan.fullSeizure;
 
-        (PoolKey memory key,) = env.positionManager.getPoolAndPositionInfo(r.tokenId);
-        uint256 retainedUsdg;
-        if (c.plan.fullSeizure) {
-            (o.out0, o.out1) = _seizeWholePosition(env, r, key);
-        } else {
-            (o.out0, o.out1, retainedUsdg) = _seizeSlice(env, r, c, key, loan.owner);
-        }
-        // Measured on what the liquidator received, not on what reached the market: on the
-        // partial branch those differ by exactly the borrower's share of the fees.
-        if (o.out0 < r.minOut0 || o.out1 < r.minOut1) revert SeizureBelowMinimum(o.out0, o.out1);
+        Split memory s;
+        if (!o.fullSeizure) s = _takeSlice(env, r, c, key);
 
-        o.repaid = c.plan.repay + _applyRetainedUsdg(env, loan.owner, debt, c.plan.repay, retainedUsdg);
-        if (c.plan.fullSeizure) o.badDebt = debt - o.repaid;
+        // Step 3. `msg.sender` survives the delegatecall, so this is the liquidator paying.
+        IERC20(env.asset).safeTransferFrom(msg.sender, address(this), c.plan.repay + c.plan.protocolFee);
+
+        o.repaid = c.plan.repay + _applyRetainedUsdg(env, key, s, debt - c.plan.repay);
+        if (o.fullSeizure) o.badDebt = debt - o.repaid;
 
         // Step 6.
         _retireLoan(r.tokenId, loan, o.repaid, debt, o.fullSeizure);
         o.socialized = _settleReserves(c.plan.protocolFee, o.badDebt);
+
+        if (o.fullSeizure) {
+            (o.out0, o.out1) = _seizeWholePosition(env, r, key);
+        } else {
+            _payOut(r, key, loan.owner, s, env.asset);
+            (o.out0, o.out1) = (s.out0, s.out1);
+        }
+
+        // Measured on what the liquidator received, not on what reached the market: on the
+        // partial branch those differ by exactly the borrower's share of the fees.
+        if (o.out0 < r.minOut0 || o.out1 < r.minOut1) revert SeizureBelowMinimum(o.out0, o.out1);
     }
 
     /// @dev Retires debt shares, and clears the record when the position itself is gone.
@@ -282,84 +306,104 @@ library MarketLiquidation {
     ///      in the position for the price of a one-wei repay — the v0.2 gap, closed in v0.3,
     ///      and the reason this cannot reuse `decreaseLiquidity` (FAR-8), which pays its caller.
     ///
-    ///      The liquidator gets everything that arrived minus the borrower's share of the fees,
-    ///      which is only non-zero when the fees outrun the seizure allowance. The split is
+    ///      The liquidator is owed everything that arrived minus the borrower's share of the
+    ///      fees, which is only non-zero when the fees outrun the seizure allowance. The split is
     ///      measured per currency from the fee amounts read before the call, so a position
     ///      whose fees sit mostly on one side does not pay them out on the other.
-    function _seizeSlice(
+    ///
+    ///      Nothing leaves here: `execute` writes the ledger first, then `_payOut` moves tokens.
+    function _takeSlice(
         Env memory env,
         Request memory r,
         Context memory c,
-        PoolKey memory key,
-        address borrower
-    ) private returns (uint256 out0, uint256 out1, uint256 retainedUsdg) {
-        out0 = key.currency0.balanceOfSelf();
-        out1 = key.currency1.balanceOfSelf();
+        PoolKey memory key
+    ) private returns (Split memory s) {
+        uint256 in0 = key.currency0.balanceOfSelf();
+        uint256 in1 = key.currency1.balanceOfSelf();
 
         bytes[] memory params = new bytes[](2);
         params[0] = abi.encode(r.tokenId, uint256(c.plan.liqToRemove), uint128(0), uint128(0), bytes(""));
         params[1] = abi.encode(key.currency0, key.currency1, address(this));
         _run(env, abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR)), params);
 
-        out0 = key.currency0.balanceOfSelf() - out0;
-        out1 = key.currency1.balanceOfSelf() - out1;
+        in0 = key.currency0.balanceOfSelf() - in0;
+        in1 = key.currency1.balanceOfSelf() - in1;
 
-        uint256 keep0 = LiquidationMath.retainedFee(out0, c.fee0, c.feeUsd, c.plan.feeCredit);
-        uint256 keep1 = LiquidationMath.retainedFee(out1, c.fee1, c.feeUsd, c.plan.feeCredit);
-        out0 -= keep0;
-        out1 -= keep1;
-
-        retainedUsdg = _returnToBorrower(env, borrower, key, keep0, keep1);
-        if (out0 != 0) key.currency0.transfer(r.to, out0);
-        if (out1 != 0) key.currency1.transfer(r.to, out1);
+        s.keep0 = LiquidationMath.retainedFee(in0, c.fee0, c.feeUsd, c.plan.feeCredit);
+        s.keep1 = LiquidationMath.retainedFee(in1, c.fee1, c.feeUsd, c.plan.feeCredit);
+        s.out0 = in0 - s.keep0;
+        s.out1 = in1 - s.keep1;
     }
 
-    /// @dev Hands the borrower back the fees the seizure was not entitled to.
-    ///
-    ///      The borrow-asset leg stays in the market and is returned as a number, because §8
-    ///      step 5 spends it on the debt before anything is paid out — and every pool is quoted
-    ///      in that asset (§6.1), so there is exactly one such leg. The other currency can only
-    ///      go back in kind; nothing in the core protocol swaps (§4.7).
-    ///
-    ///      That in-kind transfer is the one place a borrower can interfere with their own
-    ///      liquidation: on a native-ETH pool a contract borrower that rejects ETH makes it
-    ///      revert. It is reachable only when uncollected fees outrun the entire seizure
-    ///      allowance, and a liquidator can step around it by repaying more. It is the same
-    ///      open question as the ETH with no way out in `FarmentaMarket.receive()` (§15 no. 12)
-    ///      and belongs in the spec rather than in a decision made here.
-    function _returnToBorrower(
-        Env memory env,
-        address borrower,
-        PoolKey memory key,
-        uint256 keep0,
-        uint256 keep1
-    ) private returns (uint256 retainedUsdg) {
-        if (Currency.unwrap(key.currency0) == env.asset) {
-            (retainedUsdg, keep0) = (keep0, 0);
-        } else if (Currency.unwrap(key.currency1) == env.asset) {
-            (retainedUsdg, keep1) = (keep1, 0);
-        }
-
-        if (keep0 != 0) key.currency0.transfer(borrower, keep0);
-        if (keep1 != 0) key.currency1.transfer(borrower, keep1);
+    /// @notice Where a partial seizure's tokens are owed, per currency.
+    /// @param out0 currency0 owed to the liquidator.
+    /// @param out1 currency1 owed to the liquidator.
+    /// @param keep0 currency0 owed back to the borrower.
+    /// @param keep1 currency1 owed back to the borrower.
+    struct Split {
+        uint256 out0;
+        uint256 out1;
+        uint256 keep0;
+        uint256 keep1;
     }
 
-    /// @dev The borrower's own fees, spent on their remaining debt first and returned to them
-    ///      beyond it (§8 step 5). The USDG is already in the market — it arrived with the
-    ///      slice — so applying it to the debt is a ledger entry the caller makes, not a
-    ///      transfer; only the excess moves.
+    /// @dev The borrower's own fees in the borrow asset, spent on their remaining debt first
+    ///      (§8 step 5). The USDG is already in the market, having arrived with the slice, so
+    ///      applying it is a ledger entry, not a transfer. What exceeds the debt stays in `s` as
+    ///      owed to the borrower, and `_payOut` returns it. Zero on the full branch, whose
+    ///      `s` is empty.
+    ///
+    ///      Only the borrow-asset leg can repay: every pool is quoted in that asset (§6.1), so
+    ///      there is exactly one such leg, and the other currency could only reach the debt
+    ///      through a swap the core protocol does not make (§4.7). It goes back in kind.
     function _applyRetainedUsdg(
         Env memory env,
-        address borrower,
-        uint256 debt,
-        uint256 repay,
-        uint256 retainedUsdg
-    ) private returns (uint256 applied) {
-        if (retainedUsdg == 0) return 0;
+        PoolKey memory key,
+        Split memory s,
+        uint256 remainingDebt
+    ) private pure returns (uint256 applied) {
+        if (Currency.unwrap(key.currency0) == env.asset) {
+            applied = Math.min(s.keep0, remainingDebt);
+            s.keep0 -= applied;
+        } else if (Currency.unwrap(key.currency1) == env.asset) {
+            applied = Math.min(s.keep1, remainingDebt);
+            s.keep1 -= applied;
+        }
+    }
 
-        applied = Math.min(retainedUsdg, debt - repay);
-        uint256 excess = retainedUsdg - applied;
-        if (excess != 0) IERC20(env.asset).safeTransfer(borrower, excess);
+    /// @dev Pays out a partial seizure once the ledger already records it.
+    ///
+    ///      The borrow asset goes first. Until it has left it is cash in `totalAssets` that the
+    ///      ledger no longer stands behind, and the transfers after it can run the recipient's
+    ///      code — native ETH always does.
+    ///
+    ///      On a native-ETH pool a contract borrower that rejects ETH makes this revert, and
+    ///      with it the liquidation.
+    function _payOut(
+        Request memory r,
+        PoolKey memory key,
+        address borrower,
+        Split memory s,
+        address asset
+    ) private {
+        if (Currency.unwrap(key.currency1) == asset) {
+            _pay(key.currency1, r.to, s.out1, borrower, s.keep1);
+            _pay(key.currency0, r.to, s.out0, borrower, s.keep0);
+        } else {
+            _pay(key.currency0, r.to, s.out0, borrower, s.keep0);
+            _pay(key.currency1, r.to, s.out1, borrower, s.keep1);
+        }
+    }
+
+    function _pay(
+        Currency currency,
+        address liquidator,
+        uint256 toLiquidator,
+        address borrower,
+        uint256 toBorrower
+    ) private {
+        if (toLiquidator != 0) currency.transfer(liquidator, toLiquidator);
+        if (toBorrower != 0) currency.transfer(borrower, toBorrower);
     }
 
     function _run(

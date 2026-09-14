@@ -13,6 +13,7 @@ import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {MarketLiquidation} from "../../src/libraries/MarketLiquidation.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
+import {RedeemingLiquidator} from "../mocks/RedeemingLiquidator.sol";
 
 /// @notice §8 against a real position: both seizure branches, the fee credit, the protocol
 ///         fee, the haircut, and §9's bad debt.
@@ -320,6 +321,58 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertEq(
             totalAssetsBefore - market.totalAssets(), badDebt - available, "depositors lose the uncovered part, no more"
         );
+    }
+
+    /* -------------------------------- reentrancy ------------------------------ */
+
+    /// @notice A lender that liquidates into its own address and redeems from inside the ETH
+    ///         payout gets what its shares are worth after the liquidation, not before it.
+    /// @dev The full branch is where this matters most. Until the ledger is written, the debt
+    ///      about to be socialized still counts toward `totalAssets`, so a redeem read at that
+    ///      moment walks away from the loss and leaves all of it to the other depositors.
+    function test_aRedeemFromInsideTheFullSeizurePayoutStillBearsTheBadDebt() public {
+        RedeemingLiquidator attacker = _openWithRedeemingLiquidator();
+        _dropEthPrice(1200e18);
+
+        uint256 badDebt = _assertRedeemIsPricedAfterTheLiquidation(attacker);
+        assertGt(badDebt, 0, "this test needs the full-seizure branch");
+    }
+
+    /// @notice The same on the partial branch, where the USDG the liquidation brought in would
+    ///         otherwise still be counted in `totalAssets` while the ETH goes out.
+    function test_aRedeemFromInsideThePartialSeizurePayoutGainsNothing() public {
+        RedeemingLiquidator attacker = _openWithRedeemingLiquidator();
+        _ageUntilHealthFactorBelow(1e18);
+
+        uint256 badDebt = _assertRedeemIsPricedAfterTheLiquidation(attacker);
+        assertEq(badDebt, 0, "this test needs the partial branch");
+    }
+
+    function _openWithRedeemingLiquidator() private returns (RedeemingLiquidator attacker) {
+        _open(0);
+        _fundLiquidator(2000e6);
+        attacker = new RedeemingLiquidator(market);
+        deal(address(usdg), address(attacker), 2300e6);
+        attacker.deposit(300e6);
+    }
+
+    /// @dev Runs the same liquidation twice from the same state: once by an ordinary
+    ///      liquidator, to read what the attacker's shares are worth afterwards, and once by the
+    ///      attacker, redeeming from inside its own payout.
+    function _assertRedeemIsPricedAfterTheLiquidation(
+        RedeemingLiquidator attacker
+    ) private returns (uint256 badDebt) {
+        uint256 shares = market.balanceOf(address(attacker));
+        uint256 snapshot = vm.snapshotState();
+        vm.prank(liquidator);
+        market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+        uint256 fair = market.previewRedeem(shares);
+        vm.revertToState(snapshot);
+
+        badDebt = attacker.liquidate(tokenId, type(uint256).max);
+
+        assertGt(attacker.redeemed(), 0, "the redeem must actually run inside the payout");
+        assertLe(attacker.redeemed(), fair, "a share redeemed mid-liquidation is worth no more than after it");
     }
 
     /* --------------------------------- haircut -------------------------------- */
