@@ -301,6 +301,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
         uint256 reservesBefore = market.reserves();
         assertGt(reservesBefore, 0, "this test needs a reserve to spend");
         assertGt(reservesBefore, market.reserveFloor(), "and part of it below the withdrawal floor");
+        uint256 totalAssetsBefore = market.totalAssets();
 
         vm.recordLogs();
         vm.prank(liquidator);
@@ -311,6 +312,13 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertGt(badDebt, available, "the shortfall must outgrow the reserve here");
         assertEq(market.reserves(), 0, "the reserve is spent to the last unit, floor included");
         assertEq(_socializedAmount(), badDebt - available, "only the uncovered part reaches depositors");
+
+        // §9 layer 3, measured where depositors feel it. Cash gains repay + fee, `totalBorrows`
+        // loses the whole debt, `reserves` loses everything it held: the covered part cancels
+        // out, and what `totalAssets` loses is the socialized part to the unit.
+        assertEq(
+            totalAssetsBefore - market.totalAssets(), badDebt - available, "depositors lose the uncovered part, no more"
+        );
     }
 
     /* --------------------------------- haircut -------------------------------- */
