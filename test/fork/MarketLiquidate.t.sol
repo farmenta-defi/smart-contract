@@ -243,6 +243,46 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertGt(borrower.balance, borrowerEthBefore, "the non-USDG remainder goes back to the borrower");
     }
 
+    /* ------------------------- a borrower that refuses ETH -------------------- */
+
+    /// @notice A contract borrower that reverts on ETH cannot block its own liquidation. Its
+    ///         share of the fees reaches it as WETH instead.
+    /// @dev Reached whenever the fees outrun the seizure allowance, which a close factor can
+    ///      make true for every `repayAmount` a liquidator is allowed to offer. So it has to
+    ///      be impossible, not just avoidable.
+    function test_aBorrowerThatRejectsEthIsPaidInWethAndStillLiquidated() public {
+        _assertTheBorrowersEthFallsBackToWeth(hex"60006000fd"); // PUSH1 0 PUSH1 0 REVERT
+    }
+
+    /// @notice The same for a borrower that burns every unit of gas it is handed, which would
+    ///         otherwise take the liquidation down with it.
+    function test_aBorrowerThatBurnsTheGasIsPaidInWethAndStillLiquidated() public {
+        _assertTheBorrowersEthFallsBackToWeth(hex"5b600056"); // JUMPDEST PUSH1 0 JUMP
+    }
+
+    function _assertTheBorrowersEthFallsBackToWeth(
+        bytes memory borrowerCode
+    ) private {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+        market.accrue();
+        vm.etch(borrower, borrowerCode);
+
+        IERC20 weth = IERC20(RobinhoodChain.WETH);
+        uint256 ethBefore = borrower.balance;
+        uint256 wethBefore = weth.balanceOf(borrower);
+        uint256 marketEthBefore = address(market).balance;
+
+        vm.prank(liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, 1e6, 0, 0, liquidator);
+
+        assertGt(repaid, 0, "the liquidation must go through");
+        assertEq(borrower.balance, ethBefore, "the borrower took no ETH");
+        assertGt(weth.balanceOf(borrower), wethBefore, "its share arrived as WETH");
+        assertEq(address(market).balance, marketEthBefore, "and none of it stayed in the market");
+    }
+
     /* ------------------------------- full seizure ----------------------------- */
 
     /// @notice §8 step 4 and §9: when the position cannot cover the debt, it is taken whole,

@@ -47,8 +47,8 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///      A native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather
 ///      than ahead of it. What is unchanged is that ETH sent here by anything other than a
 ///      payout has no accounting and no rescue — §4.1's owner-function list still has none.
-///      Spec open item §15 no. 12, now with one more case attached: a contract borrower that
-///      refuses ETH can make its own partial liquidation revert (see `MarketLiquidation`).
+///      Spec open item §15 no. 12. A borrower cannot use ETH to block its own liquidation:
+///      its share goes out as WETH when it refuses ETH (see `MarketLiquidation`).
 ///
 ///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` with no timelock (§4.1, decided
 ///      4 Sep 2026). This contract custodies collateral NFTs and holds USDG deposits, so

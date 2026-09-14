@@ -8,6 +8,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 
 import {ICollateralPolicy} from "../interfaces/ICollateralPolicy.sol";
@@ -16,6 +17,12 @@ import {IPriceOracle} from "../interfaces/IPriceOracle.sol";
 import {DebtMath} from "./DebtMath.sol";
 import {LiquidationMath} from "./LiquidationMath.sol";
 import {MarketLedger} from "./MarketLedger.sol";
+
+/// @dev The one PositionManager getter this library needs that `IPositionManager` does not
+///      declare. It comes from periphery's `NativeWrapper`, which PositionManager inherits.
+interface INativeWrapper {
+    function WETH9() external view returns (IWETH9);
+}
 
 /// @title MarketLiquidation
 /// @notice Everything a §8 seizure does that is not a write to the market's ledger.
@@ -36,6 +43,12 @@ library MarketLiquidation {
 
     uint256 private constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
+
+    /// @notice Gas offered with the borrower's share of the fees when it is native ETH.
+    /// @dev Enough for a smart-contract wallet to accept it, and a bound on what a borrower
+    ///      can burn. Refusing it costs the borrower nothing but the form: the ETH arrives as
+    ///      WETH instead (see `_pay`).
+    uint256 private constant BORROWER_ETH_GAS = 50_000;
 
     /// @notice The market's dependencies, which a delegatecall cannot read for itself.
     /// @dev They are `immutable` in the market implementation (§4.1), and immutables live in
@@ -161,7 +174,7 @@ library MarketLiquidation {
         if (o.fullSeizure) {
             (o.out0, o.out1) = _seizeWholePosition(env, r, key);
         } else {
-            _payOut(r, key, loan.owner, s, env.asset);
+            _payOut(env, r, key, loan.owner, s);
             (o.out0, o.out1) = (s.out0, s.out1);
         }
 
@@ -376,26 +389,35 @@ library MarketLiquidation {
     ///      The borrow asset goes first. Until it has left it is cash in `totalAssets` that the
     ///      ledger no longer stands behind, and the transfers after it can run the recipient's
     ///      code — native ETH always does.
-    ///
-    ///      On a native-ETH pool a contract borrower that rejects ETH makes this revert, and
-    ///      with it the liquidation.
     function _payOut(
+        Env memory env,
         Request memory r,
         PoolKey memory key,
         address borrower,
-        Split memory s,
-        address asset
+        Split memory s
     ) private {
-        if (Currency.unwrap(key.currency1) == asset) {
-            _pay(key.currency1, r.to, s.out1, borrower, s.keep1);
-            _pay(key.currency0, r.to, s.out0, borrower, s.keep0);
+        if (Currency.unwrap(key.currency1) == env.asset) {
+            _pay(env, key.currency1, r.to, s.out1, borrower, s.keep1);
+            _pay(env, key.currency0, r.to, s.out0, borrower, s.keep0);
         } else {
-            _pay(key.currency0, r.to, s.out0, borrower, s.keep0);
-            _pay(key.currency1, r.to, s.out1, borrower, s.keep1);
+            _pay(env, key.currency0, r.to, s.out0, borrower, s.keep0);
+            _pay(env, key.currency1, r.to, s.out1, borrower, s.keep1);
         }
     }
 
+    /// @dev The liquidator's leg is a plain transfer. `to` is theirs to choose, and a recipient
+    ///      that refuses its own payout only fails its own call.
+    ///
+    ///      The borrower's leg is different: it is the one transfer a borrower could use to make
+    ///      itself unliquidatable. A contract that reverts on ETH, or burns whatever gas it is
+    ///      handed, would take the liquidation down with it, and that is reachable for every
+    ///      `repayAmount` the close factor allows once the fees outrun the seizure allowance —
+    ///      so a liquidator cannot step around it. Native ETH is therefore offered with a fixed
+    ///      gas stipend, and if it is refused it is wrapped and sent as WETH, which runs none of
+    ///      the borrower's code. The WETH is PositionManager's own, so nothing here names a
+    ///      chain (§14).
     function _pay(
+        Env memory env,
         Currency currency,
         address liquidator,
         uint256 toLiquidator,
@@ -403,7 +425,22 @@ library MarketLiquidation {
         uint256 toBorrower
     ) private {
         if (toLiquidator != 0) currency.transfer(liquidator, toLiquidator);
-        if (toBorrower != 0) currency.transfer(borrower, toBorrower);
+        if (toBorrower == 0) return;
+        if (Currency.unwrap(currency) != address(0)) {
+            currency.transfer(borrower, toBorrower);
+            return;
+        }
+
+        bool sent;
+        assembly ("memory-safe") {
+            // No return data is copied, so the borrower cannot bill this call for that either.
+            sent := call(BORROWER_ETH_GAS, borrower, toBorrower, 0, 0, 0, 0)
+        }
+        if (sent) return;
+
+        IWETH9 weth = INativeWrapper(address(env.positionManager)).WETH9();
+        weth.deposit{value: toBorrower}();
+        IERC20(address(weth)).safeTransfer(borrower, toBorrower);
     }
 
     function _run(
