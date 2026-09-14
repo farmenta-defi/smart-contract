@@ -5,8 +5,10 @@ import {Vm} from "forge-std/Vm.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {PoolDonateTest} from "@uniswap/v4-core/src/test/PoolDonateTest.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
@@ -212,44 +214,117 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
     /* ------------------------------- the v0.2 gap ----------------------------- */
 
-    /// @notice The regression that gave §8 step 5 its shape: a one-dollar repay against a
-    ///         fee-rich position must not collect the position's whole fee balance.
-    /// @dev A decrease realises every fee in the position no matter how little liquidity it
-    ///      pulls, so the naive routing — `TAKE_PAIR` straight to the liquidator — hands over
-    ///      ~$11 of fees for $1,05 of seizure. What must happen instead: the liquidator gets
-    ///      fees worth `feeCredit` only, and the rest goes back to the borrower, USDG first
-    ///      against their own debt.
+    /// @notice The regression that gave §8 step 5 its shape, in its v0.26 form: a tiny repay
+    ///         against a position with fees cannot collect them, and cannot hand them back to
+    ///         a borrower still in debt either.
+    /// @dev A decrease realises every fee in the position however little liquidity it pulls.
+    ///      v0.2 paid all of it to the liquidator. Until v0.26 the part beyond the seizure went
+    ///      back to the borrower, which a 1-wei repay could trigger at will to move collateral out
+    ///      and push the health factor down (review of PR #16). Now the ETH part must be bought,
+    ///      and a `repayAmount` that leaves nothing to buy it with is refused.
     function test_aTinyRepayCannotDrainTheFeeBalance() public {
         _open(0);
         _fundLiquidator(1000e6);
         _ageUntilHealthFactorBelow(1e18);
-        market.accrue();
-
-        IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
-        assertGt(v.feesUsd, 10e18, "the fixture should carry a fee balance worth taking");
-
-        uint256 debtBefore = market.debtOf(tokenId);
-        uint256 borrowerEthBefore = borrower.balance;
+        assertGt(valuer.valueForLiquidation(tokenId).fees0, 0, "the fixture must carry an ETH fee leg");
 
         vm.prank(liquidator);
-        (uint256 repaid, uint256 out0, uint256 out1,) = market.liquidate(tokenId, 1e6, 0, 0, liquidator);
+        vm.expectPartialRevert(MarketLiquidation.FeePurchaseUnderfunded.selector);
+        market.liquidate(tokenId, 1, 0, 0, liquidator);
 
-        assertLt(out0, v.fees0, "the liquidator must not receive the whole currency0 fee balance");
-        assertLt(out1, v.fees1, "the liquidator must not receive the whole currency1 fee balance");
-        assertApproxEqRel(_usdValue(out0, out1), 1.05e18, 0.02e18, "the payout is the seizure, not the fees");
+        vm.prank(liquidator);
+        vm.expectPartialRevert(MarketLiquidation.FeePurchaseUnderfunded.selector);
+        market.liquidate(tokenId, 1e6, 0, 0, liquidator);
+    }
 
-        assertGt(repaid, 1e6, "the fees held back pay down the borrower's own debt");
-        assertEq(market.debtOf(tokenId), debtBefore - repaid, "and the ledger says so");
-        assertGt(borrower.balance, borrowerEthBefore, "the non-USDG remainder goes back to the borrower");
+    /// @notice §8 step 5 v0.26: the fees the seizure was not entitled to repay the debt — the
+    ///         USDG leg directly, the ETH leg by being bought — and none of it reaches a borrower
+    ///         still in debt.
+    function test_theFeesLeftOverAreBoughtAndRepayTheDebt() public {
+        _openWithDonatedFees(_ethWorth(250e18), 0);
+        assertGt(market.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
+
+        uint256 debtBefore = market.debtOf(tokenId);
+        uint256 repay = debtBefore / 2;
+        uint256 feesUsd = valuer.valueForLiquidation(tokenId).feesUsd;
+        assertGt(feesUsd, repay * 1e12 * 10_500 / 10_000, "the fees must outrun the seizure");
+        uint256 leftoverUsd = feesUsd - repay * 1e12 * 10_500 / 10_000;
+        assertLt(leftoverUsd / 1e12, debtBefore - repay, "and still fit under the remaining debt");
+
+        uint256 borrowerEth = borrower.balance;
+        uint256 borrowerUsdg = usdg.balanceOf(borrower);
+        uint256 walletBefore = usdg.balanceOf(liquidator);
+
+        vm.prank(liquidator);
+        (uint256 repaid, uint256 out0, uint256 out1,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertEq(borrower.balance, borrowerEth, "no ETH reaches a borrower still in debt");
+        assertEq(usdg.balanceOf(borrower), borrowerUsdg, "and no USDG either");
+        // Within a unit: shares are retired rounded down, the same rule `repay` follows.
+        assertApproxEqAbs(market.debtOf(tokenId), debtBefore - repaid, 1, "the ledger records what was repaid");
+        assertApproxEqRel(
+            repaid - repay, leftoverUsd / 1e12, 0.01e18, "past the close factor, the debt falls by the leftover fees"
+        );
+
+        // Everything paid beyond repay and its protocol fee bought ETH, at value.
+        uint256 purchase = walletBefore + out1 - usdg.balanceOf(liquidator) - repay - repay * 50 / 10_000;
+        assertGt(purchase, 0, "the ETH leg was bought, not handed over");
+        assertApproxEqRel(
+            _usdValue(out0, out1),
+            (repay * 10_500 / 10_000 + purchase) * 1e12,
+            0.01e18,
+            "the liquidator got the seizure plus exactly what they paid for"
+        );
+    }
+
+    /// @notice While debt remains, every dollar of fees that leaves the position takes a dollar of
+    ///         debt with it. Only the bonus on the seizure itself is not matched.
+    /// @dev Before v0.26 the ETH leg left for the borrower's wallet while the debt stayed, and the
+    ///      health factor paid for it: review of PR #16 measured 0,99990 → 0,98961 on this
+    ///      fixture with a 1-wei repay, and 0,97 → 0,88 on a fee-heavy position.
+    function test_feesLeavingThePositionTakeTheirDebtWithThem() public {
+        _openWithDonatedFees(_ethWorth(250e18), 0);
+        uint256 debtBefore = market.debtOf(tokenId);
+        uint256 valueBefore = _realizableUsd();
+
+        vm.prank(liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        uint256 valueLost = valueBefore - _realizableUsd();
+        uint256 bonusUsd = (debtBefore / 2) * 1e12 * 500 / 10_000;
+        assertApproxEqRel(
+            repaid * 1e12 + bonusUsd, valueLost, 0.005e18, "the debt fell by all the position lost, bar the bonus"
+        );
+        assertApproxEqAbs(market.debtOf(tokenId), debtBefore - repaid, 1, "and the ledger agrees, within a unit");
+    }
+
+    /// @notice §8 step 5 v0.26: once the leftover fees cover the whole remaining debt, the debt is
+    ///         repaid in full and only what lies beyond it goes back to the borrower.
+    function test_feesBeyondTheDebtRepayItAndOnlyTheRestGoesBack() public {
+        _openWithDonatedFees(_ethWorth(2000e18), 0);
+        uint256 debtBefore = market.debtOf(tokenId);
+        uint256 borrowerEth = borrower.balance;
+        uint256 walletBefore = usdg.balanceOf(liquidator);
+
+        vm.prank(liquidator);
+        (uint256 repaid,, uint256 out1,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertEq(repaid, debtBefore, "the fees paid off the whole debt");
+        assertEq(market.debtOf(tokenId), 0, "and the ledger says so");
+        assertEq(market.loanOf(tokenId).owner, borrower, "the position is still the borrower's");
+        assertGt(borrower.balance, borrowerEth, "what the debt could not absorb came back to them");
+
+        uint256 spent = walletBefore + out1 - usdg.balanceOf(liquidator);
+        assertLe(spent, debtBefore + (debtBefore / 2) * 50 / 10_000, "the liquidator paid no more than debt and fee");
     }
 
     /* ------------------------- a borrower that refuses ETH -------------------- */
 
     /// @notice A contract borrower that reverts on ETH cannot block its own liquidation. Its
     ///         share of the fees reaches it as WETH instead.
-    /// @dev Reached whenever the fees outrun the seizure allowance, which a close factor can
-    ///      make true for every `repayAmount` a liquidator is allowed to offer. So it has to
-    ///      be impossible, not just avoidable.
+    /// @dev Since v0.26 anything goes back to the borrower only once its leftover fees outrun both
+    ///      the seizure and the whole remaining debt, and no `repayAmount` avoids that. So the
+    ///      block has to be impossible, not just avoidable.
     function test_aBorrowerThatRejectsEthIsPaidInWethAndStillLiquidated() public {
         _assertTheBorrowersEthFallsBackToWeth(hex"60006000fd"); // PUSH1 0 PUSH1 0 REVERT
     }
@@ -263,10 +338,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
     function _assertTheBorrowersEthFallsBackToWeth(
         bytes memory borrowerCode
     ) private {
-        _open(0);
-        _fundLiquidator(1000e6);
-        _ageUntilHealthFactorBelow(1e18);
-        market.accrue();
+        _openWithDonatedFees(_ethWorth(2000e18), 0);
         vm.etch(borrower, borrowerCode);
 
         IERC20 weth = IERC20(RobinhoodChain.WETH);
@@ -275,7 +347,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
         uint256 marketEthBefore = address(market).balance;
 
         vm.prank(liquidator);
-        (uint256 repaid,,,) = market.liquidate(tokenId, 1e6, 0, 0, liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
 
         assertGt(repaid, 0, "the liquidation must go through");
         assertEq(borrower.balance, ethBefore, "the borrower took no ETH");
@@ -502,16 +574,27 @@ contract MarketLiquidateForkTest is MarketForkTest {
         uint256 walletBefore = usdg.balanceOf(liquidator);
 
         vm.prank(liquidator);
-        (, uint256 out0, uint256 out1,) = market.liquidate(tokenId, repayAmount, 0, 0, liquidator);
+        try market.liquidate(tokenId, repayAmount, 0, 0, liquidator) returns (
+            uint256, uint256 out0, uint256 out1, uint256
+        ) {
+            // What the liquidator paid against the debt: everything that left their wallet, less
+            // the protocol fee, which is the only other thing reserves moved by. A fee leg they
+            // had to buy is in it too, paid at value, so it lifts this ceiling by as much as the
+            // payout.
+            uint256 spent = walletBefore + out1 - usdg.balanceOf(liquidator);
+            uint256 repay = spent - (market.reserves() - reservesBefore);
 
-        // What the liquidator actually paid against the debt: everything that left their
-        // wallet, less the protocol fee, which is the only other thing reserves moved by.
-        uint256 spent = walletBefore + out1 - usdg.balanceOf(liquidator);
-        uint256 repay = spent - (market.reserves() - reservesBefore);
-
-        assertLe(
-            _usdValue(out0, out1), repay * 1e12 * 10_500 / 10_000 + 1e12, "the payout exceeded repay x (1 + bonus)"
-        );
+            assertLe(
+                _usdValue(out0, out1), repay * 1e12 * 10_500 / 10_000 + 1e12, "the payout exceeded repay x (1 + bonus)"
+            );
+        } catch (bytes memory reason) {
+            // §8 step 5 v0.26: a request that leaves nothing to buy the fee leg with is refused.
+            assertEq(
+                bytes32(bytes4(reason)),
+                bytes32(MarketLiquidation.FeePurchaseUnderfunded.selector),
+                "the only refusal is an unfunded fee purchase"
+            );
+        }
     }
 
     /* --------------------------------- helpers -------------------------------- */
@@ -538,6 +621,43 @@ contract MarketLiquidateForkTest is MarketForkTest {
         uint256 amount = market.maxBorrow(tokenId);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
+    }
+
+    /// @dev The fixture with fees donated into its pool, sized so this position's own share is
+    ///      about `eth` wei and `usdgAmount` USDG, then aged underwater with a funded liquidator.
+    ///      The fixture's natural ~$11 of fees sits far below any close-factor seizure, and the
+    ///      paths where fees outrun the seizure need more than that.
+    function _openWithDonatedFees(
+        uint256 eth,
+        uint256 usdgAmount
+    ) private {
+        _open(0);
+        _fundLiquidator(2000e6);
+
+        PoolKey memory key = _keyOf(tokenId);
+        uint256 poolLiquidity = stateView.getLiquidity(key.toId());
+        uint256 positionLiquidity = positionManager.getPositionLiquidity(tokenId);
+        uint256 ethDonation = eth * poolLiquidity / positionLiquidity;
+        uint256 usdgDonation = usdgAmount * poolLiquidity / positionLiquidity;
+
+        PoolDonateTest donor = new PoolDonateTest(poolManager);
+        vm.deal(address(this), ethDonation);
+        deal(address(usdg), address(this), usdgDonation);
+        usdg.approve(address(donor), usdgDonation);
+        donor.donate{value: ethDonation}(key, ethDonation, usdgDonation, "");
+
+        _ageUntilHealthFactorBelow(1e18);
+    }
+
+    function _ethWorth(
+        uint256 usd
+    ) private view returns (uint256) {
+        return usd * 1e18 / oracle.priceForLiquidation(Currency.wrap(RobinhoodChain.NATIVE));
+    }
+
+    function _realizableUsd() private view returns (uint256) {
+        IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
+        return v.principalUsd + v.feesUsd;
     }
 
     function _fundLiquidator(

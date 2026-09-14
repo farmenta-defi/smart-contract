@@ -96,11 +96,15 @@ library MarketLiquidation {
     /// @param feeUsd Value of the uncollected fees after the §6.3 haircut, USD 1e18.
     /// @param fee0 Uncollected currency0 fees, after the same haircut.
     /// @param fee1 Uncollected currency1 fees, after the same haircut.
+    /// @param usdgPrice USD price of one whole USDG at liquidation prices, 1e18.
+    /// @param usdgDecimals Decimals of the borrow asset, from the listing.
     /// @param plan The seizure §8 allows.
     struct Context {
         uint256 feeUsd;
         uint256 fee0;
         uint256 fee1;
+        uint256 usdgPrice;
+        uint8 usdgDecimals;
         LiquidationMath.Plan plan;
     }
 
@@ -120,6 +124,13 @@ library MarketLiquidation {
     /// @notice The market is not holding this position as anyone's collateral.
     error PositionNotCollateral(uint256 tokenId);
 
+    /// @notice The fees the seizure was not entitled to include a non-USDG leg the liquidator
+    ///         has to buy while debt remains (§8 step 5, v0.26), and what `repayAmount` leaves
+    ///         after `repay` does not pay for it.
+    /// @param required USDG the purchase costs.
+    /// @param available USDG `repayAmount` left for it.
+    error FeePurchaseUnderfunded(uint256 required, uint256 available);
+
     /// @notice Runs §8 in full: value, gate, charge, seize, settle the ledger, and pay out.
     /// @dev The caller has already accrued interest and taken the reentrancy guard, and emits
     ///      the events from what this returns. Everything between is here.
@@ -135,7 +146,8 @@ library MarketLiquidation {
     ///      difference to every other depositor. So:
     ///
     ///      - partial branch: the slice comes into the market, which runs no code on receipt.
-    ///        Then the USDG is pulled and the ledger written, and only then is anything paid
+    ///        Then the USDG is pulled (repay, protocol fee, and any fee leg §8 step 5 makes the
+    ///        liquidator buy) and the ledger written, and only then is anything paid
     ///        out, the borrow asset first, so no callback sees cash the ledger has not settled;
     ///      - full branch: the USDG is pulled and the ledger written before the burn, whose
     ///        `TAKE_PAIR` is the first thing that can call out.
@@ -159,13 +171,18 @@ library MarketLiquidation {
         o.fullSeizure = c.plan.fullSeizure;
 
         Split memory s;
-        if (!o.fullSeizure) s = _takeSlice(env, r, c, key);
+        if (o.fullSeizure) {
+            o.repaid = c.plan.repay;
+            o.badDebt = debt - o.repaid;
+        } else {
+            s = _takeSlice(env, r, c, key);
+            _settleRetainedFees(env, r, c, key, s, debt - c.plan.repay);
+            o.repaid = c.plan.repay + s.applied + s.cost;
+        }
 
-        // Step 3. `msg.sender` survives the delegatecall, so this is the liquidator paying.
-        IERC20(env.asset).safeTransferFrom(msg.sender, address(this), c.plan.repay + c.plan.protocolFee);
-
-        o.repaid = c.plan.repay + _applyRetainedUsdg(env, key, s, debt - c.plan.repay);
-        if (o.fullSeizure) o.badDebt = debt - o.repaid;
+        // Step 3, plus the fee leg step 5 makes the liquidator buy. `msg.sender` survives the
+        // delegatecall, so this is the liquidator paying.
+        IERC20(env.asset).safeTransferFrom(msg.sender, address(this), c.plan.repay + c.plan.protocolFee + s.cost);
 
         // Step 6.
         _retireLoan(r.tokenId, loan, o.repaid, debt, o.fullSeizure);
@@ -263,13 +280,13 @@ library MarketLiquidation {
         c.fee0 = v.fees0 * keepBps / BPS;
         c.fee1 = v.fees1 * keepBps / BPS;
 
-        uint256 usdgPrice = env.oracle.priceForLiquidation(Currency.wrap(env.asset));
-        uint8 usdgDecimals = env.oracle.decimals(Currency.wrap(env.asset));
+        c.usdgPrice = env.oracle.priceForLiquidation(Currency.wrap(env.asset));
+        c.usdgDecimals = env.oracle.decimals(Currency.wrap(env.asset));
 
         uint256 hf = DebtMath.healthFactor(
             (v.principalUsd + Math.min(v.feesUsd, v.principalUsd / 10)) * keepBps / BPS,
             terms.ltBps,
-            DebtMath.debtUsd(debt, usdgPrice, usdgDecimals)
+            DebtMath.debtUsd(debt, c.usdgPrice, c.usdgDecimals)
         );
         if (hf >= WAD) revert PositionIsHealthy(r.tokenId, hf);
 
@@ -279,8 +296,8 @@ library MarketLiquidation {
                 repayRequested: r.repayAmount,
                 realizableUsd: (v.principalUsd + v.feesUsd) * keepBps / BPS,
                 feeUsd: c.feeUsd,
-                usdgPrice: usdgPrice,
-                usdgDecimals: usdgDecimals,
+                usdgPrice: c.usdgPrice,
+                usdgDecimals: c.usdgDecimals,
                 closeFactorBps_: LiquidationMath.closeFactorBps(loan.tier, hf, debt),
                 bonusBps: terms.liquidatorBonusBps,
                 liquidity: v.liquidity
@@ -348,40 +365,83 @@ library MarketLiquidation {
         s.out1 = in1 - s.keep1;
     }
 
-    /// @notice Where a partial seizure's tokens are owed, per currency.
+    /// @notice Where a partial seizure's tokens are owed, per currency, and what the fees the
+    ///         seizure was not entitled to did to the debt.
     /// @param out0 currency0 owed to the liquidator.
     /// @param out1 currency1 owed to the liquidator.
     /// @param keep0 currency0 owed back to the borrower.
     /// @param keep1 currency1 owed back to the borrower.
+    /// @param applied The borrower's own USDG fees, spent on their debt.
+    /// @param cost USDG the liquidator pays for the non-USDG fee leg it has to buy.
     struct Split {
         uint256 out0;
         uint256 out1;
         uint256 keep0;
         uint256 keep1;
+        uint256 applied;
+        uint256 cost;
     }
 
-    /// @dev The borrower's own fees in the borrow asset, spent on their remaining debt first
-    ///      (§8 step 5). The USDG is already in the market, having arrived with the slice, so
-    ///      applying it is a ledger entry, not a transfer. What exceeds the debt stays in `s` as
-    ///      owed to the borrower, and `_payOut` returns it. Zero on the full branch, whose
-    ///      `s` is empty.
+    /// @dev What happens to the fees the seizure was not entitled to (§8 step 5, v0.26).
     ///
-    ///      Only the borrow-asset leg can repay: every pool is quoted in that asset (§6.1), so
-    ///      there is exactly one such leg, and the other currency could only reach the debt
-    ///      through a swap the core protocol does not make (§4.7). It goes back in kind.
-    function _applyRetainedUsdg(
+    ///      The USDG leg is already in the market, so spending it on the remaining debt is a
+    ///      ledger entry. The other leg could only reach the debt through a swap the core
+    ///      protocol does not make (§4.7), so while debt remains the liquidator buys it at
+    ///      `priceForLiquidation`, with no bonus and no protocol fee, and that USDG repays the
+    ///      debt. Only what the debt cannot absorb goes back to the borrower.
+    ///
+    ///      The purchase is paid from what `repayAmount` leaves after `repay`, and a shortfall
+    ///      reverts rather than hand the leg back. Handing it back is what let a 1-wei repay
+    ///      move collateral out to a borrower still in debt and push the health factor down on
+    ///      demand (review of PR #16). Worth knowing: `repay` is `repayAmount` capped by the
+    ///      close factor, so a budget is left over only once `repay` sits at that cap. On a
+    ///      position whose fees outrun a smaller seizure, a liquidator goes to the close factor
+    ///      or does not liquidate.
+    ///
+    ///      Every pool is quoted in the borrow asset (§6.1), so exactly one leg is USDG.
+    function _settleRetainedFees(
         Env memory env,
+        Request memory r,
+        Context memory c,
         PoolKey memory key,
         Split memory s,
         uint256 remainingDebt
-    ) private pure returns (uint256 applied) {
-        if (Currency.unwrap(key.currency0) == env.asset) {
-            applied = Math.min(s.keep0, remainingDebt);
-            s.keep0 -= applied;
-        } else if (Currency.unwrap(key.currency1) == env.asset) {
-            applied = Math.min(s.keep1, remainingDebt);
-            s.keep1 -= applied;
+    ) private view {
+        bool usdgIs0 = Currency.unwrap(key.currency0) == env.asset;
+        (uint256 usdgKept, uint256 otherKept) = usdgIs0 ? (s.keep0, s.keep1) : (s.keep1, s.keep0);
+
+        s.applied = Math.min(usdgKept, remainingDebt);
+        uint256 bought;
+        if (otherKept != 0 && remainingDebt != s.applied) {
+            (bought, s.cost) =
+                _priceFeeLeg(env, c, usdgIs0 ? key.currency1 : key.currency0, otherKept, remainingDebt - s.applied);
+            if (r.repayAmount - c.plan.repay < s.cost) {
+                revert FeePurchaseUnderfunded(s.cost, r.repayAmount - c.plan.repay);
+            }
         }
+
+        if (usdgIs0) {
+            (s.keep0, s.keep1, s.out1) = (usdgKept - s.applied, otherKept - bought, s.out1 + bought);
+        } else {
+            (s.keep1, s.keep0, s.out0) = (usdgKept - s.applied, otherKept - bought, s.out0 + bought);
+        }
+    }
+
+    function _priceFeeLeg(
+        Env memory env,
+        Context memory c,
+        Currency currency,
+        uint256 amount,
+        uint256 remainingDebt
+    ) private view returns (uint256, uint256) {
+        return LiquidationMath.purchase(
+            amount,
+            env.oracle.priceForLiquidation(currency),
+            env.oracle.decimals(currency),
+            c.usdgPrice,
+            c.usdgDecimals,
+            remainingDebt
+        );
     }
 
     /// @dev Pays out a partial seizure once the ledger already records it.
@@ -410,9 +470,9 @@ library MarketLiquidation {
     ///
     ///      The borrower's leg is different: it is the one transfer a borrower could use to make
     ///      itself unliquidatable. A contract that reverts on ETH, or burns whatever gas it is
-    ///      handed, would take the liquidation down with it, and that is reachable for every
-    ///      `repayAmount` the close factor allows once the fees outrun the seizure allowance —
-    ///      so a liquidator cannot step around it. Native ETH is therefore offered with a fixed
+    ///      handed, would take the liquidation down with it. Since v0.26 anything goes back to
+    ///      the borrower only once the fees outrun both the seizure and the whole remaining
+    ///      debt, and no choice of `repayAmount` avoids that. Native ETH is therefore offered with a fixed
     ///      gas stipend, and if it is refused it is wrapped and sent as WETH, which runs none of
     ///      the borrower's code. The WETH is PositionManager's own, so nothing here names a
     ///      chain (§14).
