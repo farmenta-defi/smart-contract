@@ -33,14 +33,15 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 /// @dev **The lending side is whole as of §8.** Collateral goes in and comes back out, the
 ///      index-based ledger of §7 accrues against it, and an underwater position can now be
 ///      liquidated — which is what makes a lent dollar a dollar with a way home. What §4.1
-///      still owes: `collectFees` and `decreaseLiquidity` (FAR-7, FAR-8), the borrow price
-///      gate of §5.2 (FAR-20), and the meme price path (FAR-16).
+///      still owes: `collectFees`, `decreaseLiquidity` and `increaseLiquidity` (FAR-7, FAR-8,
+///      FAR-9), the borrow price gate of §5.2 (FAR-20), and the meme price path (FAR-16).
 ///
 ///      **Room is the constraint on what lands here next.** The implementation compiles to
 ///      about 24 KB against EIP-170's 24,576, so §8's seizure runs from `MarketLiquidation`
 ///      by `delegatecall` — the market's storage, the market's address, the liquidator's
-///      `msg.sender`, code at its own address. The two functions still owed will not fit
-///      inline either; moving the arithmetic out for good is FAR-26.
+///      `msg.sender`, code at its own address. What is still owed will not fit inline either,
+///      and this branch does not fit together with FAR-20's gate; the second round of making
+///      room is FAR-32 (spec §15 no. 17), because FAR-26's first round no longer covers it.
 ///
 ///      **ETH arrives and leaves through liquidation now, but stray ETH still has no exit.**
 ///      A native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather

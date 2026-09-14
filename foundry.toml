@@ -55,8 +55,12 @@ fail_on_revert = false
 # it saves — a delegatecall site is larger than the arithmetic it replaces at this scale.
 # What worked was moving the seizure itself out: `MarketLiquidation` runs by delegatecall and
 # the market carries the wrapper, leaving it at 24,069 with 507 to spare. `collectFees`
-# (FAR-7) and `decreaseLiquidity` (FAR-8) will not fit inline in what is left, so the general
-# fix — moving the arithmetic out for good, FAR-26 — is now load-bearing rather than tidy. The CI fast lane gates size on this profile, since it is the one that ships.
+# (FAR-7), `decreaseLiquidity` (FAR-8) and `increaseLiquidity` (FAR-9) will not fit inline in
+# what is left, and neither does this branch together with the §5.2 borrow gate (FAR-20,
+# 528 bytes over). The second round of making room is FAR-32 (spec §15 no. 17); FAR-26's
+# first round no longer covers it.
+#
+# The CI fast lane gates size on this profile, since it is the one that ships.
 [profile.deploy]
 via_ir = true
 optimizer_runs = 200
