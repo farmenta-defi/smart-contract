@@ -109,7 +109,10 @@ contract MarketBorrowForkTest is MarketForkTest {
 
     function test_borrowRejectsSpotOutsideTheTwoPercentGate() public {
         (uint256 tokenId, address holder) = _prepareLoan();
-        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2400e18, 18);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2458e18, 18);
+        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
+        assertGt(valuation.spotDeviationBps, 200);
+        assertLt(valuation.spotDeviationBps, 300);
 
         vm.prank(holder);
         vm.expectPartialRevert(FarmentaMarket.SpotPriceDeviation.selector);
@@ -119,6 +122,9 @@ contract MarketBorrowForkTest is MarketForkTest {
     function test_borrowAcceptsSpotWithinTheTwoPercentGate() public {
         (uint256 tokenId, address holder) = _prepareLoan();
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2480e18, 18);
+        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
+        assertGt(valuation.spotDeviationBps, 100);
+        assertLt(valuation.spotDeviationBps, 200);
 
         vm.prank(holder);
         market.borrow(tokenId, 10e6, holder);
@@ -170,6 +176,11 @@ contract MarketBorrowForkTest is MarketForkTest {
         oracle.setPythPrice(100e18, block.timestamp);
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2400e18, 18);
         vm.prank(holder);
+        memeMarket.borrow(tokenId, 10e6, holder);
+
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
+        vm.prank(holder);
+        vm.expectPartialRevert(FarmentaMarket.UsdgPriceOutOfBounds.selector);
         memeMarket.borrow(tokenId, 10e6, holder);
     }
 
