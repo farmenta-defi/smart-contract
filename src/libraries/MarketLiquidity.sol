@@ -46,10 +46,8 @@ library MarketLiquidity {
     ///      market's own cash moves on this path either way; the order is kept so that no function
     ///      is an exception to the rule.
     ///
-    ///      **Recipients PositionManager would reinterpret are refused.** `TAKE` reads
-    ///      `address(1)` as its caller, which is this market, and `address(2)` as itself. The first
-    ///      would leave the fees here, ETH included, where `rescueUnaccountedEth` would sweep them;
-    ///      the second would leave them in PositionManager for anyone to take.
+    ///      **Recipients PositionManager would not actually pay are refused** (§4.1 v0.43). See
+    ///      `refusesRecipient`.
     ///
     ///      **The health factor is checked after the claim, because the claim is what lowers it**
     ///      (§7). With debt outstanding, the check runs §5.2's borrow price gates first (v0.40):
@@ -67,7 +65,7 @@ library MarketLiquidity {
         address to
     ) external {
         MarketDebt.accrue(env.debt);
-        if (uint160(to) <= uint160(ActionConstants.ADDRESS_THIS) || to == address(this)) revert InvalidRecipient(to);
+        if (refusesRecipient(env.positionManager, to)) revert InvalidRecipient(to);
 
         MarketLedger.Loan storage loan = MarketLedger.layout().loans[tokenId];
         if (loan.owner != msg.sender) revert NotTheDepositor(tokenId, loan.owner);
@@ -97,5 +95,26 @@ library MarketLiquidity {
 
         MarketDebt.requireHealthy(env.debt, tokenId);
         emit CollectFees(tokenId, loan.poolKeyId, amount0, amount1);
+    }
+
+    /// @notice Whether `to` is refused as the recipient of a payout PositionManager makes for this
+    ///         market (§4.1 v0.43, decided on PR #18).
+    /// @dev One rule for every such payout: `collectFees` here, `decreaseLiquidity` (FAR-8), and both
+    ///      branches of `liquidate` (FAR-46), which is why it is `internal` and shared rather than
+    ///      written into each function.
+    ///
+    ///      - `address(0)`: nowhere.
+    ///      - This market: the payout would sit here, where `rescueUnaccountedEth` sweeps ETH and no
+    ///        ERC-20 has a way out.
+    ///      - `address(1)`: `TAKE` reads it as its caller, which is this market again.
+    ///      - `address(2)` and PositionManager itself: the payout stays in PositionManager's balance,
+    ///        and anyone can take it with `SWEEP` (proved on a fork in the review of PR #18).
+    function refusesRecipient(
+        IPositionManager positionManager,
+        address to
+    ) internal view returns (bool) {
+        return
+            uint160(to) <= uint160(ActionConstants.ADDRESS_THIS) || to == address(this)
+                || to == address(positionManager);
     }
 }

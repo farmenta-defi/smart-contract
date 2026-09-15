@@ -417,8 +417,8 @@ contract FarmentaMarket is
     /// @notice Claims every fee a collateral position has earned, to `to` (§4.1).
     /// @param tokenId The position. Only its depositor may claim.
     /// @param to Where both fee legs go, native ETH included. Not the zero address, this market,
-    ///        or the `address(1)`/`address(2)` placeholders PositionManager reads as its caller and
-    ///        itself.
+    ///        PositionManager, or the `address(1)`/`address(2)` placeholders PositionManager reads as
+    ///        its caller and itself (§4.1 v0.43).
     /// @dev **Pausable, unlike `withdrawCollateral`.** With debt outstanding the claim prices the
     ///      position, and §4.1 stops everything that relies on the oracle while the market is
     ///      paused. A frozen or delisted pool does not stop it (§6.5): nothing here asks whether

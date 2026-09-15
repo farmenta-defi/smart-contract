@@ -100,6 +100,20 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         _assertOnlyTheFeesLeft(tokenId, before);
     }
 
+    /// @notice §4.1 v0.43: PositionManager is refused as a recipient. Fees paid to it would sit in its
+    ///         balance, where anyone takes them with `SWEEP`.
+    function test_positionManagerIsRefusedAsTheRecipient() public {
+        _deposit(tokenId);
+        uint256 fees1 = valuer.value(tokenId).fees1;
+        address pm = address(positionManager);
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.InvalidRecipient.selector, pm));
+        market.collectFees(tokenId, pm);
+
+        assertEq(valuer.value(tokenId).fees1, fees1, "the fees stay in the position");
+    }
+
     /// @notice Only the depositor may claim, and a refused claim leaves the fees in the position.
     function test_onlyTheDepositorMayClaim() public {
         _deposit(tokenId);
