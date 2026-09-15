@@ -106,8 +106,6 @@ contract LiquidationPlanHandler is Test {
 ///      can only fuzz one position's shape. This one reaches the shapes that position cannot
 ///      have: all fees and no principal, no fees at all, a bonus of zero, a close factor that
 ///      binds first, a USDG off its peg.
-/// forge-config: default.invariant.runs = 64
-/// forge-config: default.invariant.depth = 64
 contract MarketLiquidateInvariantTest is Test {
     LiquidationPlanHandler internal handler;
 
