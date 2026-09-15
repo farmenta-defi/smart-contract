@@ -301,6 +301,33 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         );
     }
 
+    /* --------------------------------- meme market ---------------------------- */
+
+    /// @notice §5.3: every market transaction touching a meme pool records an observation first, and
+    ///         an addition is one of them.
+    function test_aMemeAdditionRecordsAnObservationFirst() public {
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _openMemeMarket(tokenId);
+        PoolId poolId = _keyOf(tokenId).toId();
+        uint256 records = oracle.recordCount(poolId);
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        vm.deal(borrower, 1 ether);
+
+        _increase(tokenId, liquidity, 1 ether, USDG_BUDGET, 0);
+
+        assertEq(oracle.recordCount(poolId), records + 1, "the addition recorded the pool once");
+        assertEq(positionManager.getPositionLiquidity(tokenId), 2 * liquidity, "liquidity was not added");
+    }
+
+    /// @notice A blue-chip addition has no TWAP to feed, and pays nothing for one.
+    function test_aBlueChipAdditionRecordsNothing() public {
+        uint256 tokenId = _depositFresh(wethKey);
+
+        _increase(tokenId, LIQUIDITY, WETH_BUDGET, USDG_BUDGET, 0);
+
+        assertEq(oracle.recordCount(wethKey.toId()), 0, "no observation for a blue-chip pool");
+    }
+
     /* ---------------------------------- refusals ------------------------------ */
 
     /// @notice An addition that would cost more than either maximum reverts.
@@ -491,6 +518,41 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         tokenId = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, LIQUIDITY);
         nft.transferFrom(address(this), borrower, tokenId);
 
+        vm.startPrank(borrower);
+        nft.approve(address(market), tokenId);
+        market.depositCollateral(tokenId);
+        vm.stopPrank();
+    }
+
+    /// @dev Replaces `market` with a meme market holding `tokenId` as the borrower's collateral.
+    ///      Native ETH is re-tiered as meme first, which makes the pool meme (§6.1 takes the higher
+    ///      tier), and the pool is listed on the meme preset.
+    function _openMemeMarket(
+        uint256 tokenId
+    ) internal {
+        vm.prank(owner);
+        policy.setTokenConfig(Currency.wrap(RobinhoodChain.NATIVE), true, ICollateralPolicy.Tier.MEME, 18, address(1));
+        market = _deployMarket(ICollateralPolicy.Tier.MEME);
+
+        PoolKey memory key = _keyOf(tokenId);
+        TierPresets.Preset memory preset = TierPresets.meme();
+        vm.prank(owner);
+        policy.list(
+            key,
+            CollateralPolicy.ListingParams({
+                maxLtvBps: preset.maxLtvBps,
+                ltBps: preset.ltBps,
+                liquidatorBonusBps: preset.minLiquidatorBonusBps,
+                removeHaircutBps: 0,
+                debtCapUsdg: preset.maxDebtCapUsdg,
+                minPositionUsd: 50e18
+            })
+        );
+
+        // Read before the prank: an external call in the argument list would spend it.
+        address holder = nft.ownerOf(tokenId);
+        vm.prank(holder);
+        nft.transferFrom(holder, borrower, tokenId);
         vm.startPrank(borrower);
         nft.approve(address(market), tokenId);
         market.depositCollateral(tokenId);

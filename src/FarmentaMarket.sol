@@ -386,6 +386,9 @@ contract FarmentaMarket is
     ///      frozen, or lost a token or its hook allowlisting, since the position was deposited
     ///      (§6.5), and new capital must not go where the policy itself refuses it.
     ///
+    ///      On a meme market the addition records the pool's TWAP observation first, as every
+    ///      market transaction touching a meme pool does (§5.3).
+    ///
     ///      **The tokens never touch this market, departing from §4.1's `SETTLE_PAIR`.** Permit2
     ///      delivers the caller's maxima straight to PositionManager, which settles out of its
     ///      own balance and sweeps the rest back to the caller. Pulled here instead, they would
@@ -401,6 +404,7 @@ contract FarmentaMarket is
         ISignatureTransfer.PermitBatchTransferFrom calldata permit,
         bytes calldata signature
     ) external payable whenNotPaused nonReentrant {
+        _recordMemePosition(tokenId);
         MarketMint.increaseLiquidity(
             _mintEnv(),
             MarketMint.IncreaseParams({
