@@ -26,6 +26,7 @@ import {DebtMath} from "./libraries/DebtMath.sol";
 import {MarketDebt} from "./libraries/MarketDebt.sol";
 import {MarketLedger} from "./libraries/MarketLedger.sol";
 import {MarketLiquidation} from "./libraries/MarketLiquidation.sol";
+import {MarketLiquidity} from "./libraries/MarketLiquidity.sol";
 import {MarketMint} from "./libraries/MarketMint.sol";
 
 /// @title FarmentaMarket
@@ -130,6 +131,11 @@ contract FarmentaMarket is
     event UnaccountedEthRescued(uint256 amount, address indexed to);
     event Borrow(uint256 indexed tokenId, uint256 amount);
     event Repay(uint256 indexed tokenId, uint256 amount);
+
+    /// @notice A collateral position's fees were claimed (§4.1, `poolId` per v0.30).
+    /// @dev `amount0`/`amount1` are `to`'s balance change across the claim. A contract `to` that
+    ///      passes the ETH on as it lands misstates only its own receipt, as with `Liquidate`.
+    event CollectFees(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount0, uint256 amount1);
     /// @notice A position was liquidated (§8).
     /// @dev `repaid` and `badDebt` are exact ledger figures. `out0`/`out1` are what the
     ///      liquidator received, and on the full branch they are measured, not computed:
@@ -166,6 +172,7 @@ contract FarmentaMarket is
     error SpotPriceDeviation(uint256 deviationBps, uint256 maximumDeviationBps);
     error UsdgPriceOutOfBounds(uint256 price);
     error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
+    error PositionWouldBeUnhealthy(uint256 tokenId, uint256 healthFactor);
     error NativeValueMismatch(uint256 expected, uint256 sent);
     error PermitDoesNotMatchPool();
     error ReserveWithdrawalExceedsAvailable(uint256 amount, uint256 available);
@@ -399,6 +406,28 @@ contract FarmentaMarket is
         emit CollateralWithdrawn(tokenId, msg.sender);
 
         IERC721(address(positionManager)).safeTransferFrom(address(this), to, tokenId);
+    }
+
+    /// @notice Claims every fee a collateral position has earned, to `to` (§4.1).
+    /// @param tokenId The position. Only its depositor may claim.
+    /// @param to Where both fee legs go, native ETH included. Not the zero address, this market,
+    ///        or the `address(1)`/`address(2)` placeholders PositionManager reads as its caller and
+    ///        itself.
+    /// @dev **Pausable, unlike `withdrawCollateral`.** With debt outstanding the claim prices the
+    ///      position, and §4.1 stops everything that relies on the oracle while the market is
+    ///      paused. A frozen or delisted pool does not stop it (§6.5): nothing here asks whether
+    ///      the pool still accepts positions, only for its terms.
+    ///
+    ///      The claim runs from `MarketLiquidity`, which documents the recipient rule, the
+    ///      post-claim health check and its price gates (§5.2 v0.40), and why nothing is written
+    ///      after the first outbound call.
+    function collectFees(
+        uint256 tokenId,
+        address to
+    ) external whenNotPaused nonReentrant {
+        MarketLiquidity.collectFees(
+            MarketLiquidity.Env({positionManager: positionManager, debt: _debtEnv()}), tokenId, to
+        );
     }
 
     /// @notice Accepts native ETH (§4.1).
