@@ -678,6 +678,27 @@ contract MarketLiquidateForkTest is MarketForkTest {
         );
     }
 
+    /// @notice §6.2 and §8 step 1: the health factor that decides liquidation takes the removal
+    ///         haircut off, so a position under water only after it is still liquidatable.
+    /// @dev Aged to just under 1 with a 5% haircut, which puts the unhaircut health factor above 1. A
+    ///      gate that dropped the haircut would refuse with `PositionIsHealthy`. Since `DebtMath`
+    ///      states the formula once, nothing else catches an argument dropped at this call site
+    ///      (review of PR #18, mutant A8).
+    function test_theLiquidationGateCountsTheHaircut() public {
+        _open(500);
+        _fundLiquidator(2000e6);
+        _ageUntilHealthFactorBelow(1e18);
+        uint256 health = lens.healthFactor(tokenId);
+        assertGe(health * 10_000 / 9500, 1e18, "without the haircut the position would still be healthy");
+        uint256 debt = market.debtOf(tokenId);
+
+        vm.prank(liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(repaid, 0, "the liquidation went through");
+        assertLt(market.debtOf(tokenId), debt, "and took debt off the position");
+    }
+
     /* ------------------------------ the price gates --------------------------- */
 
     /// @notice §5.2: every condition that blocks a borrow leaves liquidation running. The AC
