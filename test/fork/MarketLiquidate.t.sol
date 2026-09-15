@@ -247,28 +247,31 @@ contract MarketLiquidateForkTest is MarketForkTest {
         _openWithDonatedFees(_ethWorth(250e18), 0);
         assertGt(market.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
 
+        // Kept to few locals on purpose: CI's `lite` profile compiles without the optimizer,
+        // where a test this size runs out of stack slots.
         uint256 debtBefore = market.debtOf(tokenId);
-        uint256 repay = debtBefore / 2;
         IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
-        (uint256 appliedUsdg, uint256 cost, uint256 keptEth) = _expectedLeftover(v, repay, debtBefore);
+        (uint256 appliedUsdg, uint256 cost, uint256 keptEth) = _expectedLeftover(v, debtBefore / 2, debtBefore);
         assertGt(keptEth, 0, "the fees must outrun the seizure and leave an ETH leg behind");
-        assertLt(appliedUsdg + cost, debtBefore - repay, "and still fit under the remaining debt");
+        assertLt(appliedUsdg + cost, debtBefore - debtBefore / 2, "and still fit under the remaining debt");
 
-        uint256 borrowerEth = borrower.balance;
-        uint256 borrowerUsdg = usdg.balanceOf(borrower);
-        uint256 walletBefore = usdg.balanceOf(liquidator);
+        // [borrower ETH, borrower USDG, liquidator USDG]
+        uint256[3] memory before = [borrower.balance, usdg.balanceOf(borrower), usdg.balanceOf(liquidator)];
 
         vm.prank(liquidator);
         (uint256 repaid, uint256 out0, uint256 out1,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
 
-        assertEq(borrower.balance, borrowerEth, "no ETH reaches a borrower still in debt");
-        assertEq(usdg.balanceOf(borrower), borrowerUsdg, "and no USDG either");
-        assertEq(repaid, repay + appliedUsdg + cost, "the debt fell by repay, the USDG fees, and the purchase");
+        assertEq(borrower.balance, before[0], "no ETH reaches a borrower still in debt");
+        assertEq(usdg.balanceOf(borrower), before[1], "and no USDG either");
+        assertEq(repaid, debtBefore / 2 + appliedUsdg + cost, "the debt fell by repay, the USDG fees, and the purchase");
         // Within a unit: shares are retired rounded down, the same rule `repay` follows.
         assertApproxEqAbs(market.debtOf(tokenId), debtBefore - repaid, 1, "the ledger records what was repaid");
 
-        uint256 paid = walletBefore + out1 - usdg.balanceOf(liquidator);
-        assertEq(paid, repay + repay * 50 / 10_000 + cost, "the liquidator paid repay, its fee, and the leg's value");
+        assertEq(
+            before[2] + out1 - usdg.balanceOf(liquidator),
+            debtBefore / 2 + (debtBefore / 2) * 50 / 10_000 + cost,
+            "the liquidator paid repay, its fee, and the leg's value"
+        );
         assertEq(out0, v.fees0, "and took the whole ETH fee leg: the seizure's share plus what it bought");
         assertEq(out1, v.fees1 - appliedUsdg, "while the USDG beyond its share stayed to repay the debt");
     }
