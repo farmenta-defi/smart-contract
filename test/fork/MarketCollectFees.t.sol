@@ -114,6 +114,27 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(valuer.value(tokenId).fees1, fees1, "the fees stay in the position");
     }
 
+    /// @notice A second claim finds no fees and pays nothing, and still succeeds.
+    /// @dev Both `TAKE`s then carry zero credit, which PositionManager skips. FAR-8 runs the same path
+    ///      on a decrease whose fees were just claimed.
+    function test_aSecondClaimPaysNothingAndStillSucceeds() public {
+        _deposit(tokenId);
+        IPositionValuer.Valuation memory before = valuer.value(tokenId);
+        vm.prank(borrower);
+        market.collectFees(tokenId, recipient);
+        uint256 eth = recipient.balance;
+        uint256 dollars = usdg.balanceOf(recipient);
+
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.CollectFees(tokenId, _keyOf(tokenId).toId(), 0, 0);
+        vm.prank(borrower);
+        market.collectFees(tokenId, recipient);
+
+        assertEq(recipient.balance, eth, "no more ETH");
+        assertEq(usdg.balanceOf(recipient), dollars, "no more USDG");
+        _assertOnlyTheFeesLeft(tokenId, before);
+    }
+
     /// @notice Only the depositor may claim, and a refused claim leaves the fees in the position.
     function test_onlyTheDepositorMayClaim() public {
         _deposit(tokenId);
@@ -146,8 +167,15 @@ contract MarketCollectFeesForkTest is MarketForkTest {
     /* -------------------------------- health factor --------------------------- */
 
     /// @notice A position well above water keeps its claim, and is still healthy after it.
+    /// @dev Borrowed to the limit, so the claim runs as close to the gate as a successful claim on
+    ///      the fixture's natural fees gets. The refusal itself is proved by
+    ///      `test_aClaimThatWouldLeaveThePositionUnderwaterIsRefused`; this is the success path.
     function test_anIndebtedPositionWellAboveWaterClaims() public {
-        _openLoan(20e6);
+        _deposit(tokenId);
+        _lend(300e6);
+        uint256 limit = lens.maxBorrow(tokenId);
+        vm.prank(borrower);
+        market.borrow(tokenId, limit, borrower);
         uint256 debt = market.debtOf(tokenId);
         uint256 fees1 = valuer.value(tokenId).fees1;
 
@@ -219,6 +247,34 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(lens.healthFactor(tokenId), collateral * 7500 * 1e18 / (debtUsd * 10_000), "at LT 75%");
     }
 
+    /// @notice §7: the claim accrues before it checks the health factor, so interest nobody has
+    ///         accrued yet still counts against it.
+    /// @dev The position is brought to where the claim would leave it just above 1 at the stored
+    ///      index. Sixty days then pass with nothing accrued: the stored index still says healthy, the
+    ///      accrued one does not.
+    function test_theClaimAccruesBeforeItChecksTheHealthFactor() public {
+        _deposit(tokenId);
+        _donateFees(tokenId, 0, valuer.value(tokenId).principalUsd / 1e12 / 5);
+        _lend(300e6);
+        uint256 limit = lens.maxBorrow(tokenId);
+        vm.prank(borrower);
+        market.borrow(tokenId, limit, borrower);
+
+        uint256 healthAfter = _healthFactorAfterClaim();
+        for (uint256 i = 0; i < 4000 && healthAfter >= 1.01e18; ++i) {
+            vm.warp(block.timestamp + 1 days);
+            market.accrue();
+            healthAfter = _healthFactorAfterClaim();
+        }
+        assertGe(healthAfter, 1e18, "at the stored index the claim must pass");
+        assertLt(healthAfter, 1.01e18, "and only just");
+
+        vm.warp(block.timestamp + 60 days);
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.PositionWouldBeUnhealthy.selector);
+        market.collectFees(tokenId, recipient);
+    }
+
     /* --------------------------------- price gates ---------------------------- */
 
     /// @notice §5.2 v0.40: with debt outstanding, a USDG price outside [0,97; 1,03] refuses the claim.
@@ -242,11 +298,25 @@ contract MarketCollectFeesForkTest is MarketForkTest {
     }
 
     /// @notice §5.2 v0.40: with debt outstanding, a pool more than 2% from the oracle refuses it.
-    /// @dev A 1% move keeps the health factor far above 1, so the refusal can only be the gate.
+    /// @dev A 3% move keeps the health factor far above 1, so the refusal can only be the gate.
     function test_anIndebtedClaimRunsTheSpotGate() public {
         _openLoan(20e6);
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 97 / 100, 18);
         assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must be outside the 2% gate");
+
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.SpotPriceDeviation.selector);
+        market.collectFees(tokenId, recipient);
+    }
+
+    /// @notice §6.5 and v0.40 together: a frozen pool still claims, and still runs the gates while
+    ///         the position owes anything.
+    function test_aFrozenPoolStillRunsTheGatesOnAnIndebtedClaim() public {
+        _openLoan(20e6);
+        PoolId poolId = _keyOf(tokenId).toId();
+        vm.prank(owner);
+        policy.setFrozen(poolId, true);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 97 / 100, 18);
 
         vm.prank(borrower);
         vm.expectPartialRevert(FarmentaMarket.SpotPriceDeviation.selector);
