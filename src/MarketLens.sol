@@ -47,8 +47,7 @@ contract MarketLens {
 
         ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
         IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
-        uint256 cappedFees = Math.min(valuation.feesUsd, valuation.principalUsd / 10);
-        return (valuation.principalUsd + cappedFees) * (BPS - terms.removeHaircutBps) / BPS;
+        return DebtMath.collateralValue(valuation.principalUsd, valuation.feesUsd, terms.removeHaircutBps);
     }
 
     /// @notice Additional USDG that `tokenId` may borrow without crossing max LTV.

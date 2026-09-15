@@ -20,6 +20,9 @@ contract MarketHandler is Test {
     address internal immutable owner;
     /// @dev Ghost state is asserted by an invariant function; handler reverts are discarded.
     bool public sawFloorBreach;
+    /// @dev Set when a fee claim went through and left the position unhealthy (§7 post-condition).
+    bool public sawUnhealthyClaim;
+    address internal constant FEE_RECIPIENT = address(0xFEE5);
 
     constructor(
         FarmentaMarket market_,
@@ -94,6 +97,15 @@ contract MarketHandler is Test {
         if (market.reserves() < lens.reserveFloor()) sawFloorBreach = true;
     }
 
+    /// @dev The fork holds no swaps between calls, so after the first claim the fees are zero. What
+    ///      this exercises is the post-condition on every claim the fuzzer reaches, at whatever debt and
+    ///      index the other actions left.
+    function collectFees() external {
+        vm.prank(borrower);
+        market.collectFees(tokenId, FEE_RECIPIENT);
+        if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyClaim = true;
+    }
+
     function passTime(
         uint40 elapsed
     ) external {
@@ -144,6 +156,10 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
 
     function invariant_withdrawableNeverExceedsCash() public view {
         assertLe(lens.withdrawableReserves(), IERC20(market.asset()).balanceOf(address(market)));
+    }
+
+    function invariant_aClaimNeverLeavesThePositionUnhealthy() public view {
+        assertFalse(handler.sawUnhealthyClaim(), "a fee claim left the position unhealthy");
     }
 
     function invariant_withdrawalNeverBreachesTheFloor() public view {

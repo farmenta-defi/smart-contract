@@ -45,6 +45,7 @@ library MarketDebt {
     error SpotPriceDeviation(uint256 deviationBps, uint256 maximumDeviationBps);
     error UsdgPriceOutOfBounds(uint256 price);
     error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
+    error PositionWouldBeUnhealthy(uint256 tokenId, uint256 healthFactor);
 
     struct Env {
         IERC20 asset;
@@ -76,15 +77,11 @@ library MarketDebt {
         if (!env.policy.acceptsNewPositions(loan.poolKeyId)) revert PoolNotOpenForBorrowing(loan.poolKeyId);
 
         {
-            ICollateralPolicy.Terms memory terms = env.policy.termsOf(loan.poolKeyId);
-            _checkBorrowPrice(env, $.tier);
-            IPositionValuer.Valuation memory valuation = env.valuer.value(tokenId);
-            if ($.tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > MAX_SPOT_DEVIATION_BPS) {
-                revert SpotPriceDeviation(valuation.spotDeviationBps, MAX_SPOT_DEVIATION_BPS);
-            }
+            (ICollateralPolicy.Terms memory terms, uint256 collateralUsd) =
+                _gatedCollateralValue(env, $.tier, loan.poolKeyId, tokenId);
             uint256 requestedDebt = DebtMath.debtOf(loan.debtShares, $.borrowIndex) + amount;
             uint256 requestedDebtUsd = _debtUsd(env.asset, env.oracle, requestedDebt);
-            uint256 maximumDebtUsd = _collateralValue(valuation, terms) * terms.maxLtvBps / BPS;
+            uint256 maximumDebtUsd = collateralUsd * terms.maxLtvBps / BPS;
             if (requestedDebtUsd > maximumDebtUsd) revert BorrowExceedsMaxLtv(requestedDebtUsd, maximumDebtUsd);
             if (requestedDebt < 10e6) revert BorrowBelowMinimum(requestedDebt);
 
@@ -130,6 +127,31 @@ library MarketDebt {
         emit Repay(tokenId, repaid);
     }
 
+    /// @notice Refuses to leave `tokenId` under water once an action has taken value out of it:
+    ///         §7's post-condition on a borrower action, checked where the action is complete.
+    /// @dev Nothing owed means nothing to protect, so with no debt neither the price gates nor
+    ///      the health factor run (§5.2 v0.40). Otherwise the health factor is §6.2's, priced with
+    ///      `price` exactly as `MarketLens.healthFactor` prices it, and read through the same gates
+    ///      as `borrow`: value must not leave a position at a price the market refuses to lend
+    ///      against.
+    ///
+    ///      A view, which is what makes it safe to run after the action's outbound calls: it writes
+    ///      nothing, and a refusal reverts the action along with it.
+    function requireHealthy(
+        Env calldata env,
+        uint256 tokenId
+    ) external view {
+        MarketLedger.Layout storage $ = MarketLedger.layout();
+        MarketLedger.Loan storage loan = $.loans[tokenId];
+        uint256 debt = DebtMath.debtOf(loan.debtShares, $.borrowIndex);
+        if (debt == 0) return;
+
+        (ICollateralPolicy.Terms memory terms, uint256 collateralUsd) =
+            _gatedCollateralValue(env, $.tier, loan.poolKeyId, tokenId);
+        uint256 healthFactor = DebtMath.healthFactor(collateralUsd, terms.ltBps, _debtUsd(env.asset, env.oracle, debt));
+        if (healthFactor < WAD) revert PositionWouldBeUnhealthy(tokenId, healthFactor);
+    }
+
     function _accrue(
         Env calldata env
     ) private {
@@ -152,12 +174,23 @@ library MarketDebt {
         emit ReservesUpdated($.reserves);
     }
 
-    function _collateralValue(
-        IPositionValuer.Valuation memory valuation,
-        ICollateralPolicy.Terms memory terms
-    ) private pure returns (uint256) {
-        uint256 cappedFees = Math.min(valuation.feesUsd, valuation.principalUsd / 10);
-        return (valuation.principalUsd + cappedFees) * (BPS - terms.removeHaircutBps) / BPS;
+    /// @dev A position's §6.2 collateral value, read only once §5.2's borrow price gates pass: USDG
+    ///      inside [0,97; 1,03], a fresh Pyth quote within 3% of Chainlink, and a blue-chip pool
+    ///      within 2% of the oracle. One function, so every action that sizes risk off this value
+    ///      refuses at the same prices.
+    function _gatedCollateralValue(
+        Env calldata env,
+        ICollateralPolicy.Tier tier,
+        PoolId poolId,
+        uint256 tokenId
+    ) private view returns (ICollateralPolicy.Terms memory terms, uint256 collateralUsd) {
+        terms = env.policy.termsOf(poolId);
+        _checkBorrowPrice(env, tier);
+        IPositionValuer.Valuation memory valuation = env.valuer.value(tokenId);
+        if (tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > MAX_SPOT_DEVIATION_BPS) {
+            revert SpotPriceDeviation(valuation.spotDeviationBps, MAX_SPOT_DEVIATION_BPS);
+        }
+        collateralUsd = DebtMath.collateralValue(valuation.principalUsd, valuation.feesUsd, terms.removeHaircutBps);
     }
 
     function _checkBorrowPrice(

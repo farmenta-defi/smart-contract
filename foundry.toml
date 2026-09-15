@@ -59,7 +59,8 @@ fail_on_revert = false
 # room by moving the risk views to `MarketLens` and borrow, repay and intake into the linked
 # libraries `MarketDebt` and `MarketMint`. With FAR-10 on top the market measures 17,135,
 # 7,441 to spare (2026-09-15, spec §15 no. 17). New logic goes into a linked library and the
-# market keeps a wrapper.
+# market keeps a wrapper. FAR-7's `collectFees` did: `MarketLiquidity` (2,100) plus a wrapper
+# took the market to 17,418, 7,158 to spare.
 #
 # The CI fast lane gates size on this profile, since it is the one that ships.
 [profile.deploy]

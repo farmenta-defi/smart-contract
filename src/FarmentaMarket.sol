@@ -26,6 +26,7 @@ import {DebtMath} from "./libraries/DebtMath.sol";
 import {MarketDebt} from "./libraries/MarketDebt.sol";
 import {MarketLedger} from "./libraries/MarketLedger.sol";
 import {MarketLiquidation} from "./libraries/MarketLiquidation.sol";
+import {MarketLiquidity} from "./libraries/MarketLiquidity.sol";
 import {MarketMint} from "./libraries/MarketMint.sol";
 
 /// @title FarmentaMarket
@@ -33,13 +34,14 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///         (ARCHITECTURE §4.1). One implementation, two proxies: Blue-chip and Meme.
 /// @dev **The lending side is whole as of §8.** Collateral goes in and comes back out, the
 ///      index-based ledger of §7 accrues against it, and an underwater position can now be
-///      liquidated — which is what makes a lent dollar a dollar with a way home. What §4.1
-///      still owes: `collectFees`, `decreaseLiquidity` and `increaseLiquidity` (FAR-7, FAR-8,
-///      FAR-9).
+///      liquidated — which is what makes a lent dollar a dollar with a way home. A depositor
+///      can also claim a held position's fees (`collectFees`, FAR-7). What §4.1 still owes:
+///      `decreaseLiquidity` and `increaseLiquidity` (FAR-8, FAR-9).
 ///
 ///      **Logic lives in linked libraries; this contract keeps the wrappers** (§4.1 v0.33).
-///      Borrow and repay run from `MarketDebt`, collateral intake from `MarketMint`, and §8's
-///      seizure from `MarketLiquidation`, each by `delegatecall`: the market's storage, the
+///      Borrow and repay run from `MarketDebt`, collateral intake from `MarketMint`, §8's seizure
+///      from `MarketLiquidation` and fee claims from `MarketLiquidity`, each by `delegatecall`:
+///      the market's storage, the
 ///      market's address, the caller's `msg.sender`, code at its own address. Risk views are
 ///      read from `MarketLens`, one per proxy. That is what keeps the implementation under
 ///      EIP-170 with the work still owed to come (spec §15 no. 17, FAR-32).
@@ -47,7 +49,8 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///      **ETH arrives and leaves through liquidation, and stray ETH has a way out.** A
 ///      native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather than
 ///      ahead of it. Nothing legitimate stays: liquidation forwards both legs in the same call,
-///      and `mintAndDeposit`'s change leaves through `SWEEP` straight from PositionManager. So
+///      `mintAndDeposit`'s change leaves through `SWEEP` straight from PositionManager, and a
+///      fee claim's ETH goes from PoolManager to its recipient without touching the market. So
 ///      ETH found here between transactions belongs to no one the market can name, and
 ///      `rescueUnaccountedEth` sweeps it — spec open item §15 no. 12, decided with §8 as that
 ///      item asked. Nor can a borrower use ETH to block its own liquidation: its share goes
@@ -130,6 +133,14 @@ contract FarmentaMarket is
     event UnaccountedEthRescued(uint256 amount, address indexed to);
     event Borrow(uint256 indexed tokenId, uint256 amount);
     event Repay(uint256 indexed tokenId, uint256 amount);
+
+    /// @notice A collateral position's fees were claimed (§4.1, `poolId` per v0.30).
+    /// @dev `amount0`/`amount1` are `to`'s balance change across the claim, not the fees the position
+    ///      realised. Anything else reaching `to` while its ETH callback runs is counted as well, a vault
+    ///      redeem or a transfer from anyone, so indexers (§13) must not treat these figures as verified
+    ///      fee income. A `to` that sends out more than it received during that callback makes the claim
+    ///      revert with an arithmetic panic.
+    event CollectFees(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount0, uint256 amount1);
     /// @notice A position was liquidated (§8).
     /// @dev `repaid` and `badDebt` are exact ledger figures. `out0`/`out1` are what the
     ///      liquidator received, and on the full branch they are measured, not computed:
@@ -166,6 +177,7 @@ contract FarmentaMarket is
     error SpotPriceDeviation(uint256 deviationBps, uint256 maximumDeviationBps);
     error UsdgPriceOutOfBounds(uint256 price);
     error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
+    error PositionWouldBeUnhealthy(uint256 tokenId, uint256 healthFactor);
     error NativeValueMismatch(uint256 expected, uint256 sent);
     error PermitDoesNotMatchPool();
     error ReserveWithdrawalExceedsAvailable(uint256 amount, uint256 available);
@@ -403,6 +415,33 @@ contract FarmentaMarket is
         emit CollateralWithdrawn(tokenId, msg.sender);
 
         IERC721(address(positionManager)).safeTransferFrom(address(this), to, tokenId);
+    }
+
+    /// @notice Claims every fee a collateral position has earned, to `to` (§4.1).
+    /// @param tokenId The position. Only its depositor may claim.
+    /// @param to Where both fee legs go, native ETH included. Not the zero address, this market,
+    ///        PositionManager, or the `address(1)`/`address(2)` placeholders PositionManager reads as
+    ///        its caller and itself (§4.1 v0.43).
+    /// @dev **Pausable, unlike `withdrawCollateral`.** With debt outstanding the claim prices the
+    ///      position, and §4.1 stops everything that relies on the oracle while the market is
+    ///      paused. A frozen or delisted pool does not stop it (§6.5): nothing here asks whether
+    ///      the pool still accepts positions, only for its terms.
+    ///
+    ///      On a meme market the claim records the pool's TWAP observation first, as every market
+    ///      transaction touching a meme pool does (§5.3): the health check prices the position
+    ///      through it.
+    ///
+    ///      The claim runs from `MarketLiquidity`, which documents the recipient rule, the
+    ///      post-claim health check and its price gates (§5.2 v0.40), and why nothing is written
+    ///      after the first outbound call.
+    function collectFees(
+        uint256 tokenId,
+        address to
+    ) external whenNotPaused nonReentrant {
+        _recordMemePosition(tokenId);
+        MarketLiquidity.collectFees(
+            MarketLiquidity.Env({positionManager: positionManager, debt: _debtEnv()}), tokenId, to
+        );
     }
 
     /// @notice Accepts native ETH (§4.1).
@@ -660,7 +699,9 @@ contract FarmentaMarket is
     ///      between transactions. Every path that takes delivery of ETH pays all of it out
     ///      before its own call returns: liquidation forwards the liquidator's and the
     ///      borrower's legs, and `mintAndDeposit` returns change through `SWEEP` straight from
-    ///      PositionManager. What is left was sent by mistake or by force, and taking it takes
+    ///      PositionManager. `collectFees` never takes delivery at all: each `TAKE` pays its
+    ///      recipient, and `address(1)`, which would route the ETH here, is refused. What is left
+    ///      was sent by mistake or by force, and taking it takes
     ///      nothing a lender or a borrower is owed.
     ///
     ///      `nonReentrant` keeps it out of the one place that premise does not hold: inside a

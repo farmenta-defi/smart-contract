@@ -285,7 +285,7 @@ library MarketLiquidation {
         c.usdgDecimals = env.oracle.decimals(Currency.wrap(env.asset));
 
         uint256 hf = DebtMath.healthFactor(
-            (v.principalUsd + Math.min(v.feesUsd, v.principalUsd / 10)) * keepBps / BPS,
+            DebtMath.collateralValue(v.principalUsd, v.feesUsd, terms.removeHaircutBps),
             terms.ltBps,
             DebtMath.debtUsd(debt, c.usdgPrice, c.usdgDecimals)
         );
