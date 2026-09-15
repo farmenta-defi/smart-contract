@@ -18,6 +18,7 @@ import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {Permit2Signer} from "../base/Permit2Signer.sol";
+import {VaultRedeemingHook} from "../mocks/VaultRedeemingHook.sol";
 
 /// @notice Adds liquidity to positions already held as collateral, through the deployed
 ///         PositionManager and Permit2.
@@ -385,6 +386,44 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         _assertRefusedBeforeAnyTokenMoves(
             tokenId, abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook)
         );
+    }
+
+    /* ------------------------------ outbound calls ---------------------------- */
+
+    /// @notice A hook that redeems its vault shares from inside the addition gets exactly what
+    ///         they were worth, and the borrower pays nothing for it.
+    /// @dev §4.1 v0.26: every market function that calls out must survive a vault exit from
+    ///      inside the call. The hook here passes the §6.1 bit check, which is about removing
+    ///      liquidity, not adding it. Had the borrower's tokens been pulled into the market,
+    ///      they would count toward `totalAssets` while the hook ran: measured on
+    ///      `mintAndDeposit`, shares worth 20,000 USDG redeemed for 48,571 and the borrower's
+    ///      change paid the difference. Here the tokens never reach the market, so the share
+    ///      price the hook sees is the one everyone else sees.
+    function test_aRedeemFromInsideTheHookGainsNothing() public {
+        address hook = address((uint160(0xDEF1) << 144) | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
+        deployCodeTo("VaultRedeemingHook.sol:VaultRedeemingHook", abi.encode(market), hook);
+        PoolKey memory key = _initPool(hook);
+        uint256 tokenId = _depositFresh(key);
+
+        deal(RobinhoodChain.USDG, hook, 20_000e6);
+        VaultRedeemingHook(hook).deposit(20_000e6);
+        uint256 fair = market.previewRedeem(market.balanceOf(hook));
+
+        Balances memory before = _balances();
+        _increase(tokenId, LIQUIDITY, WETH_BUDGET, USDG_BUDGET, 0);
+        Balances memory afterIncrease = _balances();
+
+        uint256 redeemed = VaultRedeemingHook(hook).redeemed();
+        assertGt(redeemed, 0, "the redeem must actually run inside the addition");
+        assertLe(redeemed, fair, "a share redeemed mid-addition is worth more than before it");
+
+        uint256 usdgSpent = afterIncrease.poolManagerUsdg - before.poolManagerUsdg;
+        assertEq(
+            before.borrowerUsdg - afterIncrease.borrowerUsdg,
+            usdgSpent - before.positionManagerUsdg,
+            "the borrower paid for the redemption"
+        );
+        assertEq(afterIncrease.marketUsdg, before.marketUsdg - redeemed, "the market paid out more than the redeem");
     }
 
     /* --------------------------------- helpers -------------------------------- */
