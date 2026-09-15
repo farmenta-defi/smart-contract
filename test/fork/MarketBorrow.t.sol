@@ -76,7 +76,6 @@ contract MarketBorrowForkTest is MarketForkTest {
         vm.prank(holder);
         market.borrow(tokenId, 10e6, holder);
 
-        (tokenId, holder) = _prepareLoan();
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 1.03e18, RobinhoodChain.USDG_DECIMALS);
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2596e18, 18);
         vm.prank(holder);
