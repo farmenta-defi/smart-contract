@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
@@ -15,6 +16,7 @@ contract MockPriceOracle is IPriceOracle {
     mapping(Currency currency => uint256) internal _price;
     mapping(Currency currency => uint256) internal _liquidationPrice;
     mapping(Currency currency => uint8) internal _decimals;
+    mapping(PoolId poolId => uint256) public recordCount;
     uint256 internal _pythPrice;
     uint256 internal _pythPublishTime;
 
@@ -88,6 +90,8 @@ contract MockPriceOracle is IPriceOracle {
     }
 
     function record(
-        PoolKey calldata
-    ) external {}
+        PoolKey calldata key
+    ) external {
+        ++recordCount[key.toId()];
+    }
 }

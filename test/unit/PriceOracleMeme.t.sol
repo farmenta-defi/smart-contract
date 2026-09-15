@@ -82,6 +82,28 @@ contract PriceOracleMemeTest is Test {
         assertApproxEqRel(oracle.priceForLiquidation(MEME, key), 0.8e18, 1e14);
     }
 
+    function test_recordStoresMemeObservations() public {
+        _setSpot(1e18);
+        oracle.record(key);
+        assertEq(recorder.observationCount(poolId), 1);
+    }
+
+    function testFuzz_staleBoundaryIsExactlyNineHundredSeconds(
+        uint256 elapsed
+    ) public {
+        elapsed = bound(elapsed, 0, 2000);
+        _recordTwap(1e18);
+        _setSpot(1e18);
+        vm.warp(block.timestamp + elapsed);
+
+        if (elapsed <= 900) {
+            assertApproxEqRel(oracle.price(MEME, key), 1e18, 1e14);
+        } else {
+            vm.expectRevert(abi.encodeWithSelector(PriceOracle.MemeTwapUnavailable.selector, poolId));
+            oracle.price(MEME, key);
+        }
+    }
+
     function _recordTwap(
         uint256 price
     ) private {
