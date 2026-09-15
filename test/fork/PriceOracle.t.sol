@@ -10,6 +10,7 @@ import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {IAggregatorV3} from "../../src/interfaces/IAggregatorV3.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
+import {IPyth} from "../../src/interfaces/IPyth.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {ForkTest} from "../base/ForkTest.sol";
 import {MockPriceOracle} from "../mocks/MockPriceOracle.sol";
@@ -49,7 +50,7 @@ contract PriceOracleForkTest is ForkTest {
         );
         vm.stopPrank();
 
-        oracle = new PriceOracle(policy);
+        oracle = new PriceOracle(policy, IPyth(RobinhoodChain.PYTH));
     }
 
     function test_usdgPriceMatchesTheDirectFeedRead() public view {
@@ -64,6 +65,13 @@ contract PriceOracleForkTest is ForkTest {
 
     function test_nativeEthPriceMatchesThePinnedChainlinkAnswer() public view {
         assertEq(oracle.price(Currency.wrap(RobinhoodChain.NATIVE)), 252_657_000_000 * 1e10);
+    }
+
+    function test_realPythEthUsdObservationIsReadable() public view {
+        // The feed was not deployed at FORK_BLOCK; PriceOracle must fail open on that revert.
+        (uint256 pythPrice, uint256 publishTime) = oracle.pythEthUsd();
+        assertEq(pythPrice, 0, "missing Pyth feed must be unavailable");
+        assertEq(publishTime, 0, "missing Pyth feed must have no publish time");
     }
 
     function test_realOracleStaysWithinTheSpotDeviationGateForInRangeFixtures() public {
