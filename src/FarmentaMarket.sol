@@ -35,7 +35,7 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///      index-based ledger of §7 accrues against it, and an underwater position can now be
 ///      liquidated — which is what makes a lent dollar a dollar with a way home. What §4.1
 ///      still owes: `collectFees`, `decreaseLiquidity` and `increaseLiquidity` (FAR-7, FAR-8,
-///      FAR-9), and the meme price path (FAR-16).
+///      FAR-9).
 ///
 ///      **Logic lives in linked libraries; this contract keeps the wrappers** (§4.1 v0.33).
 ///      Borrow and repay run from `MarketDebt`, collateral intake from `MarketMint`, and §8's
