@@ -589,38 +589,6 @@ contract FarmentaMarket is
         return DebtMath.debtOf($.loans[tokenId].debtShares, $.borrowIndex);
     }
 
-    function positionValue(
-        uint256 tokenId
-    ) public view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
-        Loan storage loan = $.loans[tokenId];
-        if (loan.owner == address(0)) return 0;
-        return _borrowValue(tokenId);
-    }
-
-    function maxBorrow(
-        uint256 tokenId
-    ) public view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
-        Loan storage loan = $.loans[tokenId];
-        if (loan.owner == address(0)) return 0;
-        uint256 maximumDebtUsd = _borrowValue(tokenId) * policy.termsOf(loan.poolKeyId).maxLtvBps / BPS;
-        uint256 debtUsd = _debtUsd(debtOf(tokenId));
-        if (maximumDebtUsd <= debtUsd) return 0;
-        return _usdToDebt(maximumDebtUsd - debtUsd);
-    }
-
-    function healthFactor(
-        uint256 tokenId
-    ) external view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
-        Loan storage loan = $.loans[tokenId];
-        uint256 debt = debtOf(tokenId);
-        if (debt == 0) return type(uint256).max;
-        uint256 debtUsd = _debtUsd(debt);
-        return DebtMath.healthFactor(positionValue(tokenId), policy.termsOf(loan.poolKeyId).ltBps, debtUsd);
-    }
-
     function totalBorrows() external view returns (uint256) {
         return _marketStorage().totalBorrows;
     }
@@ -640,20 +608,6 @@ contract FarmentaMarket is
     /// @notice Cumulative reserve revenue withdrawn by the owner.
     function totalReservesWithdrawn() external view returns (uint256) {
         return _marketStorage().totalReservesWithdrawn;
-    }
-
-    /// @notice The reserve buffer that remains unavailable to the owner.
-    /// @dev The floor tracks lender assets, not borrows: repaying a loan moves value from debt
-    ///      to cash, but does not reduce what lenders have at risk (§7).
-    function reserveFloor() public view returns (uint256) {
-        return _reserveFloor(IERC20(asset()).balanceOf(address(this)));
-    }
-
-    /// @notice Reserve revenue currently available for owner withdrawal.
-    /// @dev Reserves are commingled with lender cash, so cash is a physical cap rather than a
-    ///      withdrawal priority. The result is zero whenever the reserve buffer is underfilled.
-    function withdrawableReserves() public view returns (uint256) {
-        return _withdrawableReserves(IERC20(asset()).balanceOf(address(this)));
     }
 
     function _withdrawableReserves(
@@ -725,7 +679,7 @@ contract FarmentaMarket is
         if (to == address(0) || to == address(this)) revert InvalidRecipient(to);
         accrue();
 
-        uint256 available = withdrawableReserves();
+        uint256 available = _withdrawableReserves(IERC20(asset()).balanceOf(address(this)));
         if (amount > available) revert ReserveWithdrawalExceedsAvailable(amount, available);
 
         MarketStorage storage $ = _marketStorage();

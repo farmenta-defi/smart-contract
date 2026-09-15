@@ -39,7 +39,7 @@ contract MarketBorrowForkTest is MarketForkTest {
 
     function test_borrowUsesOracleValueAndRejectsAboveMaxLtv() public {
         (uint256 tokenId, address holder) = _prepareLoan();
-        uint256 allowed = market.maxBorrow(tokenId) - 1000;
+        uint256 allowed = lens.maxBorrow(tokenId) - 1000;
         assertGt(allowed, 10e6);
 
         vm.prank(holder);
@@ -186,7 +186,7 @@ contract MarketBorrowForkTest is MarketForkTest {
 
     function test_repayMaxAfterAccrualClearsDebtAndAllowsWithdrawal() public {
         (uint256 tokenId, address holder) = _prepareLoan();
-        uint256 amount = market.maxBorrow(tokenId) / 2;
+        uint256 amount = lens.maxBorrow(tokenId) / 2;
         vm.prank(holder);
         market.borrow(tokenId, amount, holder);
 
@@ -205,7 +205,7 @@ contract MarketBorrowForkTest is MarketForkTest {
     function test_healthFactorUsesCappedFeesAndOraclePricedDebt() public {
         (uint256 tokenId, address holder) = _prepareLoan();
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.98e18, RobinhoodChain.USDG_DECIMALS);
-        uint256 amount = market.maxBorrow(tokenId) / 2;
+        uint256 amount = lens.maxBorrow(tokenId) / 2;
         vm.prank(holder);
         market.borrow(tokenId, amount, holder);
         uint256 debtUsd = market.debtOf(tokenId) * 0.98e18 / 1e6;
@@ -213,26 +213,26 @@ contract MarketBorrowForkTest is MarketForkTest {
         uint256 collateralValue = (valuation.principalUsd + _min(valuation.feesUsd, valuation.principalUsd / 10))
             * (10_000 - policy.termsOf(_keyOf(tokenId).toId()).removeHaircutBps) / 10_000;
         uint256 expected = collateralValue * 7500 * 1e18 / (debtUsd * 10_000);
-        assertEq(market.positionValue(tokenId), collateralValue, "position value is the specified collateral value");
-        assertApproxEqRel(market.healthFactor(tokenId), expected, 1e12);
+        assertEq(lens.positionValue(tokenId), collateralValue, "position value is the specified collateral value");
+        assertApproxEqRel(lens.healthFactor(tokenId), expected, 1e12);
     }
 
     function test_healthFactorFallsBelowOneWhenCollateralPriceDrops() public {
         (uint256 tokenId, address holder) = _prepareLoan();
-        uint256 amount = market.maxBorrow(tokenId);
+        uint256 amount = lens.maxBorrow(tokenId);
         vm.prank(holder);
         market.borrow(tokenId, amount, holder);
 
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2200e18, 18);
-        assertGt(market.healthFactor(tokenId), 1e18, "a price just above the boundary must remain healthy");
+        assertGt(lens.healthFactor(tokenId), 1e18, "a price just above the boundary must remain healthy");
 
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2100e18, 18);
-        assertLt(market.healthFactor(tokenId), 1e18, "a price just below the boundary must become unhealthy");
+        assertLt(lens.healthFactor(tokenId), 1e18, "a price just below the boundary must become unhealthy");
     }
 
     function test_maxWithdrawNeverExceedsCashAfterBorrow() public {
         (uint256 tokenId, address holder) = _prepareLoan();
-        uint256 amount = market.maxBorrow(tokenId) / 2;
+        uint256 amount = lens.maxBorrow(tokenId) / 2;
         vm.prank(holder);
         market.borrow(tokenId, amount, holder);
         uint256 cash = IERC20(market.asset()).balanceOf(address(market));
@@ -288,7 +288,7 @@ contract MarketBorrowForkTest is MarketForkTest {
 
     function test_accrualAddsInterestAndReserves() public {
         (uint256 tokenId, address holder) = _prepareLoan();
-        uint256 amount = market.maxBorrow(tokenId) / 2;
+        uint256 amount = lens.maxBorrow(tokenId) / 2;
         vm.prank(holder);
         market.borrow(tokenId, amount, holder);
         uint256 before = market.totalBorrows();
