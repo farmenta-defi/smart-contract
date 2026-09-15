@@ -45,6 +45,7 @@ library MarketDebt {
     error SpotPriceDeviation(uint256 deviationBps, uint256 maximumDeviationBps);
     error UsdgPriceOutOfBounds(uint256 price);
     error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
+    error PositionWouldBeUnhealthy(uint256 tokenId, uint256 healthFactor);
 
     struct Env {
         IERC20 asset;
@@ -124,6 +125,31 @@ library MarketDebt {
         $.totalBorrows = DebtMath.debtOf($.totalBorrowShares, $.borrowIndex);
         env.asset.safeTransferFrom(msg.sender, address(this), repaid);
         emit Repay(tokenId, repaid);
+    }
+
+    /// @notice Refuses to leave `tokenId` under water once an action has taken value out of it:
+    ///         §7's post-condition on a borrower action, checked where the action is complete.
+    /// @dev Nothing owed means nothing to protect, so with no debt neither the price gates nor
+    ///      the health factor run (§5.2 v0.40). Otherwise the health factor is §6.2's, priced with
+    ///      `price` exactly as `MarketLens.healthFactor` prices it, and read through the same gates
+    ///      as `borrow`: value must not leave a position at a price the market refuses to lend
+    ///      against.
+    ///
+    ///      A view, which is what makes it safe to run after the action's outbound calls: it writes
+    ///      nothing, and a refusal reverts the action along with it.
+    function requireHealthy(
+        Env calldata env,
+        uint256 tokenId
+    ) external view {
+        MarketLedger.Layout storage $ = MarketLedger.layout();
+        MarketLedger.Loan storage loan = $.loans[tokenId];
+        uint256 debt = DebtMath.debtOf(loan.debtShares, $.borrowIndex);
+        if (debt == 0) return;
+
+        (ICollateralPolicy.Terms memory terms, uint256 collateralUsd) =
+            _gatedCollateralValue(env, $.tier, loan.poolKeyId, tokenId);
+        uint256 healthFactor = DebtMath.healthFactor(collateralUsd, terms.ltBps, _debtUsd(env.asset, env.oracle, debt));
+        if (healthFactor < WAD) revert PositionWouldBeUnhealthy(tokenId, healthFactor);
     }
 
     function _accrue(
