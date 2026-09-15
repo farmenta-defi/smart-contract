@@ -11,6 +11,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
+import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {DebtMath} from "../../src/libraries/DebtMath.sol";
@@ -283,7 +284,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
         _openWithDonatedFees(_ethWorth(250e18), 0);
         uint256 debt = market.debtOf(tokenId);
         uint256 repay = debt / 2;
-        (, uint256 cost,) = _expectedLeftover(valuer.valueForLiquidation(tokenId), repay, debt);
+        (uint256 appliedUsdg, uint256 cost,) = _expectedLeftover(valuer.valueForLiquidation(tokenId), repay, debt);
         assertGt(cost, 0, "this test needs a purchase");
 
         vm.prank(liquidator);
@@ -292,7 +293,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
         vm.prank(liquidator);
         (uint256 repaid,,,) = market.liquidate(tokenId, repay + cost, 0, 0, liquidator);
-        assertGt(repaid, repay + cost - 1, "the exact budget buys the leg");
+        assertEq(repaid, repay + appliedUsdg + cost, "the exact budget buys the whole leg, to the unit");
     }
 
     /// @notice While debt remains, every dollar of fees that leaves the position takes a dollar of
@@ -552,29 +553,44 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
     /* ------------------------------ the price gates --------------------------- */
 
-    /// @notice §5.2: every condition that blocks a borrow leaves liquidation running.
-    /// @dev USDG outside [0,97; 1,03] and a pool far away from the oracle, both at once. The
-    ///      third gate — a fresh Pyth quote more than 3% from Chainlink — belongs to FAR-20,
-    ///      which is not on main yet; its own AC moved here because `liquidate` did not exist
-    ///      when it was built, and it joins this test when the gate lands. What this already
-    ///      proves is the structural half: nothing on the liquidation path reads the borrow
-    ///      price surface, so no gate installed there can reach it.
+    /// @notice §5.2: every condition that blocks a borrow leaves liquidation running. The AC
+    ///         FAR-20 could not test, since `liquidate` did not exist yet (moved here by the
+    ///         review of PR #14).
+    /// @dev The gates go on one at a time and none comes off: spot first, then a fresh Pyth
+    ///      quote more than 3% from Chainlink, then USDG outside [0,97; 1,03]. `borrow` checks
+    ///      them in the reverse order (USDG, Pyth, spot), so each new gate becomes the one a
+    ///      borrow hits, which proves it is live on top of the ones already set. A test that only
+    ///      moved prices would pass whether the gates worked or not (review of PR #16, 2.2).
+    ///      With all three shut in the same state, the liquidation still goes through.
     function test_liquidationOutlivesEveryBorrowPriceGate() public {
         _open(0);
         _fundLiquidator(2000e6);
         _ageUntilHealthFactorBelow(1e18);
 
-        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.9e18, RobinhoodChain.USDG_DECIMALS);
-        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.USDG), 0.9e18);
+        // Spot: the pool stays put while the oracle moves 20% away from it.
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 80 / 100, 18);
-        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 80 / 100);
+        assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must be outside the 2% borrow gate");
+        _assertBorrowRefusedBy(FarmentaMarket.SpotPriceDeviation.selector);
 
-        IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
-        assertGt(v.spotDeviationBps, 200, "the pool must be outside the 2% borrow gate");
+        // Pyth: fresh, and 5% away from Chainlink.
+        oracle.setPythPrice(ETH_AT_POOL_SPOT * 80 / 100 * 105 / 100, block.timestamp);
+        _assertBorrowRefusedBy(FarmentaMarket.PythPriceDeviation.selector);
+
+        // USDG: off its band.
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.9e18, RobinhoodChain.USDG_DECIMALS);
+        _assertBorrowRefusedBy(FarmentaMarket.UsdgPriceOutOfBounds.selector);
 
         vm.prank(liquidator);
         (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
         assertGt(repaid, 0, "a liquidation must be possible when every borrow gate is shut");
+    }
+
+    function _assertBorrowRefusedBy(
+        bytes4 gate
+    ) private {
+        vm.prank(borrower);
+        vm.expectPartialRevert(gate);
+        market.borrow(tokenId, 10e6, borrower);
     }
 
     /// @notice The liquidation price surface is the one §8 reads, and it is not the borrow one.
