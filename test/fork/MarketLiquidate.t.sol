@@ -276,6 +276,28 @@ contract MarketLiquidateForkTest is MarketForkTest {
         market.liquidate(tokenId, type(uint256).max, uint128(expected0), uint128(expected1), liquidator);
     }
 
+    /// @notice §8 step 5 v0.26: the minimums cover everything the liquidator receives, the bought
+    ///         fee leg included, and nothing that goes back to the borrower.
+    /// @dev Run where the fees outrun the whole debt, so the market takes delivery of more ETH
+    ///      than the liquidator gets: part of it is bought, the rest returns to the borrower. A
+    ///      check against what arrived would accept a minimum the liquidator never receives
+    ///      (review of PR #16, mutation M2).
+    function test_theMinimumsCoverTheBoughtLegButNotTheBorrowersShare() public {
+        _openWithDonatedFees(_ethWorth(2000e18), 0);
+        uint256 borrowerEth = borrower.balance;
+        (uint256 expected0, uint256 expected1) = _previewSeizure(type(uint256).max);
+
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(MarketLiquidation.SeizureBelowMinimum.selector, expected0, expected1));
+        market.liquidate(tokenId, type(uint256).max, uint128(expected0 + 1), 0, liquidator);
+
+        vm.prank(liquidator);
+        (, uint256 out0,,) =
+            market.liquidate(tokenId, type(uint256).max, uint128(expected0), uint128(expected1), liquidator);
+        assertEq(out0, expected0, "the minimum is exactly what the liquidator received");
+        assertGt(borrower.balance, borrowerEth, "while the ETH beyond it went to the borrower");
+    }
+
     /* ------------------------------- the v0.2 gap ----------------------------- */
 
     /// @notice The regression that gave §8 step 5 its shape, in its v0.26 form: a tiny repay
