@@ -75,21 +75,23 @@ library MarketDebt {
         if (loan.owner != msg.sender) revert BorrowerNotAuthorized(tokenId, msg.sender);
         if (!env.policy.acceptsNewPositions(loan.poolKeyId)) revert PoolNotOpenForBorrowing(loan.poolKeyId);
 
-        ICollateralPolicy.Terms memory terms = env.policy.termsOf(loan.poolKeyId);
-        _checkBorrowPrice(env, $.tier);
-        IPositionValuer.Valuation memory valuation = env.valuer.value(tokenId);
-        if ($.tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > MAX_SPOT_DEVIATION_BPS) {
-            revert SpotPriceDeviation(valuation.spotDeviationBps, MAX_SPOT_DEVIATION_BPS);
-        }
-        uint256 requestedDebt = DebtMath.debtOf(loan.debtShares, $.borrowIndex) + amount;
-        uint256 requestedDebtUsd = _debtUsd(env.asset, env.oracle, requestedDebt);
-        uint256 maximumDebtUsd = _collateralValue(valuation, terms) * terms.maxLtvBps / BPS;
-        if (requestedDebtUsd > maximumDebtUsd) revert BorrowExceedsMaxLtv(requestedDebtUsd, maximumDebtUsd);
-        if (requestedDebt < 10e6) revert BorrowBelowMinimum(requestedDebt);
+        {
+            ICollateralPolicy.Terms memory terms = env.policy.termsOf(loan.poolKeyId);
+            _checkBorrowPrice(env, $.tier);
+            IPositionValuer.Valuation memory valuation = env.valuer.value(tokenId);
+            if ($.tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > MAX_SPOT_DEVIATION_BPS) {
+                revert SpotPriceDeviation(valuation.spotDeviationBps, MAX_SPOT_DEVIATION_BPS);
+            }
+            uint256 requestedDebt = DebtMath.debtOf(loan.debtShares, $.borrowIndex) + amount;
+            uint256 requestedDebtUsd = _debtUsd(env.asset, env.oracle, requestedDebt);
+            uint256 maximumDebtUsd = _collateralValue(valuation, terms) * terms.maxLtvBps / BPS;
+            if (requestedDebtUsd > maximumDebtUsd) revert BorrowExceedsMaxLtv(requestedDebtUsd, maximumDebtUsd);
+            if (requestedDebt < 10e6) revert BorrowBelowMinimum(requestedDebt);
 
-        uint256 requestedPoolDebt = DebtMath.debtOf($.poolDebtShares[loan.poolKeyId], $.borrowIndex) + amount;
-        if (requestedPoolDebt > terms.debtCapUsdg) {
-            revert PoolDebtCapExceeded(loan.poolKeyId, requestedPoolDebt, terms.debtCapUsdg);
+            uint256 requestedPoolDebt = DebtMath.debtOf($.poolDebtShares[loan.poolKeyId], $.borrowIndex) + amount;
+            if (requestedPoolDebt > terms.debtCapUsdg) {
+                revert PoolDebtCapExceeded(loan.poolKeyId, requestedPoolDebt, terms.debtCapUsdg);
+            }
         }
 
         uint256 marketDebtCap = TierPresets.forTier($.tier).marketDebtCapUsdg;

@@ -133,9 +133,9 @@ contract MarketBorrowForkTest is MarketForkTest {
     function test_borrowCapacityUsesNinetyEightCentUsdPrice() public {
         (uint256 tokenId,) = _prepareLoan();
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.98e18, RobinhoodChain.USDG_DECIMALS);
-        uint256 atNinetyEightCents = market.maxBorrow(tokenId);
+        uint256 atNinetyEightCents = lens.maxBorrow(tokenId);
         ICollateralPolicy.Terms memory terms = policy.termsOf(_keyOf(tokenId).toId());
-        uint256 expected = market.positionValue(tokenId) * terms.maxLtvBps / 10_000 * 1e6 / 0.98e18;
+        uint256 expected = lens.positionValue(tokenId) * terms.maxLtvBps / 10_000 * 1e6 / 0.98e18;
         assertApproxEqAbs(atNinetyEightCents, expected, 1, "USDG oracle price must scale borrow capacity");
     }
 
