@@ -12,6 +12,7 @@ contract MockPriceOracle is IPriceOracle {
     error PriceNotSet(Currency currency);
 
     mapping(Currency currency => uint256) internal _price;
+    mapping(Currency currency => uint256) internal _liquidationPrice;
     mapping(Currency currency => uint8) internal _decimals;
     uint256 internal _pythPrice;
     uint256 internal _pythPublishTime;
@@ -53,9 +54,21 @@ contract MockPriceOracle is IPriceOracle {
         return (_pythPrice, _pythPublishTime);
     }
 
+    /// @notice Moves the liquidation price away from the borrow price.
+    /// @dev The MVP oracle returns one number for both (§4.3). Splitting them here is how a
+    ///      test shows which surface a code path reads: set them apart and the reading is
+    ///      unambiguous. Pass zero to go back to following `price`.
+    function setLiquidationPrice(
+        Currency currency,
+        uint256 usd1e18
+    ) external {
+        _liquidationPrice[currency] = usd1e18;
+    }
+
     function priceForLiquidation(
         Currency currency
     ) external view returns (uint256) {
-        return this.price(currency);
+        uint256 p = _liquidationPrice[currency];
+        return p == 0 ? this.price(currency) : p;
     }
 }

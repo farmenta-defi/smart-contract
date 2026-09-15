@@ -46,11 +46,22 @@ fail_on_revert = false
 # `optimizer_runs` is 200, not the 1,000,000 Uniswap uses, because runs buy execution gas
 # with code size and FarmentaMarket has no size to spend. Measured 2026-09-12 at the head of
 # PR #8 (custody + mintAndDeposit, via-IR): 1,000,000 runs -> 23,963 bytes, 613 under
-# EIP-170; 10,000 -> 20,527; 1,000 -> 18,662; 200 -> 16,073. The debt ledger (FAR-6),
-# liquidate (FAR-10) and five modifyLiquidities paths still have to fit in the same contract,
-# and at 0.02 gwei the execution gas the higher setting saves is not worth measuring. This
-# is a stopgap; the room comes back for real when the arithmetic moves to external libraries
-# (FAR-26). The CI fast lane gates size on this profile, since it is the one that ships.
+# EIP-170; 10,000 -> 20,527; 1,000 -> 18,662; 200 -> 16,073. At 0.02 gwei the execution gas
+# the higher setting saves is not worth measuring.
+#
+# Where that left FAR-10 (2026-09-13): the debt ledger had taken the market to 23,102 bytes,
+# 1,474 short of the limit, and §8's seizure is about 5,000. Lowering `optimizer_runs`
+# further buys ~180 bytes and moving DebtMath behind a deployed library costs 1,600 more than
+# it saves — a delegatecall site is larger than the arithmetic it replaces at this scale.
+# What worked was moving the seizure itself out: `MarketLiquidation` runs by delegatecall and
+# the market carries the wrapper, leaving it at 24,069 with 507 to spare. That was not enough
+# for it and the §5.2 borrow gate (FAR-20) together: 25,381, 805 over. FAR-32 (#17) made the
+# room by moving the risk views to `MarketLens` and borrow, repay and intake into the linked
+# libraries `MarketDebt` and `MarketMint`. With FAR-10 on top the market measures 17,135,
+# 7,441 to spare (2026-09-15, spec §15 no. 17). New logic goes into a linked library and the
+# market keeps a wrapper.
+#
+# The CI fast lane gates size on this profile, since it is the one that ships.
 [profile.deploy]
 via_ir = true
 optimizer_runs = 200

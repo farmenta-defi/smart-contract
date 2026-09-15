@@ -501,6 +501,41 @@ contract FarmentaMarketTest is Test {
         market.onERC721Received(stranger, stranger, 1, "");
     }
 
+    /* -------------------------------- ETH rescue ------------------------------ */
+
+    /// @notice §15 no. 12: stray ETH has a way out, and it is the whole balance.
+    function test_rescueUnaccountedEthSweepsTheWholeBalance() public {
+        address to = address(0xFEE);
+        vm.deal(address(market), 1 ether);
+
+        vm.expectEmit(address(market));
+        emit FarmentaMarket.UnaccountedEthRescued(1 ether, to);
+        vm.prank(owner);
+        market.rescueUnaccountedEth(to);
+
+        assertEq(to.balance, 1 ether, "the recipient gets all of it");
+        assertEq(address(market).balance, 0, "and none is left behind");
+    }
+
+    function test_onlyTheOwnerMayRescueEth() public {
+        vm.deal(address(market), 1 ether);
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        market.rescueUnaccountedEth(stranger);
+    }
+
+    function test_ethRescueNeedsARealRecipient() public {
+        vm.deal(address(market), 1 ether);
+
+        vm.startPrank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.InvalidRecipient.selector, address(0)));
+        market.rescueUnaccountedEth(address(0));
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.InvalidRecipient.selector, address(market)));
+        market.rescueUnaccountedEth(address(market));
+        vm.stopPrank();
+    }
+
     /* --------------------------------- storage -------------------------------- */
 
     /// @notice The declared slot really is the ERC-7201 slot for this namespace.

@@ -116,6 +116,30 @@ contract PositionValuerForkTest is ForkTest {
         assertGt(v.principalUsd, 0);
     }
 
+    /// @notice `valueForLiquidation` reads the liquidation price surface, `value` the borrow
+    ///         one — the split §4.3 keeps so the meme tier can price liquidations off TWAP
+    ///         (§5.2) without changing a single caller.
+    /// @dev The MVP oracle answers both with the same number, so the only way to show which
+    ///      surface is read is to make them disagree.
+    function test_liquidationValuationReadsTheLiquidationPrice() public {
+        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT / 2);
+
+        IPositionValuer.Valuation memory borrow = valuer.value(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        IPositionValuer.Valuation memory liquidation = valuer.valueForLiquidation(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+
+        assertLt(liquidation.principalUsd, borrow.principalUsd, "the halved price must reach the liquidation value");
+        assertGt(liquidation.amount0, borrow.amount0, "a cheaper currency0 must leave more of it");
+    }
+
+    /// @dev With both surfaces agreeing — the MVP case — the two must be identical, field for
+    ///      field. Anything else would mean the liquidation path carries arithmetic of its own.
+    function test_bothValuationsAgreeWhileTheOracleDoes() public view {
+        IPositionValuer.Valuation memory borrow = valuer.value(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        IPositionValuer.Valuation memory liquidation = valuer.valueForLiquidation(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+
+        assertEq(keccak256(abi.encode(borrow)), keccak256(abi.encode(liquidation)), "surfaces must agree in the MVP");
+    }
+
     function test_unknownPositionReverts() public {
         uint256 missing = positionManager.nextTokenId() + 1;
         vm.expectRevert(abi.encodeWithSelector(IPositionValuer.PositionNotFound.selector, missing));

@@ -11,6 +11,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IERC721Permit_v4} from "@uniswap/v4-periphery/src/interfaces/IERC721Permit_v4.sol";
@@ -24,31 +25,33 @@ import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {DebtMath} from "./libraries/DebtMath.sol";
 import {MarketDebt} from "./libraries/MarketDebt.sol";
 import {MarketLedger} from "./libraries/MarketLedger.sol";
+import {MarketLiquidation} from "./libraries/MarketLiquidation.sol";
 import {MarketMint} from "./libraries/MarketMint.sol";
 
 /// @title FarmentaMarket
 /// @notice Custodies Uniswap v4 LP position NFTs and lends USDG against them
 ///         (ARCHITECTURE §4.1). One implementation, two proxies: Blue-chip and Meme.
-/// @dev **This contract currently implements the custody half only.** Collateral can be
-///      deposited and withdrawn; the debt ledger, interest accrual, borrowing, repayment and
-///      liquidation land in Phase 1 (§16). The ERC-4626 side is inherited and functional, but
-///      earns nothing yet: with no borrows, `totalAssets` is simply the USDG this contract
-///      holds. §7 overrides it once `totalBorrows` and `reserves` exist.
+/// @dev **The lending side is whole as of §8.** Collateral goes in and comes back out, the
+///      index-based ledger of §7 accrues against it, and an underwater position can now be
+///      liquidated — which is what makes a lent dollar a dollar with a way home. What §4.1
+///      still owes: `collectFees`, `decreaseLiquidity` and `increaseLiquidity` (FAR-7, FAR-8,
+///      FAR-9), and the meme price path (FAR-16).
 ///
-///      **Two more overrides land with that ledger, and are owed now so they are not
-///      discovered later.** §4.1 limits a lender's withdrawal to the cash actually on hand.
-///      The inherited `maxWithdraw` and `maxRedeem` measure against `totalAssets`, which is
-///      harmless while nothing is borrowed — cash *is* `totalAssets` — but once borrows exist
-///      they would advertise more than the vault can pay, and `withdraw` would fail inside the
-///      token transfer instead of reverting as `ERC4626ExceededMaxWithdraw`. Both must be
-///      bounded by cash in the same change that introduces `totalBorrows`.
+///      **Logic lives in linked libraries; this contract keeps the wrappers** (§4.1 v0.33).
+///      Borrow and repay run from `MarketDebt`, collateral intake from `MarketMint`, and §8's
+///      seizure from `MarketLiquidation`, each by `delegatecall`: the market's storage, the
+///      market's address, the caller's `msg.sender`, code at its own address. Risk views are
+///      read from `MarketLens`, one per proxy. That is what keeps the implementation under
+///      EIP-170 with the work still owed to come (spec §15 no. 17, FAR-32).
 ///
-///      **ETH that arrives has no way out.** `receive()` accepts it because the payout
-///      functions will need it (see the note there), but nothing in this version sends it
-///      anywhere, and §4.1's owner-function list has no ETH rescue. Nothing today can make
-///      ETH arrive legitimately, so this is a question for the §8 work that first produces a
-///      payout rather than a defect here; it is recorded as spec open item §15 no. 12 so the
-///      answer is decided with those functions and not after them.
+///      **ETH arrives and leaves through liquidation, and stray ETH has a way out.** A
+///      native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather than
+///      ahead of it. Nothing legitimate stays: liquidation forwards both legs in the same call,
+///      and `mintAndDeposit`'s change leaves through `SWEEP` straight from PositionManager. So
+///      ETH found here between transactions belongs to no one the market can name, and
+///      `rescueUnaccountedEth` sweeps it — spec open item §15 no. 12, decided with §8 as that
+///      item asked. Nor can a borrower use ETH to block its own liquidation: its share goes
+///      out as WETH when it refuses ETH (see `MarketLiquidation`).
 ///
 ///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` with no timelock (§4.1, decided
 ///      4 Sep 2026). This contract custodies collateral NFTs and holds USDG deposits, so
@@ -108,7 +111,7 @@ contract FarmentaMarket is
     /// @notice Values a position at oracle prices (§4.2, §5.1).
     IPositionValuer public immutable valuer;
 
-    /// @notice Price oracle reserved for the FAR-20 borrow price gate.
+    /// @notice Price oracle: the §5.2 borrow gates read it, and §8 reads its liquidation surface.
     IPriceOracle public immutable oracle;
 
     /// @notice Immutable rate curve for this market's tier.
@@ -122,8 +125,22 @@ contract FarmentaMarket is
 
     /// @notice A position that arrived here unrecorded was swept out by the owner.
     event UnaccountedTokenRescued(uint256 indexed tokenId, address indexed to);
+
+    /// @notice ETH that belonged to no payout was swept out by the owner (§15 no. 12).
+    event UnaccountedEthRescued(uint256 amount, address indexed to);
     event Borrow(uint256 indexed tokenId, uint256 amount);
     event Repay(uint256 indexed tokenId, uint256 amount);
+    /// @notice A position was liquidated (§8).
+    /// @dev `repaid` and `badDebt` are exact ledger figures. `out0`/`out1` are what the
+    ///      liquidator received, and on the full branch they are measured, not computed:
+    ///      PositionManager pays `to` directly, so they are `to`'s balance change across the
+    ///      burn. A contract `to` can distort that — redeem vault shares when the ETH lands, or
+    ///      pass the ETH straight on. Only its own figure moves and the ledger never reads it,
+    ///      but indexers and keepers (§13) must not treat `out0`/`out1` as the amount seized.
+    event Liquidate(
+        uint256 indexed tokenId, address indexed liquidator, uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt
+    );
+    event BadDebtSocialized(uint256 amount);
     event ReservesUpdated(uint256 reserves);
     event ReservesWithdrawn(uint256 amount, address indexed to);
 
@@ -385,16 +402,14 @@ contract FarmentaMarket is
     }
 
     /// @notice Accepts native ETH (§4.1).
-    /// @dev Pools whose `currency0` is `address(0)` pay out in ETH, so `TAKE_PAIR` will send it
-    ///      here when collecting fees, decreasing liquidity or liquidating. None of those exist
-    ///      yet and nothing in this version can make ETH arrive, but the alternative is a
-    ///      market that rejects the first payout it is ever handed.
+    /// @dev Pools whose `currency0` is `address(0)` pay out in ETH, and §8's partial seizure is
+    ///      the first path that takes delivery here: `TAKE_PAIR` pays the market, which forwards
+    ///      the liquidator's share and returns the borrower's. Both legs leave in the same call,
+    ///      so nothing a liquidation brings in is left sitting.
     ///
-    ///      ETH that turns up before then has no accounting and no way out. That is the same
-    ///      trapped-asset hole `rescueUnaccountedToken` closes, one asset class over, and it
-    ///      is left open deliberately: §4.1 gives the owner no ETH rescue, and adding one
-    ///      before there is any legitimate ETH flow would decide by accident how ETH payouts
-    ///      are accounted for. Open item §15 no. 12, to be answered by the §8 work.
+    ///      ETH that turns up any other way has no accounting, and `rescueUnaccountedEth` is its
+    ///      way out: the trapped-asset hole `rescueUnaccountedToken` closes, one asset class
+    ///      over (§15 no. 12).
     receive() external payable {}
 
     /* ---------------------------------- views --------------------------------- */
@@ -431,6 +446,74 @@ contract FarmentaMarket is
         uint256 amount
     ) external nonReentrant returns (uint256 repaid) {
         return MarketDebt.repay(_debtEnv(), tokenId, amount);
+    }
+
+    /// @notice Repays an unhealthy position's debt on its behalf and seizes collateral for it.
+    /// @param tokenId The position to liquidate.
+    /// @param repayAmount USDG the caller offers against the debt. Cut down by the close
+    ///        factor (§6.2), and again by what the position can actually pay for.
+    /// @param minOut0 Least currency0 the caller accepts, measured on what **they** receive.
+    /// @param minOut1 Least currency1 the caller accepts, on the same basis.
+    /// @param to Where the seized tokens go.
+    /// @return repaid USDG actually taken off the debt, the borrower's own fees included.
+    /// @return out0 currency0 the liquidator received, any fee leg it bought included. On the
+    ///         full branch a contract `to` can distort it; see `Liquidate`.
+    /// @return out1 currency1 the liquidator received, on the same basis.
+    /// @return badDebt Debt the position could not cover, absorbed under §9.
+    /// @dev One function with two branches, as §8 steps 4 and 5 describe them, because the
+    ///      branch is not a mode the caller picks: it is whatever is left when the repay cap
+    ///      has been applied. A seizure that reaches past everything the position holds takes
+    ///      the position whole; anything smaller takes a slice.
+    ///
+    ///      **Nothing on this path touches the borrow price gate of §5.2, and that is the
+    ///      point.** Collateral is valued through `valueForLiquidation`, and the debt side is
+    ///      priced with `priceForLiquidation` too, so a USDG outside [0,97; 1,03], a fresh
+    ///      Pyth quote 3% away from Chainlink, or a pool 2% off the oracle all stop borrowing
+    ///      and leave liquidation running. Revert Lend blocks both; Farmenta blocks only
+    ///      borrowing, so there is never a window where an underwater position cannot be
+    ///      cleared (§5.2).
+    ///
+    ///      **The partial branch routes the payout through this contract, and must keep
+    ///      doing so.** `_decrease` realises the position's *entire* fee balance no matter how
+    ///      little liquidity it pulls, so a `TAKE_PAIR` addressed straight to the liquidator
+    ///      hands them every fee in the position for the price of a one-wei repay — the v0.2
+    ///      gap, closed in v0.3. The market takes delivery, forwards the principal slice plus
+    ///      fees worth `feeCredit`, and keeps the rest for the borrower. It is also why this
+    ///      cannot reuse `decreaseLiquidity` (FAR-8), which pays its caller directly.
+    ///
+    ///      **The work itself runs from `MarketLiquidation`, by `delegatecall`.** It is the
+    ///      market's storage, the market's address and the liquidator's `msg.sender` either
+    ///      way; what changes is where the code sits, which is the rule for everything this
+    ///      contract does (§4.1 v0.33): logic in a linked library, a wrapper here. What stays
+    ///      here is what has to be visible from outside: the pause, the reentrancy guard, the
+    ///      accrual, and every event.
+    ///
+    ///      §8 step 1 also asks for a TWAP `record` on meme pools. That belongs with the meme
+    ///      price path (FAR-16) and arrives with it: this market has no recorder to call yet,
+    ///      and a liquidation priced off a TWAP nothing reads would be worse than one priced
+    ///      off Chainlink.
+    function liquidate(
+        uint256 tokenId,
+        uint256 repayAmount,
+        uint128 minOut0,
+        uint128 minOut1,
+        address to
+    ) external whenNotPaused nonReentrant returns (uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt) {
+        accrue();
+
+        MarketLiquidation.Outcome memory outcome = MarketLiquidation.execute(
+            MarketLiquidation.Env({
+                positionManager: positionManager, policy: policy, valuer: valuer, oracle: oracle, asset: asset()
+            }),
+            MarketLiquidation.Request({
+                tokenId: tokenId, repayAmount: repayAmount, minOut0: minOut0, minOut1: minOut1, to: to
+            })
+        );
+
+        (repaid, out0, out1, badDebt) = (outcome.repaid, outcome.out0, outcome.out1, outcome.badDebt);
+        emit ReservesUpdated(_marketStorage().reserves);
+        if (outcome.socialized != 0) emit BadDebtSocialized(outcome.socialized);
+        emit Liquidate(tokenId, msg.sender, repaid, out0, out1, badDebt);
     }
 
     function debtOf(
@@ -569,6 +652,28 @@ contract FarmentaMarket is
         IERC721(address(positionManager)).safeTransferFrom(address(this), to, tokenId);
     }
 
+    /// @notice Recovers native ETH that reached this contract outside any payout (§15 no. 12).
+    /// @param to Where to send it.
+    /// @dev Sweeps the whole balance, which is sound only because no ETH here is owed to anyone
+    ///      between transactions. Every path that takes delivery of ETH pays all of it out
+    ///      before its own call returns: liquidation forwards the liquidator's and the
+    ///      borrower's legs, and `mintAndDeposit` returns change through `SWEEP` straight from
+    ///      PositionManager. What is left was sent by mistake or by force, and taking it takes
+    ///      nothing a lender or a borrower is owed.
+    ///
+    ///      `nonReentrant` keeps it out of the one place that premise does not hold: inside a
+    ///      liquidation, where the balance briefly belongs to the payout. A future path that
+    ///      holds ETH across transactions has to revisit this function.
+    function rescueUnaccountedEth(
+        address to
+    ) external onlyOwner nonReentrant {
+        if (to == address(0) || to == address(this)) revert InvalidRecipient(to);
+
+        uint256 amount = address(this).balance;
+        emit UnaccountedEthRescued(amount, to);
+        Currency.wrap(address(0)).transfer(to, amount);
+    }
+
     /* -------------------------------- internals ------------------------------- */
 
     function _poolDebt(
@@ -644,6 +749,8 @@ contract FarmentaMarket is
         return DECIMALS_OFFSET;
     }
 
+    /// @dev The layout itself lives in `MarketLedger`, so `MarketLiquidation` can write the
+    ///      same slots from its own compilation unit without a second copy of the struct.
     function _marketStorage() private pure returns (MarketLedger.Layout storage $) {
         return MarketLedger.layout();
     }
