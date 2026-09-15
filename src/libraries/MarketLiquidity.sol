@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
@@ -36,10 +37,16 @@ library MarketLiquidity {
     /// @notice Claims every fee `tokenId` has accrued to `to`, and keeps the position healthy.
     /// @dev Uniswap v4 has no collect action. `_decrease` realises the position's whole fee
     ///      balance however little liquidity it removes, so a `DECREASE_LIQUIDITY` of zero pays
-    ///      out exactly the fees and never principal. `TAKE_PAIR` may address `to` directly,
-    ///      unlike §8 step 5's partial seizure, because the fees belong to the caller.
+    ///      out exactly the fees and never principal. The fees may go to `to` directly, unlike §8
+    ///      step 5's partial seizure, because they belong to the caller.
     ///
-    ///      **Recipients PositionManager would reinterpret are refused.** `TAKE_PAIR` reads
+    ///      **The borrow asset leaves first** (§4.1 v0.26, v0.40). Each leg is its own `TAKE`, USDG
+    ///      before the other. `TAKE_PAIR` would pay `currency0` first, which in a native-ETH pool is
+    ///      the ETH, and ETH runs the recipient's code before the USDG has left. None of the
+    ///      market's own cash moves on this path either way; the order is kept so that no function
+    ///      is an exception to the rule.
+    ///
+    ///      **Recipients PositionManager would reinterpret are refused.** `TAKE` reads
     ///      `address(1)` as its caller, which is this market, and `address(2)` as itself. The first
     ///      would leave the fees here, ETH included, where `rescueUnaccountedEth` would sweep them;
     ///      the second would leave them in PositionManager for anyone to take.
@@ -69,12 +76,19 @@ library MarketLiquidity {
         uint256 amount0 = key.currency0.balanceOf(to);
         uint256 amount1 = key.currency1.balanceOf(to);
 
-        bytes[] memory params = new bytes[](2);
+        (Currency first, Currency second) = Currency.unwrap(key.currency1) == address(env.debt.asset)
+            ? (key.currency1, key.currency0)
+            : (key.currency0, key.currency1);
+        bytes[] memory params = new bytes[](3);
         params[0] = abi.encode(tokenId, uint256(0), uint128(0), uint128(0), bytes(""));
-        params[1] = abi.encode(key.currency0, key.currency1, to);
+        params[1] = abi.encode(first, to, uint256(ActionConstants.OPEN_DELTA));
+        params[2] = abi.encode(second, to, uint256(ActionConstants.OPEN_DELTA));
         env.positionManager
             .modifyLiquidities(
-                abi.encode(abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR)), params),
+                abi.encode(
+                    abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE), uint8(Actions.TAKE)),
+                    params
+                ),
                 block.timestamp
             );
 

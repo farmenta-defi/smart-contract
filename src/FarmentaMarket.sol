@@ -690,7 +690,7 @@ contract FarmentaMarket is
     ///      between transactions. Every path that takes delivery of ETH pays all of it out
     ///      before its own call returns: liquidation forwards the liquidator's and the
     ///      borrower's legs, and `mintAndDeposit` returns change through `SWEEP` straight from
-    ///      PositionManager. `collectFees` never takes delivery at all: `TAKE_PAIR` pays its
+    ///      PositionManager. `collectFees` never takes delivery at all: each `TAKE` pays its
     ///      recipient, and `address(1)`, which would route the ETH here, is refused. What is left
     ///      was sent by mistake or by force, and taking it takes
     ///      nothing a lender or a borrower is owed.
