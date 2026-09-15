@@ -271,6 +271,122 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         );
     }
 
+    /* ---------------------------------- refusals ------------------------------ */
+
+    /// @notice An addition that would cost more than either maximum reverts.
+    function test_costAboveEitherMaximumReverts() public {
+        uint256 tokenId = _depositFresh(wethKey);
+
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) =
+            _signedPermit(wethKey, 1, USDG_BUDGET, 0);
+        vm.prank(borrower);
+        vm.expectPartialRevert(SlippageCheck.MaximumAmountExceeded.selector);
+        market.increaseLiquidity(tokenId, LIQUIDITY, 1, uint128(USDG_BUDGET), permit, signature);
+
+        (permit, signature) = _signedPermit(wethKey, WETH_BUDGET, 1, 0);
+        vm.prank(borrower);
+        vm.expectPartialRevert(SlippageCheck.MaximumAmountExceeded.selector);
+        market.increaseLiquidity(tokenId, LIQUIDITY, uint128(WETH_BUDGET), 1, permit, signature);
+    }
+
+    function test_expiredPermitReverts() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        uint256 deadline = block.timestamp - 1;
+        ISignatureTransfer.PermitBatchTransferFrom memory permit =
+            _permitFor(wethKey, WETH_BUDGET, USDG_BUDGET, 0, deadline);
+        bytes memory signature = _sign(BORROWER_PK, permit);
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(SIGNATURE_EXPIRED, deadline));
+        market.increaseLiquidity(tokenId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
+    }
+
+    /// @notice A permit adds once. Replaying it reverts, even with the tokens to pay again.
+    function test_replayedPermitReverts() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) =
+            _signedPermit(wethKey, WETH_BUDGET, USDG_BUDGET, 0);
+
+        vm.prank(borrower);
+        market.increaseLiquidity(tokenId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
+
+        // Topped back up, so the only thing wrong with the second attempt is the nonce.
+        deal(RobinhoodChain.WETH, borrower, WETH_BUDGET);
+        deal(RobinhoodChain.USDG, borrower, USDG_BUDGET);
+
+        vm.prank(borrower);
+        vm.expectRevert(INVALID_NONCE);
+        market.increaseLiquidity(tokenId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
+    }
+
+    /// @notice The permit must list the pool's currencies, in pool order.
+    function test_permitForOtherCurrenciesReverts() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        ISignatureTransfer.PermitBatchTransferFrom memory permit =
+            _permitFor(wethKey, WETH_BUDGET, USDG_BUDGET, 0, block.timestamp + 1 hours);
+        (permit.permitted[0], permit.permitted[1]) = (permit.permitted[1], permit.permitted[0]);
+        bytes memory signature = _sign(BORROWER_PK, permit);
+
+        vm.prank(borrower);
+        vm.expectRevert(FarmentaMarket.PermitDoesNotMatchPool.selector);
+        market.increaseLiquidity(tokenId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
+    }
+
+    /// @notice Only the address a position is recorded to may add to it.
+    /// @dev A broadcast permit is public, but it cannot be spent here by anyone else: the
+    ///      record is checked before Permit2 is called, and Permit2 would refuse the signer too.
+    function test_onlyTheDepositorMayAdd() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) =
+            _signedPermit(wethKey, WETH_BUDGET, USDG_BUDGET, 0);
+
+        vm.prank(address(0xBAD));
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotTheDepositor.selector, tokenId, borrower));
+        market.increaseLiquidity(tokenId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
+    }
+
+    /// @notice A frozen pool takes no new capital, and the refusal comes before any token moves.
+    /// @dev §6.5 names `increaseLiquidity` among what delisting stops. Permit2 is never called:
+    ///      the policy check runs first, which is what keeps a refusal cheap and legible.
+    function test_frozenPoolRevertsBeforeAnyTokenMoves() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        vm.prank(owner);
+        policy.setFrozen(wethKey.toId(), true);
+        _assertRefusedBeforeAnyTokenMoves(
+            tokenId, abi.encodeWithSelector(CollateralPolicy.PoolFrozenForNewPositions.selector, wethKey.toId())
+        );
+    }
+
+    /// @notice A token disabled since the position was deposited closes its pools to additions.
+    function test_disabledTokenReverts() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        vm.prank(owner);
+        policy.setTokenConfig(
+            Currency.wrap(RobinhoodChain.WETH), false, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(1)
+        );
+        _assertRefusedBeforeAnyTokenMoves(
+            tokenId,
+            abi.encodeWithSelector(CollateralPolicy.TokenNotEnabled.selector, Currency.wrap(RobinhoodChain.WETH))
+        );
+    }
+
+    /// @notice A hook taken off the allowlist since the position was deposited closes its pool
+    ///         to additions.
+    /// @dev The hook carries only the `afterRemoveLiquidity` bit and has no code: adding
+    ///      liquidity never calls it, and that one bit is all the policy reads.
+    function test_revokedHookReverts() public {
+        address hook = address((uint160(0xF00D) << 144) | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG);
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, true);
+        uint256 tokenId = _depositFresh(_initPool(hook));
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, false);
+
+        _assertRefusedBeforeAnyTokenMoves(
+            tokenId, abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook)
+        );
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     /// @dev A refused addition calls Permit2 for nothing, and moves no token.
