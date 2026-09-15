@@ -84,7 +84,9 @@ library MarketDebt {
             }
             uint256 requestedDebt = DebtMath.debtOf(loan.debtShares, $.borrowIndex) + amount;
             uint256 requestedDebtUsd = _debtUsd(env.asset, env.oracle, requestedDebt);
-            uint256 maximumDebtUsd = _collateralValue(valuation, terms) * terms.maxLtvBps / BPS;
+            uint256 maximumDebtUsd = DebtMath.collateralValue(
+                    valuation.principalUsd, valuation.feesUsd, terms.removeHaircutBps
+                ) * terms.maxLtvBps / BPS;
             if (requestedDebtUsd > maximumDebtUsd) revert BorrowExceedsMaxLtv(requestedDebtUsd, maximumDebtUsd);
             if (requestedDebt < 10e6) revert BorrowBelowMinimum(requestedDebt);
 
@@ -150,14 +152,6 @@ library MarketDebt {
         $.totalBorrows = newTotalBorrows;
         $.reserves += interest * $.reserveFactorBps / BPS;
         emit ReservesUpdated($.reserves);
-    }
-
-    function _collateralValue(
-        IPositionValuer.Valuation memory valuation,
-        ICollateralPolicy.Terms memory terms
-    ) private pure returns (uint256) {
-        uint256 cappedFees = Math.min(valuation.feesUsd, valuation.principalUsd / 10);
-        return (valuation.principalUsd + cappedFees) * (BPS - terms.removeHaircutBps) / BPS;
     }
 
     function _checkBorrowPrice(
