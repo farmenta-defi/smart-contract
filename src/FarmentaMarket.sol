@@ -373,10 +373,14 @@ contract FarmentaMarket is
     /// @param permit A Permit2 batch transfer naming this market as spender, listing the pool's
     ///        ERC-20 currencies in pool order, each for at least its maximum.
     /// @param signature The caller's signature over `permit`.
-    /// @dev **No health-factor gate.** Adding liquidity can only raise the position's value, so
-    ///      it can only raise its health factor. Fees the addition realises are spent on it
-    ///      rather than paid out, which is why a leg whose uncollected fees exceed its cost
-    ///      reverts (`DeltaNotNegative`) instead of handing the surplus to the caller.
+    /// @dev **No health-factor gate** (§4.1). The caller pays in and takes nothing out, so no value
+    ///      can leave the position this way. Fees the addition realises are spent on it rather
+    ///      than paid out, which is why a leg whose uncollected fees exceed its cost reverts
+    ///      (`DeltaNotNegative`) instead of handing the surplus over past `collectFees`' health
+    ///      check. That spending is also the one way the health factor can dip, and only at second
+    ///      order: the fees leave the valuation, and when the pool price is off the oracle the
+    ///      liquidity they bought, valued at the oracle (§5.1), is worth slightly less than they
+    ///      were. What moves is the caller's own money, and it never reaches anyone else.
     ///
     ///      **The pool must still pass §6.1**, checked before any token moves: it may have been
     ///      frozen, or lost a token or its hook allowlisting, since the position was deposited
