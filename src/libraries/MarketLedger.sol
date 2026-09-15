@@ -6,15 +6,17 @@ import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {ICollateralPolicy} from "../interfaces/ICollateralPolicy.sol";
 
 /// @title MarketLedger
-/// @notice `FarmentaMarket`'s storage layout, shared by its linked delegatecall libraries.
-/// @dev The field order and namespace are frozen: every proxy already uses these slots.
-///      The layout is declared once so a future library cannot silently diverge from market storage.
+/// @notice `FarmentaMarket`'s storage layout, in the one place both it and its delegatecall
+///         libraries can name (ARCHITECTURE §4.1).
+/// @dev The layout itself has not changed: the same ERC-7201 namespace and field order keep
+///      every deployed proxy slot fixed. A second copy could quietly diverge when one library
+///      adds a field, so the shared layout is declared once.
 library MarketLedger {
     /// @notice A position held as collateral, and what is owed against it.
     /// @param owner The address that deposited it, and the only one who may take it back.
-    /// @param tier The collateral tier it was accepted under.
+    /// @param tier The collateral tier it was accepted under, retained for borrowing checks.
     /// @param debtShares Share of `totalBorrows` owed by this collateral position.
-    /// @param poolKeyId The pool it sits in, for the per-pool debt cap.
+    /// @param poolKeyId The pool it sits in, retained for the per-pool debt cap.
     struct Loan {
         address owner;
         ICollateralPolicy.Tier tier;

@@ -57,11 +57,15 @@ library MarketMint {
     ) external returns (uint256 tokenId) {
         MarketDebt.accrue(env.debt);
 
+        // ETH can only be currency0 because `address(0)` sorts first. It arrives as
+        // `msg.value`, so a native pool has one ERC-20 leg and an ERC-20 pair has two.
         uint256 firstLeg = p.poolKey.currency0.isAddressZero() ? 1 : 0;
         uint256 expectedValue = firstLeg == 1 ? p.amount0Max : 0;
         if (msg.value != expectedValue) revert NativeValueMismatch(expectedValue, msg.value);
 
         ISignatureTransfer.SignatureTransferDetails[] memory transfers = _transfersFor(p, permit, firstLeg);
+        // Read Permit2 from PositionManager rather than configuration: the allowance must sit
+        // on the instance it uses, so the two addresses cannot drift apart.
         IPermit2 permit2 = IPermit2(address(Permit2Forwarder(address(env.positionManager)).permit2()));
 
         uint256[2] memory held;
@@ -76,6 +80,8 @@ library MarketMint {
             _allowPositionManager(env.positionManager, permit2, currency, amountMax);
         }
 
+        // `modifyLiquidities` returns no id. PositionManager assigns `nextTokenId`, then
+        // increments it while locked, so reading before minting identifies this position.
         tokenId = env.positionManager.nextTokenId();
         env.positionManager.modifyLiquidities{value: msg.value}(_mintActions(p), permit.deadline);
         _acceptCollateral(env, msg.sender, tokenId);
@@ -104,8 +110,12 @@ library MarketMint {
         uint256 tokenId
     ) private {
         MarketLedger.Layout storage $ = MarketLedger.layout();
+        // Unreachable for ordinary intake: a recorded token is already held, and a mint creates
+        // a new id. Keep the guard because a loan record must never be silently overwritten.
         if ($.loans[tokenId].owner != address(0)) revert PositionAlreadyHeld(tokenId);
 
+        // Every intake path already holds the NFT. PositionManager clears info when burning, so
+        // ownership implies existence; a nonexistent id yields an unlistable zeroed key.
         (PoolKey memory key,) = env.positionManager.getPoolAndPositionInfo(tokenId);
         ICollateralPolicy.Terms memory terms = env.policy.checkPool(key, $.tier);
         IPositionValuer.Valuation memory valuation = env.valuer.value(tokenId);
