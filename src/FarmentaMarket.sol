@@ -11,17 +11,12 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {Permit2Forwarder} from "@uniswap/v4-periphery/src/base/Permit2Forwarder.sol";
 import {IERC721Permit_v4} from "@uniswap/v4-periphery/src/interfaces/IERC721Permit_v4.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
 import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol";
 
-import {RobinhoodChain} from "./constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
 import {IInterestRateModel} from "./interfaces/IInterestRateModel.sol";
 import {IPositionValuer} from "./interfaces/IPositionValuer.sol";
@@ -29,7 +24,7 @@ import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {DebtMath} from "./libraries/DebtMath.sol";
 import {MarketDebt} from "./libraries/MarketDebt.sol";
 import {MarketLedger} from "./libraries/MarketLedger.sol";
-import {TierPresets} from "./libraries/TierPresets.sol";
+import {MarketMint} from "./libraries/MarketMint.sol";
 
 /// @title FarmentaMarket
 /// @notice Custodies Uniswap v4 LP position NFTs and lends USDG against them
@@ -100,11 +95,6 @@ contract FarmentaMarket is
 
     uint256 private constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
-    uint256 private constant MAX_SPOT_DEVIATION_BPS = 200;
-    uint256 private constant MAX_PYTH_PRICE_AGE = 10 minutes;
-    uint256 private constant MAX_PYTH_DEVIATION_BPS = 300;
-    uint256 private constant USDG_MIN_PRICE = 0.97e18;
-    uint256 private constant USDG_MAX_PRICE = 1.03e18;
 
     /// @notice The Uniswap position NFT this market custodies.
     /// @dev Immutable in the implementation and changed by upgrading, like every other
@@ -333,45 +323,7 @@ contract FarmentaMarket is
         ISignatureTransfer.PermitBatchTransferFrom calldata permit,
         bytes calldata signature
     ) external payable whenNotPaused nonReentrant returns (uint256 tokenId) {
-        accrue();
-
-        // ETH can only ever be currency0, since `address(0)` sorts first. It comes in as
-        // `msg.value`, so a native pool has one ERC-20 leg to pull and an ERC-20 pair has two.
-        uint256 firstLeg = p.poolKey.currency0.isAddressZero() ? 1 : 0;
-        {
-            uint256 expectedValue = firstLeg == 1 ? p.amount0Max : 0;
-            if (msg.value != expectedValue) revert NativeValueMismatch(expectedValue, msg.value);
-        }
-
-        ISignatureTransfer.SignatureTransferDetails[] memory transfers = _transfersFor(p, permit, firstLeg);
-
-        // Read from PositionManager rather than configured here: the allowance has to sit on
-        // the Permit2 it pays through, and this way the two cannot disagree.
-        IPermit2 permit2 = IPermit2(address(Permit2Forwarder(address(positionManager)).permit2()));
-
-        // What the market already held of each ERC-20 leg before the caller paid in. The change
-        // is whatever sits above this once the mint is done.
-        uint256[2] memory held;
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency,) = _leg(p, i);
-            held[i] = IERC20(Currency.unwrap(currency)).balanceOf(address(this));
-        }
-
-        permit2.permitTransferFrom(permit, transfers, msg.sender, signature);
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency, uint128 amountMax) = _leg(p, i);
-            _allowPositionManager(permit2, currency, amountMax);
-        }
-
-        tokenId = positionManager.nextTokenId();
-        positionManager.modifyLiquidities{value: msg.value}(_mintActions(p), permit.deadline);
-
-        _acceptCollateral(msg.sender, tokenId);
-
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency,) = _leg(p, i);
-            _returnChange(currency, held[i]);
-        }
+        return MarketMint.mintAndDeposit(_mintEnv(), _mintParams(p), permit, signature);
     }
 
     /// @notice Accepts a position pushed here directly with `safeTransferFrom`.
@@ -648,171 +600,11 @@ contract FarmentaMarket is
     ///      depositor can collect their fees the moment the position is in, so counting them
     ///      toward the floor would admit positions that fall under it one transaction later.
     ///      Fees are collateral (§1 #6); they are just not a reason to let dust in.
-    /// @dev Borrow capacity and health factor count capped LP fees as collateral.
-    function _borrowValue(
-        uint256 tokenId
-    ) private view returns (uint256) {
-        MarketLedger.Layout storage $ = _marketStorage();
-        MarketLedger.Loan storage loan = $.loans[tokenId];
-        ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
-        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
-        return _collateralValue(valuation, terms);
-    }
-
-    function _collateralValue(
-        IPositionValuer.Valuation memory valuation,
-        ICollateralPolicy.Terms memory terms
-    ) private pure returns (uint256) {
-        uint256 cappedFees = Math.min(valuation.feesUsd, valuation.principalUsd / 10);
-        return (valuation.principalUsd + cappedFees) * (BPS - terms.removeHaircutBps) / BPS;
-    }
-
-    function _checkBorrowPrice(
-        ICollateralPolicy.Tier borrowTier
-    ) private view {
-        uint256 usdgPrice = oracle.price(policy.quote());
-        if (usdgPrice < USDG_MIN_PRICE || usdgPrice > USDG_MAX_PRICE) {
-            revert UsdgPriceOutOfBounds(usdgPrice);
-        }
-        if (borrowTier != ICollateralPolicy.Tier.BLUE_CHIP) return;
-
-        (uint256 pythPrice, uint256 publishTime) = oracle.pythEthUsd();
-        if (publishTime == 0 || publishTime > block.timestamp || block.timestamp - publishTime > MAX_PYTH_PRICE_AGE) {
-            return;
-        }
-        uint256 chainlinkPrice = oracle.price(Currency.wrap(RobinhoodChain.NATIVE));
-        uint256 difference = chainlinkPrice > pythPrice ? chainlinkPrice - pythPrice : pythPrice - chainlinkPrice;
-        if (Math.mulDiv(difference, BPS, chainlinkPrice) > MAX_PYTH_DEVIATION_BPS) {
-            revert PythPriceDeviation(chainlinkPrice, pythPrice);
-        }
-    }
-
-    /// @dev Converts USDG-denominated debt to USD 1e18 using the configured oracle price.
-    function _debtUsd(
-        uint256 debt
-    ) private view returns (uint256) {
-        Currency assetCurrency = Currency.wrap(asset());
-        return DebtMath.debtUsd(debt, oracle.price(assetCurrency), oracle.decimals(assetCurrency));
-    }
-
-    /// @dev Floors a USD value to the amount of USDG that can be borrowed without exceeding it.
-    function _usdToDebt(
-        uint256 usdValue
-    ) private view returns (uint256) {
-        Currency assetCurrency = Currency.wrap(asset());
-        return DebtMath.usdToDebt(usdValue, oracle.price(assetCurrency), oracle.decimals(assetCurrency));
-    }
-
     function _poolDebt(
         PoolId poolId
     ) private view returns (uint256) {
         MarketLedger.Layout storage $ = _marketStorage();
         return DebtMath.debtOf($.poolDebtShares[poolId], $.borrowIndex);
-    }
-
-    /// @dev One leg of a mint, by its place in the pool: 0 is currency0, 1 is currency1.
-    function _leg(
-        MintParams calldata p,
-        uint256 i
-    ) private pure returns (Currency currency, uint128 amountMax) {
-        if (i == 0) return (p.poolKey.currency0, p.amount0Max);
-        return (p.poolKey.currency1, p.amount1Max);
-    }
-
-    /// @dev Checks the permit names exactly the pool's ERC-20 currencies, in pool order, and
-    ///      asks Permit2 for each leg's maximum. The check is not optional: Permit2 moves
-    ///      whichever token the signed permit names, not the one the market expects. Without
-    ///      it a permit for some other token would be spent while the mint still settled in the
-    ///      pool's currency — out of what the market already holds, which for USDG is lenders'
-    ///      money.
-    function _transfersFor(
-        MintParams calldata p,
-        ISignatureTransfer.PermitBatchTransferFrom calldata permit,
-        uint256 firstLeg
-    ) private view returns (ISignatureTransfer.SignatureTransferDetails[] memory transfers) {
-        uint256 count = 2 - firstLeg;
-        if (permit.permitted.length != count) revert PermitDoesNotMatchPool();
-
-        transfers = new ISignatureTransfer.SignatureTransferDetails[](count);
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency, uint128 amountMax) = _leg(p, i);
-            if (permit.permitted[i - firstLeg].token != Currency.unwrap(currency)) revert PermitDoesNotMatchPool();
-            transfers[i - firstLeg] =
-                ISignatureTransfer.SignatureTransferDetails({to: address(this), requestedAmount: amountMax});
-        }
-    }
-
-    /// @dev The two approvals `SETTLE_PAIR` needs, granted once per token and left standing as
-    ///      §4.1 specifies: the token approves Permit2 for the maximum, then Permit2 approves
-    ///      PositionManager for the maximum with the longest expiry — the pattern proven in
-    ///      `test/base/PositionMinter.sol`. PositionManager pays a locker's debt with
-    ///      `permit2.transferFrom`, so skipping either layer fails inside the settle with nothing
-    ///      to say which.
-    ///
-    ///      A standing allowance is safe on a contract that also holds lenders' USDG because of
-    ///      who can draw on it. PositionManager charges only the locker — whoever called
-    ///      `modifyLiquidities` — so nothing but this market's own calls can use it, and a mint
-    ///      settles at most its maxima, which the caller has already paid in. `_returnChange`
-    ///      reverts should a settle ever reach further than that.
-    ///
-    ///      The outer layer is renewed only once it falls below what this leg could spend, not
-    ///      whenever it is short of the maximum. Some tokens draw even an unlimited allowance down
-    ///      on every `transferFrom` — this chain's USDG does, checked at the pinned block — and
-    ///      checking for the exact maximum would re-approve on every mint.
-    function _allowPositionManager(
-        IPermit2 permit2,
-        Currency currency,
-        uint256 amount
-    ) private {
-        IERC20 token = IERC20(Currency.unwrap(currency));
-        if (token.allowance(address(this), address(permit2)) < amount) {
-            token.forceApprove(address(permit2), type(uint256).max);
-        }
-
-        (uint160 allowed, uint48 expiration,) =
-            permit2.allowance(address(this), address(token), address(positionManager));
-        if (allowed != type(uint160).max || expiration != type(uint48).max) {
-            permit2.approve(address(token), address(positionManager), type(uint160).max, type(uint48).max);
-        }
-    }
-
-    /// @dev `[MINT_POSITION, SETTLE_PAIR, SWEEP, SWEEP]`, minted to this market (§4.1).
-    function _mintActions(
-        MintParams calldata p
-    ) private view returns (bytes memory) {
-        bytes memory actions = abi.encodePacked(
-            uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP), uint8(Actions.SWEEP)
-        );
-
-        bytes[] memory params = new bytes[](4);
-        params[0] = abi.encode(
-            p.poolKey, p.tickLower, p.tickUpper, p.liquidity, p.amount0Max, p.amount1Max, address(this), p.hookData
-        );
-        params[1] = abi.encode(p.poolKey.currency0, p.poolKey.currency1);
-        params[2] = abi.encode(p.poolKey.currency0, msg.sender);
-        params[3] = abi.encode(p.poolKey.currency1, msg.sender);
-
-        return abi.encode(actions, params);
-    }
-
-    /// @dev Sends back what the mint did not spend of an ERC-20 leg: whatever the market holds
-    ///      above `held`, its balance from before the caller paid in.
-    ///
-    ///      The subtraction is checked on purpose. Ending below `held` would mean the settle was
-    ///      paid partly out of what the market already had — lenders' USDG — so the whole mint
-    ///      reverts instead.
-    ///
-    ///      A balance difference counts everything that reached the market during the mint, not
-    ///      only the caller's change. An inflow that hands its sender something back would be
-    ///      paid out as change while the sender kept the proceeds. The one such inflow is a vault
-    ///      deposit made from inside a pool hook, which is why `_deposit` refuses re-entry.
-    function _returnChange(
-        Currency currency,
-        uint256 held
-    ) private {
-        IERC20 token = IERC20(Currency.unwrap(currency));
-        uint256 change = token.balanceOf(address(this)) - held;
-        if (change != 0) token.safeTransfer(msg.sender, change);
     }
 
     /// @inheritdoc UUPSUpgradeable
@@ -888,6 +680,24 @@ contract FarmentaMarket is
     function _debtEnv() private view returns (MarketDebt.Env memory) {
         return MarketDebt.Env({
             asset: IERC20(asset()), policy: policy, valuer: valuer, oracle: oracle, interestRateModel: interestRateModel
+        });
+    }
+
+    function _mintEnv() private view returns (MarketMint.Env memory) {
+        return MarketMint.Env({positionManager: positionManager, policy: policy, valuer: valuer, debt: _debtEnv()});
+    }
+
+    function _mintParams(
+        MintParams calldata p
+    ) private pure returns (MarketMint.Params memory) {
+        return MarketMint.Params({
+            poolKey: p.poolKey,
+            tickLower: p.tickLower,
+            tickUpper: p.tickUpper,
+            liquidity: p.liquidity,
+            amount0Max: p.amount0Max,
+            amount1Max: p.amount1Max,
+            hookData: p.hookData
         });
     }
 }
