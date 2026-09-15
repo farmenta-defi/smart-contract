@@ -10,6 +10,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
+import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 
@@ -124,6 +125,56 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(usdg.balanceOf(recipient), fees1, "a frozen pool's fees are still claimable");
     }
 
+    /* -------------------------------- health factor --------------------------- */
+
+    /// @notice A position well above water keeps its claim, and is still healthy after it.
+    function test_anIndebtedPositionWellAboveWaterClaims() public {
+        _openLoan(20e6);
+        uint256 debt = market.debtOf(tokenId);
+        uint256 fees1 = valuer.value(tokenId).fees1;
+
+        vm.prank(borrower);
+        market.collectFees(tokenId, recipient);
+
+        assertEq(usdg.balanceOf(recipient), fees1, "the fees reach the recipient");
+        assertEq(market.debtOf(tokenId), debt, "the claim does not touch the debt");
+        assertGe(lens.healthFactor(tokenId), 1e18, "and the position is still healthy");
+    }
+
+    /// @notice A claim that would leave the position under water is refused, with the health factor
+    ///         the lens reports for the state the claim would have left.
+    /// @dev Fees above 10% of principal count as exactly 10% (§6.2), so taking them all divides the
+    ///      collateral value by 1.1. Interest carries the position to a health factor just under 1.1
+    ///      first: healthy before the claim, under 1 after it.
+    ///
+    ///      The expected figure is read from `MarketLens`, not recomputed here. The post-claim state
+    ///      is reached by clearing the loan's debt shares for one claim, which then runs no health
+    ///      check at all, and putting them back before asking the lens. That is the AC's "library HF
+    ///      equals `MarketLens.healthFactor`" as a revert payload compared to the unit.
+    function test_aClaimThatWouldLeaveThePositionUnderwaterIsRefused() public {
+        _deposit(tokenId);
+        IPositionValuer.Valuation memory v = valuer.value(tokenId);
+        _donateFees(tokenId, 0, v.principalUsd / 1e12 / 5);
+        _lend(300e6);
+        uint256 amount = lens.maxBorrow(tokenId);
+        vm.prank(borrower);
+        market.borrow(tokenId, amount, borrower);
+        _ageUntilHealthFactorBelow(1.09e18);
+
+        uint256 healthBefore = lens.healthFactor(tokenId);
+        uint256 healthAfter = _healthFactorAfterClaim();
+        assertGe(healthBefore, 1e18, "the position must be healthy before the claim");
+        assertLt(healthAfter, 1e18, "and under water after it");
+        uint256 fees1 = valuer.value(tokenId).fees1;
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PositionWouldBeUnhealthy.selector, tokenId, healthAfter));
+        market.collectFees(tokenId, recipient);
+
+        assertEq(valuer.value(tokenId).fees1, fees1, "the fees stay in the position");
+        assertEq(usdg.balanceOf(recipient), 0, "and nothing reached the recipient");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _deposit(
@@ -195,5 +246,40 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(afterClaim.amount1, before.amount1, "principal1 is untouched");
         assertEq(afterClaim.fees0, 0, "no currency0 fee is left behind");
         assertEq(afterClaim.fees1, 0, "no currency1 fee is left behind");
+    }
+
+    /// @dev The health factor the lens reports once the claim has gone through, with the debt it
+    ///      has now. See `test_aClaimThatWouldLeaveThePositionUnderwaterIsRefused`.
+    function _healthFactorAfterClaim() private returns (uint256 healthFactor) {
+        bytes32 slot = _debtSharesSlot(tokenId);
+        bytes32 shares = vm.load(address(market), slot);
+        uint256 snapshot = vm.snapshotState();
+
+        vm.store(address(market), slot, bytes32(0));
+        vm.prank(borrower);
+        market.collectFees(tokenId, recipient);
+        vm.store(address(market), slot, shares);
+        healthFactor = lens.healthFactor(tokenId);
+
+        vm.revertToState(snapshot);
+    }
+
+    /// @dev `Layout.loans` is the second field, so its slot is `LOCATION + 1`; within a `Loan`,
+    ///      `owner` and `tier` share the first slot and `debtShares` takes the next.
+    function _debtSharesSlot(
+        uint256 id
+    ) private pure returns (bytes32) {
+        return bytes32(uint256(keccak256(abi.encode(id, uint256(MarketLedger.LOCATION) + 1))) + 1);
+    }
+
+    function _ageUntilHealthFactorBelow(
+        uint256 target
+    ) private {
+        for (uint256 i = 0; i < 4000; ++i) {
+            if (lens.healthFactor(tokenId) < target) return;
+            vm.warp(block.timestamp + 1 days);
+            market.accrue();
+        }
+        revert("the health factor never fell far enough");
     }
 }
