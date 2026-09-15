@@ -175,6 +175,54 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(usdg.balanceOf(recipient), 0, "and nothing reached the recipient");
     }
 
+    /* --------------------------------- price gates ---------------------------- */
+
+    /// @notice §5.2 v0.40: with debt outstanding, a USDG price outside [0,97; 1,03] refuses the claim.
+    function test_anIndebtedClaimRunsTheUsdgBand() public {
+        _openLoan(20e6);
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UsdgPriceOutOfBounds.selector, 0.96e18));
+        market.collectFees(tokenId, recipient);
+    }
+
+    /// @notice §5.2 v0.40: with debt outstanding, a fresh Pyth quote over 3% from Chainlink refuses it.
+    function test_anIndebtedClaimRunsThePythGate() public {
+        _openLoan(20e6);
+        oracle.setPythPrice(ETH_AT_POOL_SPOT * 104 / 100, block.timestamp);
+
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.PythPriceDeviation.selector);
+        market.collectFees(tokenId, recipient);
+    }
+
+    /// @notice §5.2 v0.40: with debt outstanding, a pool more than 2% from the oracle refuses it.
+    /// @dev A 1% move keeps the health factor far above 1, so the refusal can only be the gate.
+    function test_anIndebtedClaimRunsTheSpotGate() public {
+        _openLoan(20e6);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 97 / 100, 18);
+        assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must be outside the 2% gate");
+
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.SpotPriceDeviation.selector);
+        market.collectFees(tokenId, recipient);
+    }
+
+    /// @notice With nothing owed there is no debt to protect, so none of the gates apply (v0.40).
+    function test_aClaimWithNoDebtRunsNoPriceGate() public {
+        _deposit(tokenId);
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 80 / 100, 18);
+        oracle.setPythPrice(ETH_AT_POOL_SPOT, block.timestamp);
+        uint256 fees1 = valuer.value(tokenId).fees1;
+
+        vm.prank(borrower);
+        market.collectFees(tokenId, recipient);
+
+        assertEq(usdg.balanceOf(recipient), fees1, "the fees reach the recipient");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _deposit(
