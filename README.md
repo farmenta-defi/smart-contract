@@ -94,9 +94,11 @@ src/
   CollateralPolicy.sol           which pools may back a loan, on what terms (spec §4.5, §6)
   PriceOracle.sol                reads policy-listed Chainlink USD feeds (spec §4.3, §5.2)
   PositionValuer.sol             values a position at oracle prices (spec §4.2, §5.1)
+  MarketLens.sol                 read-only risk views for one market proxy
   constants/RobinhoodChain.sol   deployed addresses (spec §18)
   interfaces/                    ICollateralPolicy, IPositionValuer, IPriceOracle, IAggregatorV3
-  libraries/                     PositionAmounts, PriceMath, HookPermissions, TierPresets
+  libraries/                     PositionAmounts, PriceMath, HookPermissions, TierPresets,
+                                 MarketLedger, MarketDebt, MarketMint
 test/
   base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
               PositionMinter (mints positions in the fork for shapes the chain lacks),
@@ -110,6 +112,13 @@ script/
   DiscoverPositions.s.sol        finds real positions to use as fixtures
   InspectPositions.s.sol         prints everything the valuer reads, for one position
 ```
+
+`MarketDebt` and `MarketMint` are linked delegatecall libraries. Deploy and link them in
+order: `MarketDebt`, then `MarketMint` linked to `MarketDebt`, then the market implementation
+linked to both (and `MarketLiquidation` when FAR-10 lands). They write only the market's
+ERC-7201 ledger namespace and preserve the market's caller, events, and storage.
+`MarketLens` is a separate read-only contract bound to one proxy, so deploy one lens for
+each Blue-chip or Meme market and direct risk-view consumers to that lens.
 
 ## What `FarmentaMarket` does today
 

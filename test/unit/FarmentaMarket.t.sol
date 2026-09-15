@@ -17,11 +17,13 @@ import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol"
 
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {InterestRateModel} from "../../src/InterestRateModel.sol";
+import {MarketLens} from "../../src/MarketLens.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IInterestRateModel} from "../../src/interfaces/IInterestRateModel.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
+import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @notice Unit tests for the market's proxy setup, ownership and storage layout. No network.
@@ -41,6 +43,7 @@ contract FarmentaMarketTest is Test {
     MockERC20 internal usdg;
     FarmentaMarket internal implementation;
     FarmentaMarket internal market;
+    MarketLens internal lens;
 
     function setUp() public {
         usdg = new MockERC20("Paxos USDG", "USDG", RobinhoodChain.USDG_DECIMALS);
@@ -48,6 +51,7 @@ contract FarmentaMarketTest is Test {
         interestRateModel = address(rateModel);
         implementation = _deployImplementation();
         market = _deployProxy(ICollateralPolicy.Tier.BLUE_CHIP);
+        lens = new MarketLens(market);
     }
 
     /* -------------------------------- deployment ------------------------------ */
@@ -116,6 +120,13 @@ contract FarmentaMarketTest is Test {
         FarmentaMarket fresh = _deployImplementation();
         vm.expectRevert(FarmentaMarket.TierNotSet.selector);
         new ERC1967Proxy(address(fresh), _initData(ICollateralPolicy.Tier.NONE));
+    }
+
+    function test_lensRejectsAnUninitializedMarket() public {
+        FarmentaMarket uninitialized = FarmentaMarket(payable(address(new ERC1967Proxy(address(implementation), ""))));
+
+        vm.expectRevert(MarketLens.MarketNotInitialized.selector);
+        new MarketLens(uninitialized);
     }
 
     function test_zeroDependencyIsRejected() public {
@@ -273,7 +284,7 @@ contract FarmentaMarketTest is Test {
         _setReserves(market, 20_000e6);
 
         // Assets are 980,000 USDG after reserves, so the blue-chip floor is 9,800 USDG.
-        assertEq(market.withdrawableReserves(), 10_200e6, "surplus above the total-assets floor");
+        assertEq(lens.withdrawableReserves(), 10_200e6, "surplus above the total-assets floor");
         uint256 sharePriceBefore = market.convertToAssets(1e18);
 
         vm.prank(owner);
@@ -306,7 +317,7 @@ contract FarmentaMarketTest is Test {
         _setReserves(market, 30_000e6);
 
         // Reserve surplus is 29,220 USDG, but only 8,000 USDG exists as cash.
-        assertEq(market.withdrawableReserves(), 8000e6, "cash cap was not applied");
+        assertEq(lens.withdrawableReserves(), 8000e6, "cash cap was not applied");
 
         vm.prank(owner);
         market.withdrawReserves(8000e6, treasury);
@@ -322,21 +333,21 @@ contract FarmentaMarketTest is Test {
         usdg.mint(address(market), 1_000_000e6);
         _setReserves(market, 9000e6);
 
-        assertEq(market.reserveFloor(), 9910e6, "floor should track lender assets");
-        assertEq(market.withdrawableReserves(), 0, "underfilled reserve must stay locked");
+        assertEq(lens.reserveFloor(), 9910e6, "floor should track lender assets");
+        assertEq(lens.withdrawableReserves(), 0, "underfilled reserve must stay locked");
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.ReserveWithdrawalExceedsAvailable.selector, 1, 0));
         market.withdrawReserves(1, treasury);
 
         _setReserves(market, 20_000e6);
-        assertEq(market.withdrawableReserves(), 10_200e6, "replenishment should reopen withdrawal automatically");
+        assertEq(lens.withdrawableReserves(), 10_200e6, "replenishment should reopen withdrawal automatically");
     }
 
     function test_depositRaisesFloorAndReducesWithdrawableReserves() public {
         address lender = address(0x1E4DE2);
         usdg.mint(address(market), 1_000_000e6);
         _setReserves(market, 20_000e6);
-        uint256 withdrawableBefore = market.withdrawableReserves();
+        uint256 withdrawableBefore = lens.withdrawableReserves();
 
         usdg.mint(lender, 100_000e6);
         vm.startPrank(lender);
@@ -345,7 +356,7 @@ contract FarmentaMarketTest is Test {
         vm.stopPrank();
 
         assertEq(market.totalAssets(), 1_080_000e6, "deposit did not raise total assets");
-        assertEq(market.withdrawableReserves(), withdrawableBefore - 1000e6, "floor did not rise with lender assets");
+        assertEq(lens.withdrawableReserves(), withdrawableBefore - 1000e6, "floor did not rise with lender assets");
     }
 
     function test_withdrawReservesAccruesBeforeCalculatingAvailability() public {
@@ -353,14 +364,14 @@ contract FarmentaMarketTest is Test {
         _setTotalBorrowShares(market, 100_000e6);
         _setTotalBorrows(market, 100_000e6);
         _setReserves(market, 10_000e6);
-        uint256 withdrawableBefore = market.withdrawableReserves();
+        uint256 withdrawableBefore = lens.withdrawableReserves();
         vm.warp(block.timestamp + 1 days);
 
         vm.prank(owner);
         market.withdrawReserves(withdrawableBefore + 1, address(0x7EA5));
 
         assertEq(market.totalReservesWithdrawn(), withdrawableBefore + 1, "withdrawal amount was not recorded");
-        assertGe(market.reserves(), market.reserveFloor(), "withdrawal crossed the accrued floor");
+        assertGe(market.reserves(), lens.reserveFloor(), "withdrawal crossed the accrued floor");
     }
 
     function test_withdrawReservesUsesTheMemeFloor() public {
@@ -369,7 +380,26 @@ contract FarmentaMarketTest is Test {
         _setReserves(memeMarket, 30_000e6);
 
         // 2.5% of 970,000 USDG is 24,250 USDG, leaving 5,750 USDG withdrawable.
-        assertEq(memeMarket.withdrawableReserves(), 5750e6, "meme floor is not 2.5%");
+        assertEq(new MarketLens(memeMarket).withdrawableReserves(), 5750e6, "meme floor is not 2.5%");
+    }
+
+    function test_lensUsesTheReserveFloorEnforcedByMarket() public {
+        usdg.mint(address(market), 1_000_000e6);
+        _setReserves(market, 30_000e6);
+        _setReserveFloorBps(market, 300);
+
+        assertEq(market.reserveFloorBps(), 300, "market getter did not read storage");
+        assertEq(lens.reserveFloor(), 29_100e6, "lens did not use market's floor");
+        assertEq(lens.withdrawableReserves(), 900e6, "lens and market disagree on availability");
+
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.ReserveWithdrawalExceedsAvailable.selector, 900e6 + 1, 900e6)
+        );
+        market.withdrawReserves(900e6 + 1, address(0x7EA5));
+
+        vm.prank(owner);
+        market.withdrawReserves(900e6, address(0x7EA5));
     }
 
     function test_onlyOwnerCanWithdrawReserves() public {
@@ -496,13 +526,13 @@ contract FarmentaMarketTest is Test {
     }
 
     function test_unknownPositionHasNoLoan() public view {
-        FarmentaMarket.Loan memory loan = market.loanOf(12_345);
+        MarketLedger.Loan memory loan = market.loanOf(12_345);
         assertEq(loan.owner, address(0), "phantom loan owner");
         assertEq(loan.debtShares, 0, "phantom debt");
     }
 
     function test_healthFactorForDebtFreePositionIsUnlimited() public view {
-        assertEq(market.healthFactor(12_345), type(uint256).max);
+        assertEq(lens.healthFactor(12_345), type(uint256).max);
     }
 
     /* --------------------------------- helpers -------------------------------- */
@@ -593,6 +623,16 @@ contract FarmentaMarketTest is Test {
         uint256 amount
     ) internal {
         vm.store(address(target), bytes32(uint256(_marketStorageLocation()) + 7), bytes32(amount));
+    }
+
+    function _setReserveFloorBps(
+        FarmentaMarket target,
+        uint16 amount
+    ) internal {
+        bytes32 slot = bytes32(uint256(_marketStorageLocation()) + 8);
+        uint256 packed = uint256(vm.load(address(target), slot));
+        packed = (packed & ~(uint256(type(uint16).max) << 16)) | (uint256(amount) << 16);
+        vm.store(address(target), slot, bytes32(packed));
     }
 
     function _deployImplementation() internal returns (FarmentaMarket) {

@@ -11,23 +11,20 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {Permit2Forwarder} from "@uniswap/v4-periphery/src/base/Permit2Forwarder.sol";
 import {IERC721Permit_v4} from "@uniswap/v4-periphery/src/interfaces/IERC721Permit_v4.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
 import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol";
 
-import {RobinhoodChain} from "./constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
 import {IInterestRateModel} from "./interfaces/IInterestRateModel.sol";
 import {IPositionValuer} from "./interfaces/IPositionValuer.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {DebtMath} from "./libraries/DebtMath.sol";
-import {TierPresets} from "./libraries/TierPresets.sol";
+import {MarketDebt} from "./libraries/MarketDebt.sol";
+import {MarketLedger} from "./libraries/MarketLedger.sol";
+import {MarketMint} from "./libraries/MarketMint.sol";
 
 /// @title FarmentaMarket
 /// @notice Custodies Uniswap v4 LP position NFTs and lends USDG against them
@@ -74,20 +71,6 @@ contract FarmentaMarket is
     using Math for uint256;
     using SafeERC20 for IERC20;
 
-    /// @notice A position held as collateral, and what is owed against it.
-    /// @param owner The address that deposited it, and the only one who may take it back.
-    /// @param debtShares Share of `totalBorrows` owed by this collateral position.
-    /// @dev §4.1 also lists `poolKeyId` and `tier` on this struct. Both exist to serve the
-    ///      per-pool debt cap and the market-tier check at borrow time, and neither is
-    ///      readable state today: the pool is recoverable from `getPoolAndPositionInfo`, and
-    ///      a market serves exactly one tier. They arrive with the ledger that needs them.
-    struct Loan {
-        address owner;
-        ICollateralPolicy.Tier tier;
-        uint256 debtShares;
-        PoolId poolKeyId;
-    }
-
     /// @notice The position `mintAndDeposit` creates (§4.1).
     /// @param poolKey Pool to mint into. It passes the same §6.1 admission as any deposit.
     /// @param tickLower Lower tick of the range, on the pool's spacing.
@@ -107,37 +90,11 @@ contract FarmentaMarket is
         bytes hookData;
     }
 
-    /// @custom:storage-location erc7201:farmenta.storage.Market
-    struct MarketStorage {
-        /// @dev Which tier this proxy accepts. Storage rather than an immutable because one
-        ///      implementation backs both markets, and they differ only here.
-        ICollateralPolicy.Tier tier;
-        mapping(uint256 tokenId => Loan) loans;
-        mapping(PoolId poolId => uint256) poolDebtShares;
-        uint256 totalBorrowShares;
-        uint256 totalBorrows;
-        uint256 borrowIndex;
-        uint256 lastAccrual;
-        uint256 reserves;
-        uint16 reserveFactorBps;
-        uint16 reserveFloorBps;
-        uint256 totalReservesWithdrawn;
-    }
-
-    /// @dev keccak256(abi.encode(uint256(keccak256("farmenta.storage.Market")) - 1)) & ~bytes32(uint256(0xff))
-    bytes32 private constant MARKET_STORAGE_LOCATION =
-        0x7264a1ba9a51633de6d083d092b5001ae1c4b527f9b0578321c709cd9ac3df00;
-
     /// @notice Decimal offset on the vault's shares, against inflation attacks (§7).
     uint8 private constant DECIMALS_OFFSET = 3;
 
     uint256 private constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
-    uint256 private constant MAX_SPOT_DEVIATION_BPS = 200;
-    uint256 private constant MAX_PYTH_PRICE_AGE = 10 minutes;
-    uint256 private constant MAX_PYTH_DEVIATION_BPS = 300;
-    uint256 private constant USDG_MIN_PRICE = 0.97e18;
-    uint256 private constant USDG_MAX_PRICE = 1.03e18;
 
     /// @notice The Uniswap position NFT this market custodies.
     /// @dev Immutable in the implementation and changed by upgrading, like every other
@@ -247,7 +204,7 @@ contract FarmentaMarket is
         __Ownable_init(owner_);
         __Ownable2Step_init();
 
-        MarketStorage storage $ = _marketStorage();
+        MarketLedger.Layout storage $ = _marketStorage();
         $.tier = tier_;
         $.borrowIndex = WAD;
         $.lastAccrual = block.timestamp;
@@ -274,7 +231,7 @@ contract FarmentaMarket is
         uint256 tokenId
     ) external whenNotPaused nonReentrant {
         IERC721(address(positionManager)).transferFrom(msg.sender, address(this), tokenId);
-        _acceptCollateral(msg.sender, tokenId);
+        MarketMint.acceptCollateral(_mintEnv(), msg.sender, tokenId);
     }
 
     /// @notice Approves and deposits in one transaction, using a signature from the owner.
@@ -314,14 +271,12 @@ contract FarmentaMarket is
     ) external whenNotPaused nonReentrant {
         IERC721 nft = IERC721(address(positionManager));
         address depositor = nft.ownerOf(tokenId);
-
         try IERC721Permit_v4(address(positionManager)).permit(address(this), tokenId, deadline, nonce, signature) {}
         catch {
             if (nft.getApproved(tokenId) != address(this)) revert PermitRejected(tokenId);
         }
-
         nft.transferFrom(depositor, address(this), tokenId);
-        _acceptCollateral(depositor, tokenId);
+        MarketMint.acceptCollateral(_mintEnv(), depositor, tokenId);
     }
 
     /// @notice Mints a new position straight into custody and records it as the caller's
@@ -368,45 +323,7 @@ contract FarmentaMarket is
         ISignatureTransfer.PermitBatchTransferFrom calldata permit,
         bytes calldata signature
     ) external payable whenNotPaused nonReentrant returns (uint256 tokenId) {
-        accrue();
-
-        // ETH can only ever be currency0, since `address(0)` sorts first. It comes in as
-        // `msg.value`, so a native pool has one ERC-20 leg to pull and an ERC-20 pair has two.
-        uint256 firstLeg = p.poolKey.currency0.isAddressZero() ? 1 : 0;
-        {
-            uint256 expectedValue = firstLeg == 1 ? p.amount0Max : 0;
-            if (msg.value != expectedValue) revert NativeValueMismatch(expectedValue, msg.value);
-        }
-
-        ISignatureTransfer.SignatureTransferDetails[] memory transfers = _transfersFor(p, permit, firstLeg);
-
-        // Read from PositionManager rather than configured here: the allowance has to sit on
-        // the Permit2 it pays through, and this way the two cannot disagree.
-        IPermit2 permit2 = IPermit2(address(Permit2Forwarder(address(positionManager)).permit2()));
-
-        // What the market already held of each ERC-20 leg before the caller paid in. The change
-        // is whatever sits above this once the mint is done.
-        uint256[2] memory held;
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency,) = _leg(p, i);
-            held[i] = IERC20(Currency.unwrap(currency)).balanceOf(address(this));
-        }
-
-        permit2.permitTransferFrom(permit, transfers, msg.sender, signature);
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency, uint128 amountMax) = _leg(p, i);
-            _allowPositionManager(permit2, currency, amountMax);
-        }
-
-        tokenId = positionManager.nextTokenId();
-        positionManager.modifyLiquidities{value: msg.value}(_mintActions(p), permit.deadline);
-
-        _acceptCollateral(msg.sender, tokenId);
-
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency,) = _leg(p, i);
-            _returnChange(currency, held[i]);
-        }
+        return MarketMint.mintAndDeposit(_mintEnv(), _mintParams(p), permit, signature);
     }
 
     /// @notice Accepts a position pushed here directly with `safeTransferFrom`.
@@ -430,7 +347,7 @@ contract FarmentaMarket is
         bytes memory
     ) public override whenNotPaused nonReentrant returns (bytes4) {
         if (msg.sender != address(positionManager)) revert NotThePositionManager(msg.sender);
-        _acceptCollateral(from, tokenId);
+        MarketMint.acceptCollateral(_mintEnv(), from, tokenId);
         return this.onERC721Received.selector;
     }
 
@@ -454,8 +371,8 @@ contract FarmentaMarket is
         accrue();
         if (to == address(0) || to == address(this)) revert InvalidRecipient(to);
 
-        MarketStorage storage $ = _marketStorage();
-        Loan memory loan = $.loans[tokenId];
+        MarketLedger.Layout storage $ = _marketStorage();
+        MarketLedger.Loan memory loan = $.loans[tokenId];
 
         if (loan.owner != msg.sender) revert NotTheDepositor(tokenId, loan.owner);
         // Collateral remains locked until its debt shares have been fully repaid.
@@ -490,29 +407,13 @@ contract FarmentaMarket is
     /// @notice The loan recorded against a position, or a zeroed record if there is none.
     function loanOf(
         uint256 tokenId
-    ) external view returns (Loan memory) {
+    ) external view returns (MarketLedger.Loan memory) {
         return _marketStorage().loans[tokenId];
     }
 
     /// @notice Accrues index-based interest since the last state-changing operation.
     function accrue() public {
-        MarketStorage storage $ = _marketStorage();
-        uint256 elapsed = block.timestamp - $.lastAccrual;
-        if (elapsed == 0) return;
-
-        $.lastAccrual = block.timestamp;
-        if ($.totalBorrowShares == 0) return;
-
-        uint256 cash = IERC20(asset()).balanceOf(address(this));
-        uint256 utilization = $.totalBorrows * WAD / (cash + $.totalBorrows);
-        uint256 rate = interestRateModel.ratePerSecond($.tier, utilization);
-        (uint256 newIndex, uint256 newTotalBorrows, uint256 interest) =
-            DebtMath.accrue($.borrowIndex, $.totalBorrowShares, $.totalBorrows, rate, elapsed);
-
-        $.borrowIndex = newIndex;
-        $.totalBorrows = newTotalBorrows;
-        $.reserves += interest * $.reserveFactorBps / BPS;
-        emit ReservesUpdated($.reserves);
+        MarketDebt.accrue(_debtEnv());
     }
 
     /// @notice Borrows USDG against a deposited position, subject to LTV and debt caps.
@@ -521,43 +422,7 @@ contract FarmentaMarket is
         uint256 amount,
         address to
     ) external whenNotPaused nonReentrant {
-        if (to == address(0) || to == address(this)) revert InvalidBorrowRecipient(to);
-        if (amount == 0) revert ZeroBorrowAmount();
-        accrue();
-
-        MarketStorage storage $ = _marketStorage();
-        Loan storage loan = $.loans[tokenId];
-        if (loan.owner != msg.sender) revert BorrowerNotAuthorized(tokenId, msg.sender);
-        if (!policy.acceptsNewPositions(loan.poolKeyId)) revert PoolNotOpenForBorrowing(loan.poolKeyId);
-
-        ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
-        _checkBorrowPrice($.tier);
-        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
-        if ($.tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > MAX_SPOT_DEVIATION_BPS) {
-            revert SpotPriceDeviation(valuation.spotDeviationBps, MAX_SPOT_DEVIATION_BPS);
-        }
-        uint256 requestedDebt = debtOf(tokenId) + amount;
-        uint256 requestedDebtUsd = _debtUsd(requestedDebt);
-        uint256 maximumDebtUsd = _collateralValue(valuation, terms) * terms.maxLtvBps / BPS;
-        if (requestedDebtUsd > maximumDebtUsd) revert BorrowExceedsMaxLtv(requestedDebtUsd, maximumDebtUsd);
-        if (requestedDebt < 10e6) revert BorrowBelowMinimum(requestedDebt);
-        uint256 requestedPoolDebt = _poolDebt(loan.poolKeyId) + amount;
-        if (requestedPoolDebt > terms.debtCapUsdg) {
-            revert PoolDebtCapExceeded(loan.poolKeyId, requestedPoolDebt, terms.debtCapUsdg);
-        }
-
-        uint256 marketDebtCap = TierPresets.forTier($.tier).marketDebtCapUsdg;
-        if ($.totalBorrows + amount > marketDebtCap) {
-            revert MarketDebtCapExceeded($.totalBorrows + amount, marketDebtCap);
-        }
-
-        uint256 shares = DebtMath.sharesForBorrow(amount, $.borrowIndex);
-        loan.debtShares += shares;
-        $.totalBorrowShares += shares;
-        $.poolDebtShares[loan.poolKeyId] += shares;
-        $.totalBorrows = DebtMath.debtOf($.totalBorrowShares, $.borrowIndex);
-        IERC20(asset()).safeTransfer(to, amount);
-        emit Borrow(tokenId, amount);
+        MarketDebt.borrow(_debtEnv(), tokenId, amount, to);
     }
 
     /// @notice Repays debt. Pass `type(uint256).max` to repay the complete outstanding debt.
@@ -565,60 +430,14 @@ contract FarmentaMarket is
         uint256 tokenId,
         uint256 amount
     ) external nonReentrant returns (uint256 repaid) {
-        accrue();
-        MarketStorage storage $ = _marketStorage();
-        Loan storage loan = $.loans[tokenId];
-        uint256 debt = DebtMath.debtOf(loan.debtShares, $.borrowIndex);
-        if (amount == type(uint256).max || amount > debt) amount = debt;
-        if (amount == 0) return 0;
-
-        uint256 shares = amount == debt ? loan.debtShares : DebtMath.sharesForRepay(amount, $.borrowIndex);
-        repaid = DebtMath.debtOf(shares, $.borrowIndex);
-        loan.debtShares -= shares;
-        $.totalBorrowShares -= shares;
-        $.poolDebtShares[loan.poolKeyId] -= shares;
-        $.totalBorrows = DebtMath.debtOf($.totalBorrowShares, $.borrowIndex);
-        IERC20(asset()).safeTransferFrom(msg.sender, address(this), repaid);
-        emit Repay(tokenId, repaid);
+        return MarketDebt.repay(_debtEnv(), tokenId, amount);
     }
 
     function debtOf(
         uint256 tokenId
     ) public view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
+        MarketLedger.Layout storage $ = _marketStorage();
         return DebtMath.debtOf($.loans[tokenId].debtShares, $.borrowIndex);
-    }
-
-    function positionValue(
-        uint256 tokenId
-    ) public view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
-        Loan storage loan = $.loans[tokenId];
-        if (loan.owner == address(0)) return 0;
-        return _borrowValue(tokenId);
-    }
-
-    function maxBorrow(
-        uint256 tokenId
-    ) public view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
-        Loan storage loan = $.loans[tokenId];
-        if (loan.owner == address(0)) return 0;
-        uint256 maximumDebtUsd = _borrowValue(tokenId) * policy.termsOf(loan.poolKeyId).maxLtvBps / BPS;
-        uint256 debtUsd = _debtUsd(debtOf(tokenId));
-        if (maximumDebtUsd <= debtUsd) return 0;
-        return _usdToDebt(maximumDebtUsd - debtUsd);
-    }
-
-    function healthFactor(
-        uint256 tokenId
-    ) external view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
-        Loan storage loan = $.loans[tokenId];
-        uint256 debt = debtOf(tokenId);
-        if (debt == 0) return type(uint256).max;
-        uint256 debtUsd = _debtUsd(debt);
-        return DebtMath.healthFactor(positionValue(tokenId), policy.termsOf(loan.poolKeyId).ltBps, debtUsd);
     }
 
     function totalBorrows() external view returns (uint256) {
@@ -642,24 +461,15 @@ contract FarmentaMarket is
         return _marketStorage().totalReservesWithdrawn;
     }
 
-    /// @notice The reserve buffer that remains unavailable to the owner.
-    /// @dev The floor tracks lender assets, not borrows: repaying a loan moves value from debt
-    ///      to cash, but does not reduce what lenders have at risk (§7).
-    function reserveFloor() public view returns (uint256) {
-        return _reserveFloor(IERC20(asset()).balanceOf(address(this)));
-    }
-
-    /// @notice Reserve revenue currently available for owner withdrawal.
-    /// @dev Reserves are commingled with lender cash, so cash is a physical cap rather than a
-    ///      withdrawal priority. The result is zero whenever the reserve buffer is underfilled.
-    function withdrawableReserves() public view returns (uint256) {
-        return _withdrawableReserves(IERC20(asset()).balanceOf(address(this)));
+    /// @notice Reserve floor rate enforced by `withdrawReserves`, in basis points.
+    function reserveFloorBps() external view returns (uint16) {
+        return _marketStorage().reserveFloorBps;
     }
 
     function _withdrawableReserves(
         uint256 cash
     ) private view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
+        MarketLedger.Layout storage $ = _marketStorage();
         uint256 floor = _reserveFloor(cash);
         if ($.reserves <= floor) return 0;
         return Math.min($.reserves - floor, cash);
@@ -668,7 +478,7 @@ contract FarmentaMarket is
     function _reserveFloor(
         uint256 cash
     ) private view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
+        MarketLedger.Layout storage $ = _marketStorage();
         return (cash + $.totalBorrows - $.reserves) * $.reserveFloorBps / BPS;
     }
 
@@ -680,7 +490,7 @@ contract FarmentaMarket is
 
     /// @inheritdoc ERC4626Upgradeable
     function totalAssets() public view override returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
+        MarketLedger.Layout storage $ = _marketStorage();
         return IERC20(asset()).balanceOf(address(this)) + $.totalBorrows - $.reserves;
     }
 
@@ -725,10 +535,10 @@ contract FarmentaMarket is
         if (to == address(0) || to == address(this)) revert InvalidRecipient(to);
         accrue();
 
-        uint256 available = withdrawableReserves();
+        uint256 available = _withdrawableReserves(IERC20(asset()).balanceOf(address(this)));
         if (amount > available) revert ReserveWithdrawalExceedsAvailable(amount, available);
 
-        MarketStorage storage $ = _marketStorage();
+        MarketLedger.Layout storage $ = _marketStorage();
         $.reserves -= amount;
         $.totalReservesWithdrawn += amount;
         IERC20(asset()).safeTransfer(to, amount);
@@ -761,223 +571,11 @@ contract FarmentaMarket is
 
     /* -------------------------------- internals ------------------------------- */
 
-    /// @dev Runs every §6.1 admission rule and records the loan. Called once the market
-    ///      already owns the NFT, which every intake path guarantees.
-    ///
-    ///      The pool-level rules live in `CollateralPolicy.checkPool`: listed, not frozen,
-    ///      right tier, both tokens enabled, quoted in USDG, hook permitted. The two rules
-    ///      that need the position itself are enforced here, because §4.5 keeps the policy
-    ///      free of dependencies and the market has already paid for the valuation.
-    ///
-    ///      The minimum is measured on **principal alone**, not principal plus fees. A
-    ///      depositor can collect their fees the moment the position is in, so counting them
-    ///      toward the floor would admit positions that fall under it one transaction later.
-    ///      Fees are collateral (§1 #6); they are just not a reason to let dust in.
-    function _acceptCollateral(
-        address depositor,
-        uint256 tokenId
-    ) private {
-        MarketStorage storage $ = _marketStorage();
-        // Unreachable today. A recorded position is one this contract already owns, so it cannot
-        // be handed over again, and `mintAndDeposit` — the one intake path that does not start
-        // from a transfer — records a token that did not exist before its own call. Kept
-        // because it guards the single record that must never be silently overwritten.
-        if ($.loans[tokenId].owner != address(0)) revert PositionAlreadyHeld(tokenId);
-
-        // No existence check: every intake path reaches here holding the NFT, and
-        // `PositionManager` clears a position's info in the same call that burns its token.
-        // Owning it therefore implies it exists. Were that ever untrue, the zeroed key names
-        // a pool that cannot be listed anyway, since neither of its currencies is USDG.
-        (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(tokenId);
-
-        ICollateralPolicy.Terms memory terms = policy.checkPool(key, $.tier);
-
-        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
-        if (valuation.liquidity == 0) revert PositionIsEmpty(tokenId);
-
-        // §6.3: a hook that skims on withdrawal has its cut recorded at listing and deducted
-        // from the value. What backs a loan is what the protocol could actually pull out, not
-        // what the position reads as on paper. The policy caps the haircut at 100%, so this
-        // cannot underflow.
-        uint256 recoverableUsd = valuation.principalUsd * (BPS - terms.removeHaircutBps) / BPS;
-        if (recoverableUsd < terms.minPositionUsd) {
-            revert PositionBelowMinimum(recoverableUsd, terms.minPositionUsd);
-        }
-
-        $.loans[tokenId] = Loan({owner: depositor, debtShares: 0, poolKeyId: key.toId(), tier: $.tier});
-        emit CollateralDeposited(tokenId, depositor);
-    }
-
-    /// @dev Borrow capacity and health factor count capped LP fees as collateral.
-    function _borrowValue(
-        uint256 tokenId
-    ) private view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
-        Loan storage loan = $.loans[tokenId];
-        ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
-        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
-        return _collateralValue(valuation, terms);
-    }
-
-    function _collateralValue(
-        IPositionValuer.Valuation memory valuation,
-        ICollateralPolicy.Terms memory terms
-    ) private pure returns (uint256) {
-        uint256 cappedFees = Math.min(valuation.feesUsd, valuation.principalUsd / 10);
-        return (valuation.principalUsd + cappedFees) * (BPS - terms.removeHaircutBps) / BPS;
-    }
-
-    function _checkBorrowPrice(
-        ICollateralPolicy.Tier borrowTier
-    ) private view {
-        uint256 usdgPrice = oracle.price(policy.quote());
-        if (usdgPrice < USDG_MIN_PRICE || usdgPrice > USDG_MAX_PRICE) {
-            revert UsdgPriceOutOfBounds(usdgPrice);
-        }
-        if (borrowTier != ICollateralPolicy.Tier.BLUE_CHIP) return;
-
-        (uint256 pythPrice, uint256 publishTime) = oracle.pythEthUsd();
-        if (publishTime == 0 || publishTime > block.timestamp || block.timestamp - publishTime > MAX_PYTH_PRICE_AGE) {
-            return;
-        }
-        uint256 chainlinkPrice = oracle.price(Currency.wrap(RobinhoodChain.NATIVE));
-        uint256 difference = chainlinkPrice > pythPrice ? chainlinkPrice - pythPrice : pythPrice - chainlinkPrice;
-        if (Math.mulDiv(difference, BPS, chainlinkPrice) > MAX_PYTH_DEVIATION_BPS) {
-            revert PythPriceDeviation(chainlinkPrice, pythPrice);
-        }
-    }
-
-    /// @dev Converts USDG-denominated debt to USD 1e18 using the configured oracle price.
-    function _debtUsd(
-        uint256 debt
-    ) private view returns (uint256) {
-        Currency assetCurrency = Currency.wrap(asset());
-        return DebtMath.debtUsd(debt, oracle.price(assetCurrency), oracle.decimals(assetCurrency));
-    }
-
-    /// @dev Floors a USD value to the amount of USDG that can be borrowed without exceeding it.
-    function _usdToDebt(
-        uint256 usdValue
-    ) private view returns (uint256) {
-        Currency assetCurrency = Currency.wrap(asset());
-        return DebtMath.usdToDebt(usdValue, oracle.price(assetCurrency), oracle.decimals(assetCurrency));
-    }
-
     function _poolDebt(
         PoolId poolId
     ) private view returns (uint256) {
-        MarketStorage storage $ = _marketStorage();
+        MarketLedger.Layout storage $ = _marketStorage();
         return DebtMath.debtOf($.poolDebtShares[poolId], $.borrowIndex);
-    }
-
-    /// @dev One leg of a mint, by its place in the pool: 0 is currency0, 1 is currency1.
-    function _leg(
-        MintParams calldata p,
-        uint256 i
-    ) private pure returns (Currency currency, uint128 amountMax) {
-        if (i == 0) return (p.poolKey.currency0, p.amount0Max);
-        return (p.poolKey.currency1, p.amount1Max);
-    }
-
-    /// @dev Checks the permit names exactly the pool's ERC-20 currencies, in pool order, and
-    ///      asks Permit2 for each leg's maximum. The check is not optional: Permit2 moves
-    ///      whichever token the signed permit names, not the one the market expects. Without
-    ///      it a permit for some other token would be spent while the mint still settled in the
-    ///      pool's currency — out of what the market already holds, which for USDG is lenders'
-    ///      money.
-    function _transfersFor(
-        MintParams calldata p,
-        ISignatureTransfer.PermitBatchTransferFrom calldata permit,
-        uint256 firstLeg
-    ) private view returns (ISignatureTransfer.SignatureTransferDetails[] memory transfers) {
-        uint256 count = 2 - firstLeg;
-        if (permit.permitted.length != count) revert PermitDoesNotMatchPool();
-
-        transfers = new ISignatureTransfer.SignatureTransferDetails[](count);
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency, uint128 amountMax) = _leg(p, i);
-            if (permit.permitted[i - firstLeg].token != Currency.unwrap(currency)) revert PermitDoesNotMatchPool();
-            transfers[i - firstLeg] =
-                ISignatureTransfer.SignatureTransferDetails({to: address(this), requestedAmount: amountMax});
-        }
-    }
-
-    /// @dev The two approvals `SETTLE_PAIR` needs, granted once per token and left standing as
-    ///      §4.1 specifies: the token approves Permit2 for the maximum, then Permit2 approves
-    ///      PositionManager for the maximum with the longest expiry — the pattern proven in
-    ///      `test/base/PositionMinter.sol`. PositionManager pays a locker's debt with
-    ///      `permit2.transferFrom`, so skipping either layer fails inside the settle with nothing
-    ///      to say which.
-    ///
-    ///      A standing allowance is safe on a contract that also holds lenders' USDG because of
-    ///      who can draw on it. PositionManager charges only the locker — whoever called
-    ///      `modifyLiquidities` — so nothing but this market's own calls can use it, and a mint
-    ///      settles at most its maxima, which the caller has already paid in. `_returnChange`
-    ///      reverts should a settle ever reach further than that.
-    ///
-    ///      The outer layer is renewed only once it falls below what this leg could spend, not
-    ///      whenever it is short of the maximum. Some tokens draw even an unlimited allowance down
-    ///      on every `transferFrom` — this chain's USDG does, checked at the pinned block — and
-    ///      checking for the exact maximum would re-approve on every mint.
-    function _allowPositionManager(
-        IPermit2 permit2,
-        Currency currency,
-        uint256 amount
-    ) private {
-        IERC20 token = IERC20(Currency.unwrap(currency));
-        if (token.allowance(address(this), address(permit2)) < amount) {
-            token.forceApprove(address(permit2), type(uint256).max);
-        }
-
-        (uint160 allowed, uint48 expiration,) =
-            permit2.allowance(address(this), address(token), address(positionManager));
-        if (allowed != type(uint160).max || expiration != type(uint48).max) {
-            permit2.approve(address(token), address(positionManager), type(uint160).max, type(uint48).max);
-        }
-    }
-
-    /// @dev `[MINT_POSITION, SETTLE_PAIR, SWEEP, SWEEP]`, minted to this market (§4.1).
-    ///      `SETTLE_PAIR` pays as the locker, which is this contract: ERC-20 legs through the
-    ///      Permit2 allowance, ETH out of the `msg.value` sent along with the call. Each `SWEEP`
-    ///      sends PositionManager's balance of one currency to the caller, which is how unspent
-    ///      ETH comes back. An ERC-20 leg never passes through PositionManager, so its sweep
-    ///      finds none of the caller's tokens, and its change is returned by `_returnChange`.
-    function _mintActions(
-        MintParams calldata p
-    ) private view returns (bytes memory) {
-        bytes memory actions = abi.encodePacked(
-            uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP), uint8(Actions.SWEEP)
-        );
-
-        bytes[] memory params = new bytes[](4);
-        params[0] = abi.encode(
-            p.poolKey, p.tickLower, p.tickUpper, p.liquidity, p.amount0Max, p.amount1Max, address(this), p.hookData
-        );
-        params[1] = abi.encode(p.poolKey.currency0, p.poolKey.currency1);
-        params[2] = abi.encode(p.poolKey.currency0, msg.sender);
-        params[3] = abi.encode(p.poolKey.currency1, msg.sender);
-
-        return abi.encode(actions, params);
-    }
-
-    /// @dev Sends back what the mint did not spend of an ERC-20 leg: whatever the market holds
-    ///      above `held`, its balance from before the caller paid in.
-    ///
-    ///      The subtraction is checked on purpose. Ending below `held` would mean the settle was
-    ///      paid partly out of what the market already had — lenders' USDG — so the whole mint
-    ///      reverts instead.
-    ///
-    ///      A balance difference counts everything that reached the market during the mint, not
-    ///      only the caller's change. An inflow that hands its sender something back would be
-    ///      paid out as change while the sender kept the proceeds. The one such inflow is a vault
-    ///      deposit made from inside a pool hook, which is why `_deposit` refuses re-entry.
-    function _returnChange(
-        Currency currency,
-        uint256 held
-    ) private {
-        IERC20 token = IERC20(Currency.unwrap(currency));
-        uint256 change = token.balanceOf(address(this)) - held;
-        if (change != 0) token.safeTransfer(msg.sender, change);
     }
 
     /// @inheritdoc UUPSUpgradeable
@@ -1046,9 +644,31 @@ contract FarmentaMarket is
         return DECIMALS_OFFSET;
     }
 
-    function _marketStorage() private pure returns (MarketStorage storage $) {
-        assembly {
-            $.slot := MARKET_STORAGE_LOCATION
-        }
+    function _marketStorage() private pure returns (MarketLedger.Layout storage $) {
+        return MarketLedger.layout();
+    }
+
+    function _debtEnv() private view returns (MarketDebt.Env memory) {
+        return MarketDebt.Env({
+            asset: IERC20(asset()), policy: policy, valuer: valuer, oracle: oracle, interestRateModel: interestRateModel
+        });
+    }
+
+    function _mintEnv() private view returns (MarketMint.Env memory) {
+        return MarketMint.Env({positionManager: positionManager, policy: policy, valuer: valuer, debt: _debtEnv()});
+    }
+
+    function _mintParams(
+        MintParams calldata p
+    ) private pure returns (MarketMint.Params memory) {
+        return MarketMint.Params({
+            poolKey: p.poolKey,
+            tickLower: p.tickLower,
+            tickUpper: p.tickUpper,
+            liquidity: p.liquidity,
+            amount0Max: p.amount0Max,
+            amount1Max: p.amount1Max,
+            hookData: p.hookData
+        });
     }
 }

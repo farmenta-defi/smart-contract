@@ -11,6 +11,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {InterestRateModel} from "../../src/InterestRateModel.sol";
+import {MarketLens} from "../../src/MarketLens.sol";
 import {PositionValuer} from "../../src/PositionValuer.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
@@ -37,6 +38,7 @@ abstract contract MarketForkTest is PositionMinter {
     PositionValuer internal valuer;
     CollateralPolicy internal policy;
     FarmentaMarket internal market;
+    MarketLens internal lens;
     InterestRateModel internal interestRateModel;
     IERC721 internal nft;
 
@@ -63,6 +65,7 @@ abstract contract MarketForkTest is PositionMinter {
 
         interestRateModel = new InterestRateModel();
         market = _deployMarket(ICollateralPolicy.Tier.BLUE_CHIP);
+        lens = new MarketLens(market);
         nft = IERC721(RobinhoodChain.POSITION_MANAGER);
     }
 

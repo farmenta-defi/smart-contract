@@ -5,12 +5,14 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
+import {MarketLens} from "../../src/MarketLens.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 
 /// @notice Restricts invariant fuzzing to valid lender and borrower actions.
 contract MarketHandler is Test {
     FarmentaMarket internal immutable market;
+    MarketLens internal immutable lens;
     IERC20 internal immutable usdg;
     uint256 internal immutable tokenId;
     address internal immutable borrower;
@@ -21,12 +23,14 @@ contract MarketHandler is Test {
 
     constructor(
         FarmentaMarket market_,
+        MarketLens lens_,
         uint256 tokenId_,
         address borrower_,
         address lender_,
         address owner_
     ) {
         market = market_;
+        lens = lens_;
         usdg = IERC20(market_.asset());
         tokenId = tokenId_;
         borrower = borrower_;
@@ -37,12 +41,12 @@ contract MarketHandler is Test {
     function borrow(
         uint256 amount
     ) external {
-        uint256 maximum = market.maxBorrow(tokenId);
+        uint256 maximum = lens.maxBorrow(tokenId);
         if (maximum < 10e6) return;
         amount = bound(amount, 10e6, maximum);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
-        assertGe(market.healthFactor(tokenId), 1e18, "borrow accepted an unhealthy position");
+        assertGe(lens.healthFactor(tokenId), 1e18, "borrow accepted an unhealthy position");
     }
 
     function repay(
@@ -82,12 +86,12 @@ contract MarketHandler is Test {
     function withdrawReserves(
         uint256 amount
     ) external {
-        uint256 maximum = market.withdrawableReserves();
+        uint256 maximum = lens.withdrawableReserves();
         if (maximum == 0) return;
         amount = bound(amount, 1, maximum);
         vm.prank(owner);
         market.withdrawReserves(amount, owner);
-        if (market.reserves() < market.reserveFloor()) sawFloorBreach = true;
+        if (market.reserves() < lens.reserveFloor()) sawFloorBreach = true;
     }
 
     function passTime(
@@ -127,10 +131,10 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
         market.deposit(300e6, lender);
         vm.stopPrank();
 
-        uint256 amount = market.maxBorrow(tokenId) / 2;
+        uint256 amount = lens.maxBorrow(tokenId) / 2;
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
-        handler = new MarketHandler(market, tokenId, borrower, lender, market.owner());
+        handler = new MarketHandler(market, lens, tokenId, borrower, lender, market.owner());
         targetContract(address(handler));
     }
 
@@ -139,7 +143,7 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
     }
 
     function invariant_withdrawableNeverExceedsCash() public view {
-        assertLe(market.withdrawableReserves(), IERC20(market.asset()).balanceOf(address(market)));
+        assertLe(lens.withdrawableReserves(), IERC20(market.asset()).balanceOf(address(market)));
     }
 
     function invariant_withdrawalNeverBreachesTheFloor() public view {
