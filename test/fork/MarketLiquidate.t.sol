@@ -5,6 +5,7 @@ import {Vm} from "forge-std/Vm.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {PoolDonateTest} from "@uniswap/v4-core/src/test/PoolDonateTest.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -12,6 +13,8 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
+import {DebtMath} from "../../src/libraries/DebtMath.sol";
+import {LiquidationMath} from "../../src/libraries/LiquidationMath.sol";
 import {MarketLiquidation} from "../../src/libraries/MarketLiquidation.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
@@ -246,10 +249,10 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
         uint256 debtBefore = market.debtOf(tokenId);
         uint256 repay = debtBefore / 2;
-        uint256 feesUsd = valuer.valueForLiquidation(tokenId).feesUsd;
-        assertGt(feesUsd, repay * 1e12 * 10_500 / 10_000, "the fees must outrun the seizure");
-        uint256 leftoverUsd = feesUsd - repay * 1e12 * 10_500 / 10_000;
-        assertLt(leftoverUsd / 1e12, debtBefore - repay, "and still fit under the remaining debt");
+        IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
+        (uint256 appliedUsdg, uint256 cost, uint256 keptEth) = _expectedLeftover(v, repay, debtBefore);
+        assertGt(keptEth, 0, "the fees must outrun the seizure and leave an ETH leg behind");
+        assertLt(appliedUsdg + cost, debtBefore - repay, "and still fit under the remaining debt");
 
         uint256 borrowerEth = borrower.balance;
         uint256 borrowerUsdg = usdg.balanceOf(borrower);
@@ -260,21 +263,33 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
         assertEq(borrower.balance, borrowerEth, "no ETH reaches a borrower still in debt");
         assertEq(usdg.balanceOf(borrower), borrowerUsdg, "and no USDG either");
+        assertEq(repaid, repay + appliedUsdg + cost, "the debt fell by repay, the USDG fees, and the purchase");
         // Within a unit: shares are retired rounded down, the same rule `repay` follows.
         assertApproxEqAbs(market.debtOf(tokenId), debtBefore - repaid, 1, "the ledger records what was repaid");
-        assertApproxEqRel(
-            repaid - repay, leftoverUsd / 1e12, 0.01e18, "past the close factor, the debt falls by the leftover fees"
-        );
 
-        // Everything paid beyond repay and its protocol fee bought ETH, at value.
-        uint256 purchase = walletBefore + out1 - usdg.balanceOf(liquidator) - repay - repay * 50 / 10_000;
-        assertGt(purchase, 0, "the ETH leg was bought, not handed over");
-        assertApproxEqRel(
-            _usdValue(out0, out1),
-            (repay * 10_500 / 10_000 + purchase) * 1e12,
-            0.01e18,
-            "the liquidator got the seizure plus exactly what they paid for"
-        );
+        uint256 paid = walletBefore + out1 - usdg.balanceOf(liquidator);
+        assertEq(paid, repay + repay * 50 / 10_000 + cost, "the liquidator paid repay, its fee, and the leg's value");
+        assertEq(out0, v.fees0, "and took the whole ETH fee leg: the seizure's share plus what it bought");
+        assertEq(out1, v.fees1 - appliedUsdg, "while the USDG beyond its share stayed to repay the debt");
+    }
+
+    /// @notice The edge of `FeePurchaseUnderfunded`, from both sides: a `repayAmount` covering
+    ///         the close factor and the purchase exactly goes through, and one unit less is refused
+    ///         with precisely what was required and what was there.
+    function test_theFeePurchaseMustBeFundedToTheUnit() public {
+        _openWithDonatedFees(_ethWorth(250e18), 0);
+        uint256 debt = market.debtOf(tokenId);
+        uint256 repay = debt / 2;
+        (, uint256 cost,) = _expectedLeftover(valuer.valueForLiquidation(tokenId), repay, debt);
+        assertGt(cost, 0, "this test needs a purchase");
+
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(MarketLiquidation.FeePurchaseUnderfunded.selector, cost, cost - 1));
+        market.liquidate(tokenId, repay + cost - 1, 0, 0, liquidator);
+
+        vm.prank(liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, repay + cost, 0, 0, liquidator);
+        assertGt(repaid, repay + cost - 1, "the exact budget buys the leg");
     }
 
     /// @notice While debt remains, every dollar of fees that leaves the position takes a dollar of
@@ -292,8 +307,10 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
         uint256 valueLost = valueBefore - _realizableUsd();
         uint256 bonusUsd = (debtBefore / 2) * 1e12 * 500 / 10_000;
-        assertApproxEqRel(
-            repaid * 1e12 + bonusUsd, valueLost, 0.005e18, "the debt fell by all the position lost, bar the bonus"
+        // Within a few millionths of a dollar: each leg is priced and rounded on its own, the
+        // purchase price up and the fee split up, one USDG unit (1e12) apiece at most.
+        assertApproxEqAbs(
+            repaid * 1e12 + bonusUsd, valueLost, 5e12, "the debt fell by all the position lost, bar the bonus"
         );
         assertApproxEqAbs(market.debtOf(tokenId), debtBefore - repaid, 1, "and the ledger agrees, within a unit");
     }
@@ -664,6 +681,28 @@ contract MarketLiquidateForkTest is MarketForkTest {
         donor.donate{value: ethDonation}(key, ethDonation, usdgDonation, "");
 
         _ageUntilHealthFactorBelow(1e18);
+    }
+
+    /// @dev What §8 step 5 does to this position's leftover fees, worked out from the valuation
+    ///      alone with the library's own functions — not read back from a liquidation. Assumes
+    ///      the fees outrun the seizure, so the slice pulls no liquidity and what arrives is
+    ///      exactly the fee balance.
+    function _expectedLeftover(
+        IPositionValuer.Valuation memory v,
+        uint256 repay,
+        uint256 debt
+    ) private view returns (uint256 appliedUsdg, uint256 cost, uint256 keptEth) {
+        uint256 seizeUsd = DebtMath.debtUsd(repay, ONE_USD, RobinhoodChain.USDG_DECIMALS) * 10_500 / 10_000;
+        keptEth = LiquidationMath.retainedFee(v.fees0, v.fees0, v.feesUsd, seizeUsd);
+        appliedUsdg = Math.min(LiquidationMath.retainedFee(v.fees1, v.fees1, v.feesUsd, seizeUsd), debt - repay);
+        (, cost) = LiquidationMath.purchase(
+            keptEth,
+            oracle.priceForLiquidation(Currency.wrap(RobinhoodChain.NATIVE)),
+            18,
+            ONE_USD,
+            RobinhoodChain.USDG_DECIMALS,
+            debt - repay - appliedUsdg
+        );
     }
 
     function _ethWorth(
