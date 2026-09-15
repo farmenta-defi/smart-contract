@@ -121,6 +121,8 @@ library MarketMint {
         IPositionValuer.Valuation memory valuation = env.valuer.value(tokenId);
         if (valuation.liquidity == 0) revert PositionIsEmpty(tokenId);
 
+        // Apply the §6.3 removal haircut before checking the minimum: an
+        // immediately withdrawable position cannot satisfy the floor only before its haircut.
         uint256 recoverableUsd = valuation.principalUsd * (BPS - terms.removeHaircutBps) / BPS;
         if (recoverableUsd < terms.minPositionUsd) {
             revert PositionBelowMinimum(recoverableUsd, terms.minPositionUsd);
