@@ -82,6 +82,34 @@ contract MarketLiquidateForkTest is MarketForkTest {
         market.liquidate(Fixtures.POS_WETH_USDG_WIDE_IN_RANGE, 1e6, 0, 0, liquidator);
     }
 
+    /// @notice A partial seizure that repays nothing is refused: it would still realise the
+    ///         borrower's whole fee balance, for the price of gas.
+    function test_aRepayOfNothingIsRefused() public {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(MarketLiquidation.NothingToRepay.selector, tokenId));
+        market.liquidate(tokenId, 0, 0, 0, liquidator);
+    }
+
+    /// @notice The seized tokens have to go somewhere real: not nowhere, and not back into the
+    ///         market, where they would sit as a balance nobody owns.
+    function test_theSeizureNeedsARealRecipient() public {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(MarketLiquidation.InvalidRecipient.selector, address(0)));
+        market.liquidate(tokenId, type(uint256).max, 0, 0, address(0));
+
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(MarketLiquidation.InvalidRecipient.selector, address(market)));
+        market.liquidate(tokenId, type(uint256).max, 0, 0, address(market));
+    }
+
     /// @dev §4.1 puts `liquidate` in the paused set: it reads oracle prices, and a pause is
     ///      the admission that those cannot be trusted right now.
     function test_pausingStopsLiquidation() public {
