@@ -279,6 +279,38 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(oracle.recordCount(poolId), 0, "no observation for a blue-chip pool");
     }
 
+    /// @notice §5.2 v0.40 on a meme market: Pyth and the ±2% spot gate are blue-chip rules, so neither
+    ///         holds up an indebted claim there.
+    /// @dev Both conditions are live at once, and each alone refuses a blue-chip claim. A health check
+    ///      run at the wrong tier fails here with `PythPriceDeviation` (review of PR #18, mutant A5).
+    function test_anIndebtedMemeClaimIsNotHeldByPythOrSpot() public {
+        FarmentaMarket memeMarket = _openMemeMarket();
+        vm.prank(borrower);
+        memeMarket.borrow(tokenId, 10e6, borrower);
+
+        oracle.setPythPrice(ETH_AT_POOL_SPOT * 104 / 100, block.timestamp);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 95 / 100, 18);
+        assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must be outside the blue-chip spot gate");
+        uint256 fees1 = valuer.value(tokenId).fees1;
+
+        vm.prank(borrower);
+        memeMarket.collectFees(tokenId, recipient);
+
+        assertEq(usdg.balanceOf(recipient), fees1, "the fees reach the recipient");
+    }
+
+    /// @notice §5.2 v0.40 on a meme market: the USDG band applies to every tier.
+    function test_anIndebtedMemeClaimStillRunsTheUsdgBand() public {
+        FarmentaMarket memeMarket = _openMemeMarket();
+        vm.prank(borrower);
+        memeMarket.borrow(tokenId, 10e6, borrower);
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UsdgPriceOutOfBounds.selector, 0.96e18));
+        memeMarket.collectFees(tokenId, recipient);
+    }
+
     /* ------------------------------ outbound calls ---------------------------- */
 
     /// @notice §4.1 v0.26: the borrow asset leaves before any other leg, so a native-ETH recipient
