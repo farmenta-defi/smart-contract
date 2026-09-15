@@ -386,6 +386,12 @@ contract FarmentaMarketTest is Test {
         assertEq(lens.withdrawableReserves(), 900e6, "lens and market disagree on availability");
 
         vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.ReserveWithdrawalExceedsAvailable.selector, 900e6 + 1, 900e6)
+        );
+        market.withdrawReserves(900e6 + 1, address(0x7EA5));
+
+        vm.prank(owner);
         market.withdrawReserves(900e6, address(0x7EA5));
     }
 
@@ -616,7 +622,10 @@ contract FarmentaMarketTest is Test {
         FarmentaMarket target,
         uint16 amount
     ) internal {
-        vm.store(address(target), bytes32(uint256(_marketStorageLocation()) + 8), bytes32(uint256(amount) << 16));
+        bytes32 slot = bytes32(uint256(_marketStorageLocation()) + 8);
+        uint256 packed = uint256(vm.load(address(target), slot));
+        packed = (packed & ~(uint256(type(uint16).max) << 16)) | (uint256(amount) << 16);
+        vm.store(address(target), slot, bytes32(packed));
     }
 
     function _deployImplementation() internal returns (FarmentaMarket) {
