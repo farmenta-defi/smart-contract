@@ -35,8 +35,8 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 /// @dev **The lending side is whole as of §8.** Collateral goes in and comes back out, the
 ///      index-based ledger of §7 accrues against it, and an underwater position can now be
 ///      liquidated — which is what makes a lent dollar a dollar with a way home. A depositor
-///      can also claim a held position's fees (`collectFees`, FAR-7). What §4.1 still owes:
-///      `decreaseLiquidity` and `increaseLiquidity` (FAR-8, FAR-9).
+///      can also claim a held position's fees (`collectFees`, FAR-7) and add liquidity to it
+///      (`increaseLiquidity`, FAR-9). What §4.1 still owes: `decreaseLiquidity` (FAR-8).
 ///
 ///      **Logic lives in linked libraries; this contract keeps the wrappers** (§4.1 v0.33).
 ///      Borrow and repay run from `MarketDebt`, collateral intake from `MarketMint`, §8's seizure
@@ -49,8 +49,9 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///      **ETH arrives and leaves through liquidation, and stray ETH has a way out.** A
 ///      native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather than
 ///      ahead of it. Nothing legitimate stays: liquidation forwards both legs in the same call,
-///      `mintAndDeposit`'s change leaves through `SWEEP` straight from PositionManager, and a
-///      fee claim's ETH goes from PoolManager to its recipient without touching the market. So
+///      the change of `mintAndDeposit` and `increaseLiquidity` leaves through `SWEEP` straight
+///      from PositionManager, and a fee claim's ETH goes from PoolManager to its recipient
+///      without touching the market. So
 ///      ETH found here between transactions belongs to no one the market can name, and
 ///      `rescueUnaccountedEth` sweeps it — spec open item §15 no. 12, decided with §8 as that
 ///      item asked. Nor can a borrower use ETH to block its own liquidation: its share goes
@@ -131,6 +132,11 @@ contract FarmentaMarket is
 
     /// @notice ETH that belonged to no payout was swept out by the owner (§15 no. 12).
     event UnaccountedEthRescued(uint256 amount, address indexed to);
+    /// @notice Liquidity was added to (positive) or removed from (negative) a position (§4.1).
+    /// @dev `poolId` is the loan's `poolKeyId`, indexed so an indexer groups by pool without an
+    ///      `eth_call` (§4.1 v0.30, FAR-42). It follows the fields §4.1 lists, as R6 of the
+    ///      market-id brainstorm places it and `CollectFees` does: topics `tokenId`, `poolId`.
+    event LiquidityChanged(uint256 indexed tokenId, PoolId indexed poolId, int256 liqDelta);
     event Borrow(uint256 indexed tokenId, uint256 amount);
     event Repay(uint256 indexed tokenId, uint256 amount);
 
@@ -356,6 +362,57 @@ contract FarmentaMarket is
     ) external payable whenNotPaused nonReentrant returns (uint256 tokenId) {
         _recordMemePool(p.poolKey);
         return MarketMint.mintAndDeposit(_mintEnv(), _mintParams(p), permit, signature);
+    }
+
+    /// @notice Adds liquidity to a position held as the caller's collateral (§4.1).
+    /// @param tokenId The position. Only the address it is recorded to may add to it.
+    /// @param liquidity Liquidity to add.
+    /// @param amount0Max The most currency0 the addition may cost. For a native-ETH pool this is
+    ///        also exactly the `msg.value` to send.
+    /// @param amount1Max The most currency1 the addition may cost.
+    /// @param permit A Permit2 batch transfer naming this market as spender, listing the pool's
+    ///        ERC-20 currencies in pool order, each for at least its maximum.
+    /// @param signature The caller's signature over `permit`.
+    /// @dev **No health-factor gate** (§4.1). The caller pays in and takes nothing out, so no value
+    ///      can leave the position this way. Fees the addition realises are spent on it rather
+    ///      than paid out, which is why a leg whose uncollected fees exceed its cost reverts
+    ///      (`DeltaNotNegative`) instead of handing the surplus over past `collectFees`' health
+    ///      check. That spending is also the one way the health factor can dip, and only at second
+    ///      order: the fees leave the valuation, and when the pool price is off the oracle the
+    ///      liquidity they bought, valued at the oracle (§5.1), is worth slightly less than they
+    ///      were. What moves is the caller's own money, and it never reaches anyone else.
+    ///
+    ///      **The pool must still pass §6.1**, checked before any token moves: it may have been
+    ///      frozen, or lost a token or its hook allowlisting, since the position was deposited
+    ///      (§6.5), and new capital must not go where the policy itself refuses it.
+    ///
+    ///      On a meme market the addition records the pool's TWAP observation first, as every
+    ///      market transaction touching a meme pool does (§5.3).
+    ///
+    ///      **The tokens never touch this market, departing from §4.1's `SETTLE_PAIR`.** Permit2
+    ///      delivers the caller's maxima straight to PositionManager, which settles out of its
+    ///      own balance and sweeps the rest back to the caller. Pulled here instead, they would
+    ///      sit in `totalAssets` while the pool's hook runs, and a hook holding vault shares
+    ///      could redeem at that inflated price and have the difference paid out of the
+    ///      caller's change (§4.1 v0.26). Nothing is approved and no change is measured here, so
+    ///      lenders' cash is out of reach by construction rather than by a balance check.
+    function increaseLiquidity(
+        uint256 tokenId,
+        uint128 liquidity,
+        uint128 amount0Max,
+        uint128 amount1Max,
+        ISignatureTransfer.PermitBatchTransferFrom calldata permit,
+        bytes calldata signature
+    ) external payable whenNotPaused nonReentrant {
+        _recordMemePosition(tokenId);
+        MarketMint.increaseLiquidity(
+            _mintEnv(),
+            MarketMint.IncreaseParams({
+                tokenId: tokenId, liquidity: liquidity, amount0Max: amount0Max, amount1Max: amount1Max
+            }),
+            permit,
+            signature
+        );
     }
 
     /// @notice Accepts a position pushed here directly with `safeTransferFrom`.
@@ -698,10 +755,10 @@ contract FarmentaMarket is
     /// @dev Sweeps the whole balance, which is sound only because no ETH here is owed to anyone
     ///      between transactions. Every path that takes delivery of ETH pays all of it out
     ///      before its own call returns: liquidation forwards the liquidator's and the
-    ///      borrower's legs, and `mintAndDeposit` returns change through `SWEEP` straight from
-    ///      PositionManager. `collectFees` never takes delivery at all: each `TAKE` pays its
-    ///      recipient, and `address(1)`, which would route the ETH here, is refused. What is left
-    ///      was sent by mistake or by force, and taking it takes
+    ///      borrower's legs, and `mintAndDeposit` and `increaseLiquidity` return change through
+    ///      `SWEEP` straight from PositionManager. `collectFees` never takes delivery at all: each
+    ///      `TAKE` pays its recipient, and `address(1)`, which would route the ETH here, is refused.
+    ///      What is left was sent by mistake or by force, and taking it takes
     ///      nothing a lender or a borrower is owed.
     ///
     ///      `nonReentrant` keeps it out of the one place that premise does not hold: inside a
