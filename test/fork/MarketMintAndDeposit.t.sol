@@ -14,9 +14,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PositionInfo} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
 import {SlippageCheck} from "@uniswap/v4-periphery/src/libraries/SlippageCheck.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
-import {IEIP712} from "permit2/src/interfaces/IEIP712.sol";
 import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol";
-import {PermitHash} from "permit2/src/libraries/PermitHash.sol";
 import {SignatureVerification} from "permit2/src/libraries/SignatureVerification.sol";
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
@@ -25,20 +23,15 @@ import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
-import {MarketForkTest} from "../base/MarketForkTest.sol";
+import {Permit2Signer} from "../base/Permit2Signer.sol";
 
 /// @notice Mints positions straight into the market, through the deployed PositionManager
 ///         and Permit2.
 /// @dev What this path gets wrong, it gets wrong quietly: a tokenId read one call too late,
 ///      an approval layer left out, change stranded in the market. None of that shows against
 ///      a mock, so every test here runs through the real contracts at the pinned block.
-contract MarketMintAndDepositForkTest is MarketForkTest {
+contract MarketMintAndDepositForkTest is Permit2Signer {
     uint256 internal constant BORROWER_PK = 0xB0B5EED;
-
-    /// @dev Permit2's free errors, spelled out because `PermitErrors.sol` pins `pragma 0.8.17`
-    ///      exactly and cannot be imported into a 0.8.26 build.
-    bytes4 internal constant SIGNATURE_EXPIRED = bytes4(keccak256("SignatureExpired(uint256)"));
-    bytes4 internal constant INVALID_NONCE = bytes4(keccak256("InvalidNonce()"));
 
     /// @dev What the borrower brings, and what each leg's maximum is set to by default.
     uint256 internal constant WETH_BUDGET = 10 ether;
@@ -580,40 +573,6 @@ contract MarketMintAndDepositForkTest is MarketForkTest {
         }
         permit.nonce = nonce;
         permit.deadline = deadline;
-    }
-
-    function _permission(
-        address token,
-        uint256 amount
-    ) internal pure returns (ISignatureTransfer.TokenPermissions memory) {
-        return ISignatureTransfer.TokenPermissions({token: token, amount: amount});
-    }
-
-    /// @dev The typehashes come from Permit2's own library and the domain is read live, so
-    ///      neither can drift from the contract that checks them. The spender is the market:
-    ///      Permit2 hashes in `msg.sender`, so a permit is spendable only by the contract named.
-    function _sign(
-        uint256 privateKey,
-        ISignatureTransfer.PermitBatchTransferFrom memory permit
-    ) internal view returns (bytes memory) {
-        bytes32[] memory permissions = new bytes32[](permit.permitted.length);
-        for (uint256 i; i < permissions.length; ++i) {
-            permissions[i] = keccak256(abi.encode(PermitHash._TOKEN_PERMISSIONS_TYPEHASH, permit.permitted[i]));
-        }
-        bytes32 structHash = keccak256(
-            abi.encode(
-                PermitHash._PERMIT_BATCH_TRANSFER_FROM_TYPEHASH,
-                keccak256(abi.encodePacked(permissions)),
-                address(market),
-                permit.nonce,
-                permit.deadline
-            )
-        );
-        bytes32 digest =
-            keccak256(abi.encodePacked(hex"1901", IEIP712(RobinhoodChain.PERMIT2).DOMAIN_SEPARATOR(), structHash));
-
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
-        return abi.encodePacked(r, s, v);
     }
 
     function _balances() internal view returns (Balances memory b) {
