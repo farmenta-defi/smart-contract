@@ -9,6 +9,7 @@ import {FarmentaMarket} from "./FarmentaMarket.sol";
 import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
 import {IPositionValuer} from "./interfaces/IPositionValuer.sol";
 import {DebtMath} from "./libraries/DebtMath.sol";
+import {MarketLedger} from "./libraries/MarketLedger.sol";
 
 /// @title MarketLens
 /// @notice Read-only risk and reserve views for one FarmentaMarket proxy.
@@ -28,7 +29,7 @@ contract MarketLens {
     function positionValue(
         uint256 tokenId
     ) public view returns (uint256) {
-        FarmentaMarket.Loan memory loan = market.loanOf(tokenId);
+        MarketLedger.Loan memory loan = market.loanOf(tokenId);
         if (loan.owner == address(0)) return 0;
 
         ICollateralPolicy.Terms memory terms = market.policy().termsOf(loan.poolKeyId);
@@ -41,7 +42,7 @@ contract MarketLens {
     function maxBorrow(
         uint256 tokenId
     ) external view returns (uint256) {
-        FarmentaMarket.Loan memory loan = market.loanOf(tokenId);
+        MarketLedger.Loan memory loan = market.loanOf(tokenId);
         if (loan.owner == address(0)) return 0;
 
         uint256 maximumDebtUsd = positionValue(tokenId) * market.policy().termsOf(loan.poolKeyId).maxLtvBps / BPS;
@@ -57,7 +58,7 @@ contract MarketLens {
         uint256 debt = market.debtOf(tokenId);
         if (debt == 0) return type(uint256).max;
 
-        FarmentaMarket.Loan memory loan = market.loanOf(tokenId);
+        MarketLedger.Loan memory loan = market.loanOf(tokenId);
         uint256 debtUsd = _debtUsd(debt);
         return DebtMath.healthFactor(positionValue(tokenId), market.policy().termsOf(loan.poolKeyId).ltBps, debtUsd);
     }

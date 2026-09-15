@@ -12,6 +12,7 @@ import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
+import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
@@ -59,7 +60,7 @@ contract MarketCustodyForkTest is MarketForkTest {
         vm.stopPrank();
 
         assertEq(nft.ownerOf(tokenId), address(market), "market does not own the position");
-        FarmentaMarket.Loan memory loan = market.loanOf(tokenId);
+        MarketLedger.Loan memory loan = market.loanOf(tokenId);
         assertEq(loan.owner, holder, "depositor not recorded");
         assertEq(loan.debtShares, 0, "a fresh deposit owes nothing");
     }

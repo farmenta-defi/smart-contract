@@ -23,6 +23,7 @@ import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IInterestRateModel} from "../../src/interfaces/IInterestRateModel.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
+import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @notice Unit tests for the market's proxy setup, ownership and storage layout. No network.
@@ -499,7 +500,7 @@ contract FarmentaMarketTest is Test {
     }
 
     function test_unknownPositionHasNoLoan() public view {
-        FarmentaMarket.Loan memory loan = market.loanOf(12_345);
+        MarketLedger.Loan memory loan = market.loanOf(12_345);
         assertEq(loan.owner, address(0), "phantom loan owner");
         assertEq(loan.debtShares, 0, "phantom debt");
     }
