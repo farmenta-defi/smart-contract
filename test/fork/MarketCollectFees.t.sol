@@ -7,10 +7,13 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
+import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
+import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
+import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 import {RedeemingRecipient} from "../mocks/RedeemingRecipient.sol";
@@ -250,6 +253,32 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(usdg.balanceOf(recipient), fees1, "the fees reach the recipient");
     }
 
+    /* --------------------------------- meme market ---------------------------- */
+
+    /// @notice §5.3: every market transaction touching a meme pool records an observation first, and a
+    ///         claim is one of them.
+    function test_aMemeClaimRecordsAnObservationFirst() public {
+        FarmentaMarket memeMarket = _openMemeMarket();
+        PoolId poolId = _keyOf(tokenId).toId();
+        uint256 records = oracle.recordCount(poolId);
+
+        vm.prank(borrower);
+        memeMarket.collectFees(tokenId, recipient);
+
+        assertEq(oracle.recordCount(poolId), records + 1, "the claim recorded the pool once");
+    }
+
+    /// @notice A blue-chip claim has no TWAP to feed, and pays nothing for one.
+    function test_aBlueChipClaimRecordsNothing() public {
+        _deposit(tokenId);
+        PoolId poolId = _keyOf(tokenId).toId();
+
+        vm.prank(borrower);
+        market.collectFees(tokenId, recipient);
+
+        assertEq(oracle.recordCount(poolId), 0, "no observation for a blue-chip pool");
+    }
+
     /* ------------------------------ outbound calls ---------------------------- */
 
     /// @notice §4.1 v0.26: the borrow asset leaves before any other leg, so a native-ETH recipient
@@ -393,6 +422,40 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         uint256 id
     ) private pure returns (bytes32) {
         return bytes32(uint256(keccak256(abi.encode(id, uint256(MarketLedger.LOCATION) + 1))) + 1);
+    }
+
+    /// @dev The fixture listed and deposited on a meme market, with a lender behind it. Native ETH is
+    ///      re-tiered as meme first, which makes the pool meme (§6.1 takes the higher tier).
+    function _openMemeMarket() private returns (FarmentaMarket memeMarket) {
+        vm.prank(owner);
+        policy.setTokenConfig(Currency.wrap(RobinhoodChain.NATIVE), true, ICollateralPolicy.Tier.MEME, 18, address(1));
+        memeMarket = _deployMarket(ICollateralPolicy.Tier.MEME);
+
+        PoolKey memory key = _keyOf(tokenId);
+        TierPresets.Preset memory preset = TierPresets.meme();
+        vm.prank(owner);
+        policy.list(
+            key,
+            CollateralPolicy.ListingParams({
+                maxLtvBps: preset.maxLtvBps,
+                ltBps: preset.ltBps,
+                liquidatorBonusBps: preset.minLiquidatorBonusBps,
+                removeHaircutBps: 0,
+                debtCapUsdg: preset.maxDebtCapUsdg,
+                minPositionUsd: 50e18
+            })
+        );
+
+        vm.startPrank(borrower);
+        nft.approve(address(memeMarket), tokenId);
+        memeMarket.depositCollateral(tokenId);
+        vm.stopPrank();
+
+        deal(address(usdg), lender, 300e6);
+        vm.startPrank(lender);
+        usdg.approve(address(memeMarket), type(uint256).max);
+        memeMarket.deposit(300e6, lender);
+        vm.stopPrank();
     }
 
     function _ageUntilHealthFactorBelow(
