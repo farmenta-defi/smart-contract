@@ -76,17 +76,11 @@ library MarketDebt {
         if (!env.policy.acceptsNewPositions(loan.poolKeyId)) revert PoolNotOpenForBorrowing(loan.poolKeyId);
 
         {
-            ICollateralPolicy.Terms memory terms = env.policy.termsOf(loan.poolKeyId);
-            _checkBorrowPrice(env, $.tier);
-            IPositionValuer.Valuation memory valuation = env.valuer.value(tokenId);
-            if ($.tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > MAX_SPOT_DEVIATION_BPS) {
-                revert SpotPriceDeviation(valuation.spotDeviationBps, MAX_SPOT_DEVIATION_BPS);
-            }
+            (ICollateralPolicy.Terms memory terms, uint256 collateralUsd) =
+                _gatedCollateralValue(env, $.tier, loan.poolKeyId, tokenId);
             uint256 requestedDebt = DebtMath.debtOf(loan.debtShares, $.borrowIndex) + amount;
             uint256 requestedDebtUsd = _debtUsd(env.asset, env.oracle, requestedDebt);
-            uint256 maximumDebtUsd = DebtMath.collateralValue(
-                    valuation.principalUsd, valuation.feesUsd, terms.removeHaircutBps
-                ) * terms.maxLtvBps / BPS;
+            uint256 maximumDebtUsd = collateralUsd * terms.maxLtvBps / BPS;
             if (requestedDebtUsd > maximumDebtUsd) revert BorrowExceedsMaxLtv(requestedDebtUsd, maximumDebtUsd);
             if (requestedDebt < 10e6) revert BorrowBelowMinimum(requestedDebt);
 
@@ -152,6 +146,25 @@ library MarketDebt {
         $.totalBorrows = newTotalBorrows;
         $.reserves += interest * $.reserveFactorBps / BPS;
         emit ReservesUpdated($.reserves);
+    }
+
+    /// @dev A position's §6.2 collateral value, read only once §5.2's borrow price gates pass: USDG
+    ///      inside [0,97; 1,03], a fresh Pyth quote within 3% of Chainlink, and a blue-chip pool
+    ///      within 2% of the oracle. One function, so every action that sizes risk off this value
+    ///      refuses at the same prices.
+    function _gatedCollateralValue(
+        Env calldata env,
+        ICollateralPolicy.Tier tier,
+        PoolId poolId,
+        uint256 tokenId
+    ) private view returns (ICollateralPolicy.Terms memory terms, uint256 collateralUsd) {
+        terms = env.policy.termsOf(poolId);
+        _checkBorrowPrice(env, tier);
+        IPositionValuer.Valuation memory valuation = env.valuer.value(tokenId);
+        if (tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > MAX_SPOT_DEVIATION_BPS) {
+            revert SpotPriceDeviation(valuation.spotDeviationBps, MAX_SPOT_DEVIATION_BPS);
+        }
+        collateralUsd = DebtMath.collateralValue(valuation.principalUsd, valuation.feesUsd, terms.removeHaircutBps);
     }
 
     function _checkBorrowPrice(
