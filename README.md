@@ -98,7 +98,7 @@ src/
   constants/RobinhoodChain.sol   deployed addresses (spec §18)
   interfaces/                    ICollateralPolicy, IPositionValuer, IPriceOracle, IAggregatorV3
   libraries/                     PositionAmounts, PriceMath, HookPermissions, TierPresets,
-                                 MarketLedger, MarketDebt, MarketMint, MarketLiquidation,
+                                 MarketLedger, MarketDebt, MarketMint, MarketLiquidation, MarketLiquidity,
                                  LiquidationMath, DebtMath
 test/
   base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
@@ -114,9 +114,10 @@ script/
   InspectPositions.s.sol         prints everything the valuer reads, for one position
 ```
 
-`MarketDebt`, `MarketMint` and `MarketLiquidation` are linked delegatecall libraries. Deploy
-and link them in order: `MarketDebt`, then `MarketMint` linked to `MarketDebt`, then
-`MarketLiquidation` (§8 seizure), then the market implementation linked to all three. They
+`MarketDebt`, `MarketMint`, `MarketLiquidation` and `MarketLiquidity` are linked delegatecall
+libraries. Deploy and link them in order: `MarketDebt`, then `MarketMint` linked to
+`MarketDebt`, then `MarketLiquidation` (§8 seizure), then `MarketLiquidity` (fee claims) linked
+to `MarketDebt`, then the market implementation linked to all four. They
 write only the market's ERC-7201 ledger namespace and preserve the market's caller, events,
 and storage.
 `MarketLens` is a separate read-only contract bound to one proxy, so deploy one lens for
@@ -135,9 +136,12 @@ Custody, lending and liquidation.
   the cash on hand (spec §4.1, §7).
 - **Liquidation.** An underwater position can be liquidated in part or whole, and bad debt is
   taken from reserves before it reaches depositors (spec §8, §9).
+- **Fee claims.** A depositor can claim a held position's fees without taking it out of custody.
+  With debt outstanding, the claim passes the same §5.2 price gates as a borrow and must leave
+  the health factor at or above 1 (spec §4.1, §5.2 v0.40).
 
-Still owed: `collectFees`, `decreaseLiquidity` and `increaseLiquidity` (FAR-7/8/9), and the
-meme price path (FAR-16).
+Still owed: `decreaseLiquidity` and `increaseLiquidity` (FAR-8/9), and the meme price path
+(FAR-16).
 
 Custody is the design rather than a detail. `PositionManager` gates
 `DECREASE_LIQUIDITY` and `BURN_POSITION` behind `onlyIfApproved(msgSender())`, so
