@@ -57,13 +57,9 @@ library MarketMint {
     ) external returns (uint256 tokenId) {
         MarketDebt.accrue(env.debt);
 
-        // ETH can only be currency0 because `address(0)` sorts first. It arrives as
-        // `msg.value`, so a native pool has one ERC-20 leg and an ERC-20 pair has two.
-        uint256 firstLeg = p.poolKey.currency0.isAddressZero() ? 1 : 0;
-        uint256 expectedValue = firstLeg == 1 ? p.amount0Max : 0;
-        if (msg.value != expectedValue) revert NativeValueMismatch(expectedValue, msg.value);
-
-        ISignatureTransfer.SignatureTransferDetails[] memory transfers = _transfersFor(p, permit, firstLeg);
+        uint256 firstLeg = _firstLeg(p.poolKey, p.amount0Max);
+        ISignatureTransfer.SignatureTransferDetails[] memory transfers =
+            _transfersFor(p.poolKey, p.amount0Max, p.amount1Max, permit, firstLeg, address(this));
         // Read Permit2 from PositionManager rather than configuration: the allowance must sit
         // on the instance it uses, so the two addresses cannot drift apart.
         IPermit2 permit2 = IPermit2(address(Permit2Forwarder(address(env.positionManager)).permit2()));
@@ -140,20 +136,37 @@ library MarketMint {
         return (p.poolKey.currency1, p.amount1Max);
     }
 
+    /// @dev ETH can only be currency0 because `address(0)` sorts first. It arrives as
+    ///      `msg.value`, so a native pool has one ERC-20 leg and an ERC-20 pair has two, and the
+    ///      value sent must be the ETH maximum for a native pool and nothing otherwise.
+    function _firstLeg(
+        PoolKey memory key,
+        uint128 amount0Max
+    ) private view returns (uint256 firstLeg) {
+        firstLeg = key.currency0.isAddressZero() ? 1 : 0;
+        uint256 expectedValue = firstLeg == 1 ? amount0Max : 0;
+        if (msg.value != expectedValue) revert NativeValueMismatch(expectedValue, msg.value);
+    }
+
+    /// @dev Each ERC-20 leg of `key`, in pool order, pulled at its maximum and delivered to `to`.
+    ///      The permit must list exactly those currencies in that order.
     function _transfersFor(
-        Params calldata p,
+        PoolKey memory key,
+        uint128 amount0Max,
+        uint128 amount1Max,
         ISignatureTransfer.PermitBatchTransferFrom calldata permit,
-        uint256 firstLeg
-    ) private view returns (ISignatureTransfer.SignatureTransferDetails[] memory transfers) {
+        uint256 firstLeg,
+        address to
+    ) private pure returns (ISignatureTransfer.SignatureTransferDetails[] memory transfers) {
         uint256 count = 2 - firstLeg;
         if (permit.permitted.length != count) revert PermitDoesNotMatchPool();
 
         transfers = new ISignatureTransfer.SignatureTransferDetails[](count);
         for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency, uint128 amountMax) = _leg(p, i);
+            (Currency currency, uint128 amountMax) = (key.currency1, amount1Max);
+            if (i == 0) (currency, amountMax) = (key.currency0, amount0Max);
             if (permit.permitted[i - firstLeg].token != Currency.unwrap(currency)) revert PermitDoesNotMatchPool();
-            transfers[i - firstLeg] =
-                ISignatureTransfer.SignatureTransferDetails({to: address(this), requestedAmount: amountMax});
+            transfers[i - firstLeg] = ISignatureTransfer.SignatureTransferDetails({to: to, requestedAmount: amountMax});
         }
     }
 
