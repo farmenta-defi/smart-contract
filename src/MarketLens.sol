@@ -18,6 +18,8 @@ import {MarketLedger} from "./libraries/MarketLedger.sol";
 contract MarketLens {
     uint256 private constant BPS = 10_000;
 
+    error MarketNotInitialized();
+
     FarmentaMarket public immutable market;
     IERC20 private immutable asset;
     ICollateralPolicy private immutable policy;
@@ -28,7 +30,9 @@ contract MarketLens {
         FarmentaMarket market_
     ) {
         market = market_;
-        asset = IERC20(market_.asset());
+        address asset_ = market_.asset();
+        if (asset_ == address(0)) revert MarketNotInitialized();
+        asset = IERC20(asset_);
         policy = market_.policy();
         valuer = market_.valuer();
         oracle = market_.oracle();

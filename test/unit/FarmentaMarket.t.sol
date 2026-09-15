@@ -122,6 +122,13 @@ contract FarmentaMarketTest is Test {
         new ERC1967Proxy(address(fresh), _initData(ICollateralPolicy.Tier.NONE));
     }
 
+    function test_lensRejectsAnUninitializedMarket() public {
+        FarmentaMarket uninitialized = FarmentaMarket(payable(address(new ERC1967Proxy(address(implementation), ""))));
+
+        vm.expectRevert(MarketLens.MarketNotInitialized.selector);
+        new MarketLens(uninitialized);
+    }
+
     function test_zeroDependencyIsRejected() public {
         vm.expectRevert(FarmentaMarket.ZeroAddress.selector);
         new FarmentaMarket(
