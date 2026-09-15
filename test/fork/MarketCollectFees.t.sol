@@ -176,6 +176,32 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(usdg.balanceOf(recipient), 0, "and nothing reached the recipient");
     }
 
+    /// @notice §6.2 by hand: fees above the cap count as a tenth of principal, the removal haircut
+    ///         comes off the total, and the lens health factor follows from that and nothing else.
+    /// @dev The expected figures are written out here rather than read from `DebtMath`: the market,
+    ///      the lens and the liquidation path all call `DebtMath.collateralValue`, so comparing them with
+    ///      each other cannot catch a change to it (review of PR #18).
+    function test_theLensAppliesTheFeeCapAndTheHaircutByHand() public {
+        _listPoolOf(tokenId, 50e18, 500);
+        vm.startPrank(borrower);
+        nft.approve(address(market), tokenId);
+        market.depositCollateral(tokenId);
+        vm.stopPrank();
+        _donateFees(tokenId, 0, valuer.value(tokenId).principalUsd / 1e12 / 5);
+        _lend(300e6);
+        uint256 amount = lens.maxBorrow(tokenId) / 2;
+        vm.prank(borrower);
+        market.borrow(tokenId, amount, borrower);
+
+        IPositionValuer.Valuation memory v = valuer.value(tokenId);
+        assertGt(v.feesUsd, v.principalUsd / 10, "the fees must sit above the cap");
+        uint256 collateral = (v.principalUsd + v.principalUsd / 10) * 9500 / 10_000;
+        uint256 debtUsd = market.debtOf(tokenId) * 1e18 / 1e6;
+
+        assertEq(lens.positionValue(tokenId), collateral, "principal plus a tenth, less 5%");
+        assertEq(lens.healthFactor(tokenId), collateral * 7500 * 1e18 / (debtUsd * 10_000), "at LT 75%");
+    }
+
     /* --------------------------------- price gates ---------------------------- */
 
     /// @notice §5.2 v0.40: with debt outstanding, a USDG price outside [0,97; 1,03] refuses the claim.
