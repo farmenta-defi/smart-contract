@@ -495,9 +495,12 @@ library MarketLiquidation {
         if (Currency.unwrap(currency) != address(0)) {
             // A token's issuer can stop an address receiving it (USDG has `isFrozen`), and a
             // reverting transfer would take the liquidation down with it. What cannot be
-            // delivered stays in the market: USDG becomes cash that `totalAssets` counts. Any
-            // other leg is a listed token, and §6.3 refuses tokens that can blacklist, so the
-            // case does not arise for it.
+            // delivered stays in the market, and the borrower's claim to it is gone (§8 step 5,
+            // v0.38, option A). USDG becomes cash that `totalAssets` counts, so the excess falls
+            // to the market's depositors. Any other ERC-20 leg is counted by nothing and has no
+            // way out: §4.1 has no ERC-20 rescue. That case is real: §6.3 screens out pausable
+            // and blacklisting tokens, but not per-wallet caps or anti-bot rules, which refuse a
+            // transfer to an ordinary address.
             IERC20(Currency.unwrap(currency)).trySafeTransfer(borrower, toBorrower);
             return;
         }
