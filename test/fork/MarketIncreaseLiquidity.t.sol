@@ -191,6 +191,86 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         }
     }
 
+    /* --------------------------------- native ETH ----------------------------- */
+
+    /// @notice A native-ETH pool spends from `msg.value` and sends the rest back, and the
+    ///         position's uncollected fees go toward the cost.
+    /// @dev The ~$11-of-fees fixture, doubled. ETH is currency0 and never touches Permit2:
+    ///      PositionManager settles it out of the value forwarded and sweeps the rest to the
+    ///      borrower. The fees the addition realises are held by PoolManager already, so what it
+    ///      gains is the cost net of them, and that is what the borrower must be down by.
+    function test_nativePoolSpendsEthAndReturnsTheRest() public {
+        uint256 tokenId = _depositFixture(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        uint256 ethBudget = 1 ether;
+        vm.deal(borrower, ethBudget);
+
+        uint256 borrowerEth = borrower.balance;
+        uint256 marketEth = address(market).balance;
+        uint256 strayEth = RobinhoodChain.POSITION_MANAGER.balance;
+        uint256 poolManagerEth = RobinhoodChain.POOL_MANAGER.balance;
+        Balances memory before = _balances();
+
+        _increase(tokenId, liquidity, ethBudget, USDG_BUDGET, 0);
+
+        uint256 ethSpent = RobinhoodChain.POOL_MANAGER.balance - poolManagerEth;
+        assertGt(ethSpent, 0, "an in-range addition costs ETH");
+        assertLt(ethSpent, ethBudget, "the ETH maximum should leave change");
+        assertEq(borrower.balance, borrowerEth - ethSpent + strayEth, "borrower paid other than the ETH cost");
+        assertEq(RobinhoodChain.POSITION_MANAGER.balance, 0, "ETH was left in PositionManager");
+        assertEq(address(market).balance, marketEth, "ETH reached the market");
+
+        Balances memory afterIncrease = _balances();
+        uint256 usdgSpent = afterIncrease.poolManagerUsdg - before.poolManagerUsdg;
+        assertGt(usdgSpent, 0, "an in-range addition costs USDG");
+        assertEq(
+            before.borrowerUsdg - afterIncrease.borrowerUsdg,
+            usdgSpent - before.positionManagerUsdg,
+            "borrower paid other than the USDG cost"
+        );
+        assertEq(afterIncrease.marketUsdg, before.marketUsdg, "lenders' USDG moved");
+        assertEq(positionManager.getPositionLiquidity(tokenId), 2 * liquidity, "liquidity was not added");
+    }
+
+    /// @notice An ETH leg that would cost more than `amount0Max` reverts, and the ETH comes back.
+    function test_nativeCostAboveTheEthMaximumReverts() public {
+        uint256 tokenId = _depositFixture(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        PoolKey memory ethKey = _keyOf(tokenId);
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        vm.deal(borrower, 1);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) =
+            _signedPermit(ethKey, 1, USDG_BUDGET, 0);
+
+        vm.prank(borrower);
+        vm.expectPartialRevert(SlippageCheck.MaximumAmountExceeded.selector);
+        market.increaseLiquidity{value: 1}(tokenId, liquidity, 1, uint128(USDG_BUDGET), permit, signature);
+
+        assertEq(borrower.balance, 1, "a refused addition kept the borrower's ETH");
+    }
+
+    /// @notice The ETH sent must be exactly the ETH maximum for a native pool, and nothing for an
+    ///         ERC-20 pair.
+    function test_valueMustMatchTheEthLeg() public {
+        uint256 ethId = _depositFixture(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        uint256 wethId = _depositFresh(wethKey);
+        vm.deal(borrower, 2 ether);
+
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) =
+            _signedPermit(_keyOf(ethId), 1 ether, USDG_BUDGET, 0);
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NativeValueMismatch.selector, 1 ether, 1 ether - 1));
+        market.increaseLiquidity{value: 1 ether - 1}(
+            ethId, LIQUIDITY, uint128(1 ether), uint128(USDG_BUDGET), permit, signature
+        );
+
+        (permit, signature) = _signedPermit(wethKey, WETH_BUDGET, USDG_BUDGET, 0);
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NativeValueMismatch.selector, 0, 1));
+        market.increaseLiquidity{value: 1}(
+            wethId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature
+        );
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     /// @dev A refused addition calls Permit2 for nothing, and moves no token.
