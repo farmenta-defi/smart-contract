@@ -134,8 +134,9 @@ contract FarmentaMarket is
     event UnaccountedEthRescued(uint256 amount, address indexed to);
     /// @notice Liquidity was added to (positive) or removed from (negative) a position (§4.1).
     /// @dev `poolId` is the loan's `poolKeyId`, indexed so an indexer groups by pool without an
-    ///      `eth_call` (§4.1 v0.30, FAR-42).
-    event LiquidityChanged(PoolId indexed poolId, uint256 indexed tokenId, int256 liqDelta);
+    ///      `eth_call` (§4.1 v0.30, FAR-42). It follows the fields §4.1 lists, as R6 of the
+    ///      market-id brainstorm places it and `CollectFees` does: topics `tokenId`, `poolId`.
+    event LiquidityChanged(uint256 indexed tokenId, PoolId indexed poolId, int256 liqDelta);
     event Borrow(uint256 indexed tokenId, uint256 amount);
     event Repay(uint256 indexed tokenId, uint256 amount);
 

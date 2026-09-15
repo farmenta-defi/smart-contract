@@ -27,7 +27,7 @@ library MarketMint {
     uint256 private constant BPS = 10_000;
 
     event CollateralDeposited(uint256 indexed tokenId, address indexed owner);
-    event LiquidityChanged(PoolId indexed poolId, uint256 indexed tokenId, int256 liqDelta);
+    event LiquidityChanged(uint256 indexed tokenId, PoolId indexed poolId, int256 liqDelta);
 
     error NotTheDepositor(uint256 tokenId, address depositor);
     error PositionAlreadyHeld(uint256 tokenId);
@@ -122,7 +122,7 @@ library MarketMint {
         permit2.permitTransferFrom(permit, transfers, msg.sender, signature);
         env.positionManager.modifyLiquidities{value: msg.value}(_increaseActions(key, p), permit.deadline);
 
-        emit LiquidityChanged(poolId, p.tokenId, int256(uint256(p.liquidity)));
+        emit LiquidityChanged(p.tokenId, poolId, int256(uint256(p.liquidity)));
     }
 
     /// @dev Only the depositor adds to a position, and only while its pool still passes §6.1.

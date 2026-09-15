@@ -95,7 +95,7 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         // Signed first: reading Permit2's domain is a call, and would otherwise be the one the
         // expectation below is checked against.
         vm.expectEmit(true, true, true, true, address(market));
-        emit FarmentaMarket.LiquidityChanged(wethKey.toId(), tokenId, int256(uint256(LIQUIDITY)));
+        emit FarmentaMarket.LiquidityChanged(tokenId, wethKey.toId(), int256(uint256(LIQUIDITY)));
         vm.prank(borrower);
         market.increaseLiquidity(tokenId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
 
