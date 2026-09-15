@@ -226,6 +226,24 @@ contract MarketCollectFeesForkTest is MarketForkTest {
 
     /* ------------------------------ outbound calls ---------------------------- */
 
+    /// @notice §4.1 v0.26: the borrow asset leaves before any other leg, so a native-ETH recipient
+    ///         already holds its USDG fees when its code first runs.
+    /// @dev `TAKE_PAIR` pays `currency0` first, and in this pool that is the ETH: under it the
+    ///      recipient would see no USDG at all.
+    function test_theUsdgLegLeavesBeforeTheEth() public {
+        _deposit(tokenId);
+        IPositionValuer.Valuation memory v = valuer.value(tokenId);
+        assertGt(v.fees0, 0, "the fixture must hold ETH fees");
+        assertGt(v.fees1, 0, "the fixture must hold USDG fees");
+        RedeemingRecipient receiver = new RedeemingRecipient(market);
+
+        vm.prank(borrower);
+        market.collectFees(tokenId, address(receiver));
+
+        assertEq(receiver.usdgOnEthArrival(), v.fees1, "the USDG fees were already there when the ETH arrived");
+        assertEq(address(receiver).balance, v.fees0, "and the ETH fees arrived in full");
+    }
+
     /// @notice §4.1 v0.26: a vault redeem made from inside the claim's ETH payout is priced exactly
     ///         as one made after the claim.
     /// @dev Thirty days of interest are left unaccrued, so the redeem inside the payout is the first

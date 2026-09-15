@@ -16,6 +16,9 @@ contract RedeemingRecipient {
     /// @notice What the redemption made from inside the payout paid out.
     uint256 public redeemed;
 
+    /// @notice This contract's USDG balance when the ETH arrived, read before anything else runs.
+    uint256 public usdgOnEthArrival;
+
     constructor(
         FarmentaMarket market_
     ) {
@@ -35,6 +38,7 @@ contract RedeemingRecipient {
     }
 
     receive() external payable {
+        usdgOnEthArrival = IERC20(market.asset()).balanceOf(address(this));
         if (!armed) return;
         armed = false;
         redeemed = market.redeem(market.balanceOf(address(this)), address(this), address(this));

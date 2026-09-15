@@ -278,7 +278,7 @@ contract FarmentaMarketTest is Test {
 
     /// @notice The fees need a real recipient: not nowhere, not this market, and not an address
     ///         PositionManager would read as something else.
-    /// @dev `TAKE_PAIR` maps `address(1)` to its caller, which is this market, and `address(2)` to
+    /// @dev `TAKE` maps `address(1)` to its caller, which is this market, and `address(2)` to
     ///      itself. The first would leave the fees here for `rescueUnaccountedEth` to sweep; the
     ///      second would leave them in PositionManager for anyone to take.
     function test_collectFeesRefusesARecipientThatIsNotOne() public {
