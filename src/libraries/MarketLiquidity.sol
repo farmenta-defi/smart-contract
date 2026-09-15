@@ -59,8 +59,8 @@ library MarketLiquidity {
         uint256 tokenId,
         address to
     ) external {
-        if (uint160(to) <= uint160(ActionConstants.ADDRESS_THIS) || to == address(this)) revert InvalidRecipient(to);
         MarketDebt.accrue(env.debt);
+        if (uint160(to) <= uint160(ActionConstants.ADDRESS_THIS) || to == address(this)) revert InvalidRecipient(to);
 
         MarketLedger.Loan storage loan = MarketLedger.layout().loans[tokenId];
         if (loan.owner != msg.sender) revert NotTheDepositor(tokenId, loan.owner);
