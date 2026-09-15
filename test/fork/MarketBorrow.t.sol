@@ -72,11 +72,13 @@ contract MarketBorrowForkTest is MarketForkTest {
     function test_borrowAcceptsInclusiveUsdgBounds() public {
         (uint256 tokenId, address holder) = _prepareLoan();
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.97e18, RobinhoodChain.USDG_DECIMALS);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2444e18, 18);
         vm.prank(holder);
         market.borrow(tokenId, 10e6, holder);
 
         (tokenId, holder) = _prepareLoan();
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 1.03e18, RobinhoodChain.USDG_DECIMALS);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2596e18, 18);
         vm.prank(holder);
         market.borrow(tokenId, 10e6, holder);
     }
@@ -125,10 +127,11 @@ contract MarketBorrowForkTest is MarketForkTest {
 
     function test_borrowCapacityUsesNinetyEightCentUsdPrice() public {
         (uint256 tokenId,) = _prepareLoan();
-        uint256 atPar = market.maxBorrow(tokenId);
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.98e18, RobinhoodChain.USDG_DECIMALS);
         uint256 atNinetyEightCents = market.maxBorrow(tokenId);
-        assertApproxEqRel(atNinetyEightCents * 98, atPar * 100, 1e14, "USDG oracle price must scale borrow capacity");
+        ICollateralPolicy.Terms memory terms = policy.termsOf(_keyOf(tokenId).toId());
+        uint256 expected = market.positionValue(tokenId) * terms.maxLtvBps / 10_000 * 1e6 / 0.98e18;
+        assertApproxEqAbs(atNinetyEightCents, expected, 1, "USDG oracle price must scale borrow capacity");
     }
 
     function test_memeBorrowSkipsPythAndSpotGates() public {
