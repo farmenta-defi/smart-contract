@@ -419,8 +419,9 @@ library MarketLiquidation {
         s.applied = Math.min(usdgKept, remainingDebt);
         uint256 bought;
         if (otherKept != 0 && remainingDebt != s.applied) {
-            (bought, s.cost) =
-                _priceFeeLeg(env, c, usdgIs0 ? key.currency1 : key.currency0, otherKept, remainingDebt - s.applied);
+            (bought, s.cost) = _priceFeeLeg(
+                env, c, key, usdgIs0 ? key.currency1 : key.currency0, otherKept, remainingDebt - s.applied
+            );
             if (r.repayAmount - c.plan.repay < s.cost) {
                 revert FeePurchaseUnderfunded(s.cost, r.repayAmount - c.plan.repay);
             }
@@ -436,13 +437,14 @@ library MarketLiquidation {
     function _priceFeeLeg(
         Env memory env,
         Context memory c,
+        PoolKey memory key,
         Currency currency,
         uint256 amount,
         uint256 remainingDebt
     ) private view returns (uint256, uint256) {
         return LiquidationMath.purchase(
             amount,
-            env.oracle.priceForLiquidation(currency),
+            env.oracle.priceForLiquidation(currency, key),
             env.oracle.decimals(currency),
             c.usdgPrice,
             c.usdgDecimals,
