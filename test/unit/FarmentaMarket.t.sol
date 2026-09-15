@@ -265,6 +265,36 @@ contract FarmentaMarketTest is Test {
         assertEq(address(market).balance, 1 ether, "ETH did not land");
     }
 
+    /* -------------------------------- collectFees ----------------------------- */
+
+    /// @notice §4.1: with debt outstanding a claim prices the position, so pausing stops it.
+    function test_pausingStopsCollectFees() public {
+        vm.prank(owner);
+        market.pause();
+
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        market.collectFees(1, stranger);
+    }
+
+    /// @notice The fees need a real recipient: not nowhere, not this market, and not an address
+    ///         PositionManager would read as something else.
+    /// @dev `TAKE_PAIR` maps `address(1)` to its caller, which is this market, and `address(2)` to
+    ///      itself. The first would leave the fees here for `rescueUnaccountedEth` to sweep; the
+    ///      second would leave them in PositionManager for anyone to take.
+    function test_collectFeesRefusesARecipientThatIsNotOne() public {
+        address[4] memory refused = [address(0), address(1), address(2), address(market)];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.InvalidRecipient.selector, refused[i]));
+            market.collectFees(1, refused[i]);
+        }
+    }
+
+    /// @notice A position the market does not hold has no depositor, so nobody may claim for it.
+    function test_collectFeesRefusesAPositionNotInCustody() public {
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotTheDepositor.selector, 1, address(0)));
+        market.collectFees(1, stranger);
+    }
+
     /// @dev Ownership moves in two steps, so a typo in the new owner cannot lock the market.
     function test_ownershipTransferIsTwoStep() public {
         vm.prank(owner);
