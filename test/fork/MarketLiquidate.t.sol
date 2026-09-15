@@ -573,6 +573,33 @@ contract MarketLiquidateForkTest is MarketForkTest {
         );
     }
 
+    /// @notice §9 layer 2: a bad debt the reserve can cover is paid from the reserve alone.
+    ///         Depositors lose nothing, and nothing is socialized.
+    /// @dev The position is priced just under what the full seizure needs, so the branch is the
+    ///      full one but the shortfall is small. The other bad-debt tests only ever had more bad
+    ///      debt than reserve, so a reserve emptied on every bad debt passed them (review of PR
+    ///      #16, mutation M4).
+    function test_badDebtTheReserveCanCoverNeverReachesDepositors() public {
+        _open(0);
+        _fundLiquidator(2000e6);
+        _ageUntilHealthFactorBelow(0.95e18);
+        _priceRealizableValueAt(market.debtOf(tokenId) * 1e12 * 1048 / 1000);
+
+        uint256 reservesBefore = market.reserves();
+        uint256 totalAssetsBefore = market.totalAssets();
+
+        vm.recordLogs();
+        vm.prank(liquidator);
+        (uint256 repaid,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        uint256 fee = repaid * 50 / 10_000;
+        assertGt(badDebt, 0, "this test needs the full branch to leave a shortfall");
+        assertGt(reservesBefore + fee, badDebt, "and the reserve must be able to cover all of it");
+        assertEq(market.reserves(), reservesBefore + fee - badDebt, "the reserve pays the shortfall, and only that");
+        assertEq(market.totalAssets(), totalAssetsBefore, "depositors lose nothing");
+        assertFalse(_emitted(keccak256("BadDebtSocialized(uint256)")), "and nothing is socialized");
+    }
+
     /* -------------------------------- reentrancy ------------------------------ */
 
     /// @notice A lender that liquidates into its own address and redeems from inside the ETH
@@ -854,6 +881,32 @@ contract MarketLiquidateForkTest is MarketForkTest {
     function _realizableUsd() private view returns (uint256) {
         IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
         return v.principalUsd + v.feesUsd;
+    }
+
+    /// @dev Moves the ETH price until the position's realizable value (§8 step 1, no haircut) sits
+    ///      just above `targetUsd`. Bisection works because that value only rises with ETH.
+    function _priceRealizableValueAt(
+        uint256 targetUsd
+    ) private {
+        uint256 lo = 1e18;
+        uint256 hi = ETH_AT_POOL_SPOT;
+        for (uint256 i = 0; i < 128 && hi - lo > 1e6; ++i) {
+            uint256 mid = (lo + hi) / 2;
+            _dropEthPrice(mid);
+            if (_realizableUsd() < targetUsd) lo = mid;
+            else hi = mid;
+        }
+        _dropEthPrice(hi);
+    }
+
+    function _emitted(
+        bytes32 topic
+    ) private returns (bool) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; ++i) {
+            if (logs[i].topics.length != 0 && logs[i].topics[0] == topic) return true;
+        }
+        return false;
     }
 
     function _fundLiquidator(
