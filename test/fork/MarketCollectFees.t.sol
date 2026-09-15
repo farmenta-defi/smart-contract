@@ -13,6 +13,7 @@ import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
+import {RedeemingRecipient} from "../mocks/RedeemingRecipient.sol";
 
 /// @notice `collectFees` (§4.1, FAR-7) against a real position with real fees on the pinned block.
 /// @dev The main fixture is native ETH behind a live dynamic-fee hook, so the ETH leg, the hook
@@ -221,6 +222,36 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         market.collectFees(tokenId, recipient);
 
         assertEq(usdg.balanceOf(recipient), fees1, "the fees reach the recipient");
+    }
+
+    /* ------------------------------ outbound calls ---------------------------- */
+
+    /// @notice §4.1 v0.26: a vault redeem made from inside the claim's ETH payout is priced exactly
+    ///         as one made after the claim.
+    /// @dev Thirty days of interest are left unaccrued, so the redeem inside the payout is the first
+    ///      thing to see them unless the claim's own accrual already has. Either way the claim moves
+    ///      no cash, debt or reserve, so there is no half-written ledger for the redeem to read; this
+    ///      pins that property down for the day `collectFees` starts writing anything more.
+    function test_aRedeemFromInsideTheClaimGainsNothing() public {
+        _openLoan(100e6);
+        RedeemingRecipient attacker = new RedeemingRecipient(market);
+        deal(address(usdg), address(attacker), 100e6);
+        attacker.deposit(100e6);
+        vm.warp(block.timestamp + 30 days);
+
+        uint256 shares = market.balanceOf(address(attacker));
+        uint256 snapshot = vm.snapshotState();
+        vm.prank(borrower);
+        market.collectFees(tokenId, recipient);
+        uint256 fair = market.previewRedeem(shares);
+        vm.revertToState(snapshot);
+
+        attacker.arm();
+        vm.prank(borrower);
+        market.collectFees(tokenId, address(attacker));
+
+        assertGt(attacker.redeemed(), 0, "the redeem must actually run inside the payout");
+        assertEq(attacker.redeemed(), fair, "a share redeemed mid-claim is worth what it is worth after");
     }
 
     /* --------------------------------- helpers -------------------------------- */
