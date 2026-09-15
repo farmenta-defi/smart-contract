@@ -18,6 +18,7 @@ import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {Permit2Signer} from "../base/Permit2Signer.sol";
+import {ContractBorrower} from "../mocks/ContractBorrower.sol";
 import {VaultRedeemingHook} from "../mocks/VaultRedeemingHook.sol";
 
 /// @notice Adds liquidity to positions already held as collateral, through the deployed
@@ -231,6 +232,34 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         );
         assertEq(afterIncrease.marketUsdg, before.marketUsdg, "lenders' USDG moved");
         assertEq(positionManager.getPositionLiquidity(tokenId), 2 * liquidity, "liquidity was not added");
+    }
+
+    /// @notice §4.1 v0.26: the borrow asset leaves first, so a borrower that is a contract already
+    ///         holds its USDG change when the ETH change first runs its code.
+    /// @dev Swept in pool order, the ETH (`currency0`) would go first, and the contract would see
+    ///      none of its USDG change: the whole USDG maximum was sent to PositionManager.
+    function test_theUsdgChangeLeavesBeforeTheEth() public {
+        ContractBorrower caller = new ContractBorrower(market);
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        // Read before the prank: an external call in the argument list would spend it.
+        address holder = nft.ownerOf(tokenId);
+        vm.prank(holder);
+        nft.transferFrom(holder, address(caller), tokenId);
+        caller.deposit(tokenId);
+        caller.approve(RobinhoodChain.USDG, RobinhoodChain.PERMIT2);
+        deal(RobinhoodChain.USDG, address(caller), USDG_BUDGET);
+        vm.deal(address(this), 1 ether);
+
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        ISignatureTransfer.PermitBatchTransferFrom memory permit =
+            _permitFor(_keyOf(tokenId), 1 ether, USDG_BUDGET, 0, block.timestamp + 1 hours);
+        caller.increase{value: 1 ether}(tokenId, liquidity, uint128(1 ether), uint128(USDG_BUDGET), permit);
+
+        uint256 usdgChange = IERC20(RobinhoodChain.USDG).balanceOf(address(caller));
+        assertGt(usdgChange, 0, "the USDG maximum should leave change");
+        assertGt(address(caller).balance, 0, "the ETH maximum should leave change");
+        assertEq(caller.usdgOnEthArrival(), usdgChange, "the USDG change had not arrived when the ETH did");
     }
 
     /// @notice An ETH leg that would cost more than `amount0Max` reverts, and the ETH comes back.

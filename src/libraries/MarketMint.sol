@@ -120,7 +120,9 @@ library MarketMint {
         IPermit2 permit2 = IPermit2(address(Permit2Forwarder(address(env.positionManager)).permit2()));
 
         permit2.permitTransferFrom(permit, transfers, msg.sender, signature);
-        env.positionManager.modifyLiquidities{value: msg.value}(_increaseActions(key, p), permit.deadline);
+        env.positionManager.modifyLiquidities{value: msg.value}(
+            _increaseActions(key, p, address(env.debt.asset)), permit.deadline
+        );
 
         emit LiquidityChanged(p.tokenId, poolId, int256(uint256(p.liquidity)));
     }
@@ -262,9 +264,15 @@ library MarketMint {
     ///      false`), which is what Permit2 just delivered plus `msg.value`, then sweeps whatever is
     ///      left of each currency back to the caller. The fees the increase realises offset its
     ///      cost; a leg whose fees exceed its cost has a credit, not a debt, and `SETTLE` reverts.
+    ///
+    ///      **The borrow asset is swept first** (§4.1 v0.26, as `collectFees` does in v0.40). In a
+    ///      native-ETH pool the ETH is `currency0`, and sending it runs the caller's code; the USDG
+    ///      change has left by then. None of the market's own cash is on this path either way; the
+    ///      order is kept so that no function is an exception to the rule.
     function _increaseActions(
         PoolKey memory key,
-        IncreaseParams calldata p
+        IncreaseParams calldata p,
+        address asset
     ) private view returns (bytes memory) {
         bytes memory actions = abi.encodePacked(
             uint8(Actions.INCREASE_LIQUIDITY),
@@ -277,8 +285,10 @@ library MarketMint {
         params[0] = abi.encode(p.tokenId, uint256(p.liquidity), p.amount0Max, p.amount1Max, bytes(""));
         params[1] = abi.encode(key.currency0, ActionConstants.OPEN_DELTA, false);
         params[2] = abi.encode(key.currency1, ActionConstants.OPEN_DELTA, false);
-        params[3] = abi.encode(key.currency0, msg.sender);
-        params[4] = abi.encode(key.currency1, msg.sender);
+        (Currency first, Currency second) =
+            Currency.unwrap(key.currency1) == asset ? (key.currency1, key.currency0) : (key.currency0, key.currency1);
+        params[3] = abi.encode(first, msg.sender);
+        params[4] = abi.encode(second, msg.sender);
         return abi.encode(actions, params);
     }
 
