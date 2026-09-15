@@ -131,6 +131,10 @@ contract FarmentaMarket is
 
     /// @notice ETH that belonged to no payout was swept out by the owner (§15 no. 12).
     event UnaccountedEthRescued(uint256 amount, address indexed to);
+    /// @notice Liquidity was added to (positive) or removed from (negative) a position (§4.1).
+    /// @dev `poolId` is the loan's `poolKeyId`, indexed so an indexer groups by pool without an
+    ///      `eth_call` (§4.1 v0.30, FAR-42).
+    event LiquidityChanged(PoolId indexed poolId, uint256 indexed tokenId, int256 liqDelta);
     event Borrow(uint256 indexed tokenId, uint256 amount);
     event Repay(uint256 indexed tokenId, uint256 amount);
 
@@ -356,6 +360,49 @@ contract FarmentaMarket is
     ) external payable whenNotPaused nonReentrant returns (uint256 tokenId) {
         _recordMemePool(p.poolKey);
         return MarketMint.mintAndDeposit(_mintEnv(), _mintParams(p), permit, signature);
+    }
+
+    /// @notice Adds liquidity to a position held as the caller's collateral (§4.1).
+    /// @param tokenId The position. Only the address it is recorded to may add to it.
+    /// @param liquidity Liquidity to add.
+    /// @param amount0Max The most currency0 the addition may cost. For a native-ETH pool this is
+    ///        also exactly the `msg.value` to send.
+    /// @param amount1Max The most currency1 the addition may cost.
+    /// @param permit A Permit2 batch transfer naming this market as spender, listing the pool's
+    ///        ERC-20 currencies in pool order, each for at least its maximum.
+    /// @param signature The caller's signature over `permit`.
+    /// @dev **No health-factor gate.** Adding liquidity can only raise the position's value, so
+    ///      it can only raise its health factor. Fees the addition realises are spent on it
+    ///      rather than paid out, which is why a leg whose uncollected fees exceed its cost
+    ///      reverts (`DeltaNotNegative`) instead of handing the surplus to the caller.
+    ///
+    ///      **The pool must still pass §6.1**, checked before any token moves: it may have been
+    ///      frozen, or lost a token or its hook allowlisting, since the position was deposited
+    ///      (§6.5), and new capital must not go where the policy itself refuses it.
+    ///
+    ///      **The tokens never touch this market, departing from §4.1's `SETTLE_PAIR`.** Permit2
+    ///      delivers the caller's maxima straight to PositionManager, which settles out of its
+    ///      own balance and sweeps the rest back to the caller. Pulled here instead, they would
+    ///      sit in `totalAssets` while the pool's hook runs, and a hook holding vault shares
+    ///      could redeem at that inflated price and have the difference paid out of the
+    ///      caller's change (§4.1 v0.26). Nothing is approved and no change is measured here, so
+    ///      lenders' cash is out of reach by construction rather than by a balance check.
+    function increaseLiquidity(
+        uint256 tokenId,
+        uint128 liquidity,
+        uint128 amount0Max,
+        uint128 amount1Max,
+        ISignatureTransfer.PermitBatchTransferFrom calldata permit,
+        bytes calldata signature
+    ) external payable whenNotPaused nonReentrant {
+        MarketMint.increaseLiquidity(
+            _mintEnv(),
+            MarketMint.IncreaseParams({
+                tokenId: tokenId, liquidity: liquidity, amount0Max: amount0Max, amount1Max: amount1Max
+            }),
+            permit,
+            signature
+        );
     }
 
     /// @notice Accepts a position pushed here directly with `safeTransferFrom`.
