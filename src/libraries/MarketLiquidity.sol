@@ -20,9 +20,11 @@ import {MarketLedger} from "./MarketLedger.sol";
 ///      (§4.1 v0.33).
 library MarketLiquidity {
     /// @notice A position's fees were claimed to `to` (§4.1, `poolId` per v0.30).
-    /// @dev `amount0`/`amount1` are `to`'s balance change across the claim, not a figure the
-    ///      ledger reads. A contract `to` that moves the ETH on as it arrives can misstate its own
-    ///      receipt, the same caveat `Liquidate` carries.
+    /// @dev `amount0`/`amount1` are `to`'s balance change across the claim, not the fees the position
+    ///      realised. Anything else reaching `to` while its ETH callback runs is counted as well, a vault
+    ///      redeem or a transfer from anyone, so indexers (§13) must not treat these figures as verified
+    ///      fee income. A `to` that sends out more than it received during that callback makes the claim
+    ///      revert with an arithmetic panic.
     event CollectFees(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount0, uint256 amount1);
 
     error NotTheDepositor(uint256 tokenId, address depositor);
