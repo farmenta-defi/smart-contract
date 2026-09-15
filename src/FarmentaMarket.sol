@@ -231,7 +231,7 @@ contract FarmentaMarket is
         uint256 tokenId
     ) external whenNotPaused nonReentrant {
         IERC721(address(positionManager)).transferFrom(msg.sender, address(this), tokenId);
-        _acceptCollateral(msg.sender, tokenId);
+        MarketMint.acceptCollateral(_mintEnv(), msg.sender, tokenId);
     }
 
     /// @notice Approves and deposits in one transaction, using a signature from the owner.
@@ -276,7 +276,7 @@ contract FarmentaMarket is
             if (nft.getApproved(tokenId) != address(this)) revert PermitRejected(tokenId);
         }
         nft.transferFrom(depositor, address(this), tokenId);
-        _acceptCollateral(depositor, tokenId);
+        MarketMint.acceptCollateral(_mintEnv(), depositor, tokenId);
     }
 
     /// @notice Mints a new position straight into custody and records it as the caller's
@@ -347,7 +347,7 @@ contract FarmentaMarket is
         bytes memory
     ) public override whenNotPaused nonReentrant returns (bytes4) {
         if (msg.sender != address(positionManager)) revert NotThePositionManager(msg.sender);
-        _acceptCollateral(from, tokenId);
+        MarketMint.acceptCollateral(_mintEnv(), from, tokenId);
         return this.onERC721Received.selector;
     }
 
@@ -461,6 +461,11 @@ contract FarmentaMarket is
         return _marketStorage().totalReservesWithdrawn;
     }
 
+    /// @notice Reserve floor rate enforced by `withdrawReserves`, in basis points.
+    function reserveFloorBps() external view returns (uint16) {
+        return _marketStorage().reserveFloorBps;
+    }
+
     function _withdrawableReserves(
         uint256 cash
     ) private view returns (uint256) {
@@ -566,40 +571,6 @@ contract FarmentaMarket is
 
     /* -------------------------------- internals ------------------------------- */
 
-    /// @dev Runs every §6.1 admission rule and records collateral after the market owns it.
-    function _acceptCollateral(
-        address depositor,
-        uint256 tokenId
-    ) private {
-        MarketLedger.Layout storage $ = _marketStorage();
-        if ($.loans[tokenId].owner != address(0)) revert PositionAlreadyHeld(tokenId);
-
-        (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(tokenId);
-        ICollateralPolicy.Terms memory terms = policy.checkPool(key, $.tier);
-        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
-        if (valuation.liquidity == 0) revert PositionIsEmpty(tokenId);
-
-        uint256 recoverableUsd = valuation.principalUsd * (BPS - terms.removeHaircutBps) / BPS;
-        if (recoverableUsd < terms.minPositionUsd) {
-            revert PositionBelowMinimum(recoverableUsd, terms.minPositionUsd);
-        }
-
-        $.loans[tokenId] = MarketLedger.Loan({owner: depositor, debtShares: 0, poolKeyId: key.toId(), tier: $.tier});
-        emit CollateralDeposited(tokenId, depositor);
-    }
-
-    /// @dev Runs every §6.1 admission rule and records the loan. Called once the market
-    ///      already owns the NFT, which every intake path guarantees.
-    ///
-    ///      The pool-level rules live in `CollateralPolicy.checkPool`: listed, not frozen,
-    ///      right tier, both tokens enabled, quoted in USDG, hook permitted. The two rules
-    ///      that need the position itself are enforced here, because §4.5 keeps the policy
-    ///      free of dependencies and the market has already paid for the valuation.
-    ///
-    ///      The minimum is measured on **principal alone**, not principal plus fees. A
-    ///      depositor can collect their fees the moment the position is in, so counting them
-    ///      toward the floor would admit positions that fall under it one transaction later.
-    ///      Fees are collateral (§1 #6); they are just not a reason to let dust in.
     function _poolDebt(
         PoolId poolId
     ) private view returns (uint256) {

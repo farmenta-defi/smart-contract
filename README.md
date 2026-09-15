@@ -113,9 +113,10 @@ script/
   InspectPositions.s.sol         prints everything the valuer reads, for one position
 ```
 
-`MarketDebt` and `MarketMint` are linked delegatecall libraries. Deploy them before the
-market implementation and link their addresses into its bytecode; they write only the
-market's ERC-7201 ledger namespace and preserve the market's caller, events, and storage.
+`MarketDebt` and `MarketMint` are linked delegatecall libraries. Deploy and link them in
+order: `MarketDebt`, then `MarketMint` linked to `MarketDebt`, then the market implementation
+linked to both (and `MarketLiquidation` when FAR-10 lands). They write only the market's
+ERC-7201 ledger namespace and preserve the market's caller, events, and storage.
 `MarketLens` is a separate read-only contract bound to one proxy, so deploy one lens for
 each Blue-chip or Meme market and direct risk-view consumers to that lens.
 

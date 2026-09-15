@@ -63,9 +63,9 @@ contract MarketLens {
         return DebtMath.healthFactor(positionValue(tokenId), market.policy().termsOf(loan.poolKeyId).ltBps, debtUsd);
     }
 
-    /// @notice Lender-protection reserve floor for the market's current cash balance.
+    /// @notice Lender-protection reserve floor for the market's current assets.
     function reserveFloor() public view returns (uint256) {
-        return market.totalAssets() * _reserveFloorBps() / BPS;
+        return market.totalAssets() * market.reserveFloorBps() / BPS;
     }
 
     /// @notice Reserve revenue currently available for owner withdrawal, capped by cash.
@@ -89,9 +89,5 @@ contract MarketLens {
         Currency assetCurrency = Currency.wrap(market.asset());
         return
             DebtMath.usdToDebt(usdValue, market.oracle().price(assetCurrency), market.oracle().decimals(assetCurrency));
-    }
-
-    function _reserveFloorBps() private view returns (uint256) {
-        return market.tier() == ICollateralPolicy.Tier.BLUE_CHIP ? 100 : 250;
     }
 }

@@ -376,6 +376,19 @@ contract FarmentaMarketTest is Test {
         assertEq(new MarketLens(memeMarket).withdrawableReserves(), 5750e6, "meme floor is not 2.5%");
     }
 
+    function test_lensUsesTheReserveFloorEnforcedByMarket() public {
+        usdg.mint(address(market), 1_000_000e6);
+        _setReserves(market, 30_000e6);
+        _setReserveFloorBps(market, 300);
+
+        assertEq(market.reserveFloorBps(), 300, "market getter did not read storage");
+        assertEq(lens.reserveFloor(), 29_100e6, "lens did not use market's floor");
+        assertEq(lens.withdrawableReserves(), 900e6, "lens and market disagree on availability");
+
+        vm.prank(owner);
+        market.withdrawReserves(900e6, address(0x7EA5));
+    }
+
     function test_onlyOwnerCanWithdrawReserves() public {
         vm.prank(stranger);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
@@ -597,6 +610,13 @@ contract FarmentaMarketTest is Test {
         uint256 amount
     ) internal {
         vm.store(address(target), bytes32(uint256(_marketStorageLocation()) + 7), bytes32(amount));
+    }
+
+    function _setReserveFloorBps(
+        FarmentaMarket target,
+        uint16 amount
+    ) internal {
+        vm.store(address(target), bytes32(uint256(_marketStorageLocation()) + 8), bytes32(uint256(amount) << 16));
     }
 
     function _deployImplementation() internal returns (FarmentaMarket) {

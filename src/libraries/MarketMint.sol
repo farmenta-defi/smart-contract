@@ -86,6 +86,18 @@ library MarketMint {
         }
     }
 
+    /// @dev Runs every §6.1 admission rule and records collateral after the market owns it.
+    ///      The pool-level rules live in `CollateralPolicy.checkPool`; position-specific
+    ///      liquidity and minimum checks stay here because policy has no valuer dependency.
+    ///      The minimum is principal-only: fees can be collected immediately after intake.
+    function acceptCollateral(
+        Env calldata env,
+        address depositor,
+        uint256 tokenId
+    ) external {
+        _acceptCollateral(env, depositor, tokenId);
+    }
+
     function _acceptCollateral(
         Env calldata env,
         address depositor,
