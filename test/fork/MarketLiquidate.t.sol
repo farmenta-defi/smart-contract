@@ -458,12 +458,30 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertEq(address(market).balance, marketEthBefore, "and none of it stayed in the market");
     }
 
+    /// @notice §8 step 5: USDG fees beyond the whole debt go back to the borrower, to the unit.
+    /// @dev Review of PR #16, mutation M3: without the refund the excess quietly becomes
+    ///      depositors' cash, and no test noticed.
+    function test_usdgFeesBeyondTheDebtAreRefundedToTheBorrower() public {
+        _openWithDonatedFees(0, 2000e6);
+        assertGt(lens.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
+        uint256 refund = _expectedUsdgRefund();
+        assertGt(refund, 0, "the USDG fees must outrun the whole debt");
+        uint256 borrowerUsdg = usdg.balanceOf(borrower);
+
+        vm.prank(liquidator);
+        market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertEq(market.debtOf(tokenId), 0, "the fees paid off the debt");
+        assertEq(usdg.balanceOf(borrower) - borrowerUsdg, refund, "and the rest came back, to the unit");
+    }
+
     /// @notice A borrower that cannot receive a token — USDG's issuer can freeze an address —
     ///         cannot block its own liquidation when the fees beyond its debt come back to it.
     /// @dev Review of PR #16, point 2.3. The ETH leg already fell back to WETH, but the ERC-20 leg
     ///      was a plain transfer, so a frozen borrower made the whole liquidation revert.
     function test_aBorrowerThatCannotReceiveUsdgCannotBlockItsLiquidation() public {
         _openWithDonatedFees(0, 2000e6);
+        assertGt(_expectedUsdgRefund(), 0, "there must be USDG to refund, or the freeze is never exercised");
         uint256 borrowerUsdg = usdg.balanceOf(borrower);
         vm.mockCallRevert(address(usdg), abi.encodeWithSelector(IERC20.transfer.selector, borrower), "frozen");
 
@@ -814,6 +832,17 @@ contract MarketLiquidateForkTest is MarketForkTest {
         IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
         uint256 seizeUsd = DebtMath.debtUsd(repay, ONE_USD, RobinhoodChain.USDG_DECIMALS) * 10_500 / 10_000;
         return Math.mulDiv(v.liquidity, seizeUsd - v.feesUsd, v.principalUsd);
+    }
+
+    /// @dev The USDG a borrower gets back once its USDG fees beyond the seizure outrun the rest of
+    ///      the debt, from the valuation alone, at the partial close factor. Zero if they do not.
+    function _expectedUsdgRefund() private view returns (uint256) {
+        uint256 debt = market.debtOf(tokenId);
+        uint256 repay = debt / 2;
+        IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
+        uint256 seizeUsd = DebtMath.debtUsd(repay, ONE_USD, RobinhoodChain.USDG_DECIMALS) * 10_500 / 10_000;
+        uint256 kept = LiquidationMath.retainedFee(v.fees1, v.fees1, v.feesUsd, seizeUsd);
+        return kept > debt - repay ? kept - (debt - repay) : 0;
     }
 
     function _ethWorth(
