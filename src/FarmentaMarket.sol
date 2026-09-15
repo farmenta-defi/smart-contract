@@ -35,8 +35,8 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 /// @dev **The lending side is whole as of §8.** Collateral goes in and comes back out, the
 ///      index-based ledger of §7 accrues against it, and an underwater position can now be
 ///      liquidated — which is what makes a lent dollar a dollar with a way home. A depositor
-///      can also claim a held position's fees (`collectFees`, FAR-7). What §4.1 still owes:
-///      `decreaseLiquidity` and `increaseLiquidity` (FAR-8, FAR-9).
+///      can also claim a held position's fees (`collectFees`, FAR-7) and add liquidity to it
+///      (`increaseLiquidity`, FAR-9). What §4.1 still owes: `decreaseLiquidity` (FAR-8).
 ///
 ///      **Logic lives in linked libraries; this contract keeps the wrappers** (§4.1 v0.33).
 ///      Borrow and repay run from `MarketDebt`, collateral intake from `MarketMint`, §8's seizure
@@ -49,8 +49,9 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///      **ETH arrives and leaves through liquidation, and stray ETH has a way out.** A
 ///      native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather than
 ///      ahead of it. Nothing legitimate stays: liquidation forwards both legs in the same call,
-///      `mintAndDeposit`'s change leaves through `SWEEP` straight from PositionManager, and a
-///      fee claim's ETH goes from PoolManager to its recipient without touching the market. So
+///      the change of `mintAndDeposit` and `increaseLiquidity` leaves through `SWEEP` straight
+///      from PositionManager, and a fee claim's ETH goes from PoolManager to its recipient
+///      without touching the market. So
 ///      ETH found here between transactions belongs to no one the market can name, and
 ///      `rescueUnaccountedEth` sweeps it — spec open item §15 no. 12, decided with §8 as that
 ///      item asked. Nor can a borrower use ETH to block its own liquidation: its share goes
@@ -745,10 +746,10 @@ contract FarmentaMarket is
     /// @dev Sweeps the whole balance, which is sound only because no ETH here is owed to anyone
     ///      between transactions. Every path that takes delivery of ETH pays all of it out
     ///      before its own call returns: liquidation forwards the liquidator's and the
-    ///      borrower's legs, and `mintAndDeposit` returns change through `SWEEP` straight from
-    ///      PositionManager. `collectFees` never takes delivery at all: each `TAKE` pays its
-    ///      recipient, and `address(1)`, which would route the ETH here, is refused. What is left
-    ///      was sent by mistake or by force, and taking it takes
+    ///      borrower's legs, and `mintAndDeposit` and `increaseLiquidity` return change through
+    ///      `SWEEP` straight from PositionManager. `collectFees` never takes delivery at all: each
+    ///      `TAKE` pays its recipient, and `address(1)`, which would route the ETH here, is refused.
+    ///      What is left was sent by mistake or by force, and taking it takes
     ///      nothing a lender or a borrower is owed.
     ///
     ///      `nonReentrant` keeps it out of the one place that premise does not hold: inside a

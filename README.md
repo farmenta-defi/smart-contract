@@ -139,9 +139,11 @@ Custody, lending and liquidation.
 - **Fee claims.** A depositor can claim a held position's fees without taking it out of custody.
   With debt outstanding, the claim passes the same §5.2 price gates as a borrow and must leave
   the health factor at or above 1 (spec §4.1, §5.2 v0.40).
+- **Adding liquidity.** A borrower can add to a position in custody with a Permit2 signature,
+  while its pool still passes §6.1. The tokens go straight to `PositionManager` and never through
+  the market (FAR-9).
 
-Still owed: `decreaseLiquidity` and `increaseLiquidity` (FAR-8/9), and the meme price path
-(FAR-16).
+Still owed: `decreaseLiquidity` (FAR-8).
 
 Custody is the design rather than a detail. `PositionManager` gates
 `DECREASE_LIQUIDITY` and `BURN_POSITION` behind `onlyIfApproved(msgSender())`, so
