@@ -61,7 +61,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
         _open(0);
         _fundLiquidator(1000e6);
 
-        assertGt(market.healthFactor(tokenId), 1e18, "the fixture should start healthy");
+        assertGt(lens.healthFactor(tokenId), 1e18, "the fixture should start healthy");
         vm.prank(liquidator);
         vm.expectPartialRevert(MarketLiquidation.PositionIsHealthy.selector);
         market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
@@ -122,7 +122,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
         _open(0);
         _fundLiquidator(1000e6);
         _ageUntilHealthFactorBelow(1e18);
-        assertGt(market.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
+        assertGt(lens.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
 
         // Read before the prank, and passed as a local: see the note on `usdg` above.
         uint256 debt = market.debtOf(tokenId);
@@ -246,7 +246,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
     ///         still in debt.
     function test_theFeesLeftOverAreBoughtAndRepayTheDebt() public {
         _openWithDonatedFees(_ethWorth(250e18), 0);
-        assertGt(market.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
+        assertGt(lens.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
 
         // Kept to few locals on purpose: CI's `lite` profile compiles without the optimizer,
         // where a test this size runs out of stack slots.
@@ -452,7 +452,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
         uint256 reservesBefore = market.reserves();
         assertGt(reservesBefore, 0, "this test needs a reserve to spend");
-        assertGt(reservesBefore, market.reserveFloor(), "and part of it below the withdrawal floor");
+        assertGt(reservesBefore, lens.reserveFloor(), "and part of it below the withdrawal floor");
         uint256 totalAssetsBefore = market.totalAssets();
 
         vm.recordLogs();
@@ -601,7 +601,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
         _fundLiquidator(2000e6);
         oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT / 2);
 
-        assertGt(market.healthFactor(tokenId), 1e18, "the borrow surface still calls it healthy");
+        assertGt(lens.healthFactor(tokenId), 1e18, "the borrow surface still calls it healthy");
 
         vm.prank(liquidator);
         (uint256 repaid,,,) = market.liquidate(tokenId, 10e6, 0, 0, liquidator);
@@ -671,7 +671,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
         // Read before the prank: an external call inside the argument list would spend it,
         // and the borrow would arrive from this test contract instead.
-        uint256 amount = market.maxBorrow(tokenId);
+        uint256 amount = lens.maxBorrow(tokenId);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
     }
@@ -749,7 +749,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
         uint256 target
     ) private {
         for (uint256 i = 0; i < 4000; ++i) {
-            if (market.healthFactor(tokenId) < target) return;
+            if (lens.healthFactor(tokenId) < target) return;
             vm.warp(block.timestamp + 1 days);
             market.accrue();
         }
