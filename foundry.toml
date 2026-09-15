@@ -54,11 +54,12 @@ fail_on_revert = false
 # further buys ~180 bytes and moving DebtMath behind a deployed library costs 1,600 more than
 # it saves — a delegatecall site is larger than the arithmetic it replaces at this scale.
 # What worked was moving the seizure itself out: `MarketLiquidation` runs by delegatecall and
-# the market carries the wrapper, leaving it at 24,069 with 507 to spare. `collectFees`
-# (FAR-7), `decreaseLiquidity` (FAR-8) and `increaseLiquidity` (FAR-9) will not fit inline in
-# what is left, and neither does this branch together with the §5.2 borrow gate (FAR-20,
-# 528 bytes over). The second round of making room is FAR-32 (spec §15 no. 17); FAR-26's
-# first round no longer covers it.
+# the market carries the wrapper, leaving it at 24,069 with 507 to spare. That was not enough
+# for it and the §5.2 borrow gate (FAR-20) together: 25,381, 805 over. FAR-32 (#17) made the
+# room by moving the risk views to `MarketLens` and borrow, repay and intake into the linked
+# libraries `MarketDebt` and `MarketMint`. With FAR-10 on top the market measures 17,135,
+# 7,441 to spare (2026-09-15, spec §15 no. 17). New logic goes into a linked library and the
+# market keeps a wrapper.
 #
 # The CI fast lane gates size on this profile, since it is the one that ships.
 [profile.deploy]

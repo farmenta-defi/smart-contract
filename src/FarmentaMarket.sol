@@ -35,14 +35,14 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///      index-based ledger of §7 accrues against it, and an underwater position can now be
 ///      liquidated — which is what makes a lent dollar a dollar with a way home. What §4.1
 ///      still owes: `collectFees`, `decreaseLiquidity` and `increaseLiquidity` (FAR-7, FAR-8,
-///      FAR-9), the borrow price gate of §5.2 (FAR-20), and the meme price path (FAR-16).
+///      FAR-9), and the meme price path (FAR-16).
 ///
-///      **Room is the constraint on what lands here next.** The implementation compiles to
-///      about 24 KB against EIP-170's 24,576, so §8's seizure runs from `MarketLiquidation`
-///      by `delegatecall` — the market's storage, the market's address, the liquidator's
-///      `msg.sender`, code at its own address. What is still owed will not fit inline either,
-///      and this branch does not fit together with FAR-20's gate; the second round of making
-///      room is FAR-32 (spec §15 no. 17), because FAR-26's first round no longer covers it.
+///      **Logic lives in linked libraries; this contract keeps the wrappers** (§4.1 v0.33).
+///      Borrow and repay run from `MarketDebt`, collateral intake from `MarketMint`, and §8's
+///      seizure from `MarketLiquidation`, each by `delegatecall`: the market's storage, the
+///      market's address, the caller's `msg.sender`, code at its own address. Risk views are
+///      read from `MarketLens`, one per proxy. That is what keeps the implementation under
+///      EIP-170 with the work still owed to come (spec §15 no. 17, FAR-32).
 ///
 ///      **ETH arrives and leaves through liquidation, and stray ETH has a way out.** A
 ///      native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather than
@@ -111,7 +111,7 @@ contract FarmentaMarket is
     /// @notice Values a position at oracle prices (§4.2, §5.1).
     IPositionValuer public immutable valuer;
 
-    /// @notice Price oracle reserved for the FAR-20 borrow price gate.
+    /// @notice Price oracle: the §5.2 borrow gates read it, and §8 reads its liquidation surface.
     IPriceOracle public immutable oracle;
 
     /// @notice Immutable rate curve for this market's tier.
@@ -483,10 +483,10 @@ contract FarmentaMarket is
     ///
     ///      **The work itself runs from `MarketLiquidation`, by `delegatecall`.** It is the
     ///      market's storage, the market's address and the liquidator's `msg.sender` either
-    ///      way; what changes is where the code sits, and it has to sit elsewhere — this
-    ///      implementation had 1,474 bytes left under EIP-170 and §8 needs about five thousand
-    ///      (foundry.toml's `deploy` note). What stays here is what has to be visible from
-    ///      outside: the pause, the reentrancy guard, the accrual, and every event.
+    ///      way; what changes is where the code sits, which is the rule for everything this
+    ///      contract does (§4.1 v0.33): logic in a linked library, a wrapper here. What stays
+    ///      here is what has to be visible from outside: the pause, the reentrancy guard, the
+    ///      accrual, and every event.
     ///
     ///      §8 step 1 also asks for a TWAP `record` on meme pools. That belongs with the meme
     ///      price path (FAR-16) and arrives with it: this market has no recorder to call yet,

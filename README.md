@@ -90,7 +90,7 @@ fork. It is also DNS-hijacked by some ISPs, and `anvil` has no equivalent of cur
 
 ```
 src/
-  FarmentaMarket.sol             custodies position NFTs, and will lend against them (spec §4.1)
+  FarmentaMarket.sol             custodies position NFTs, lends against them, liquidates (spec §4.1)
   CollateralPolicy.sol           which pools may back a loan, on what terms (spec §4.5, §6)
   PriceOracle.sol                reads policy-listed Chainlink USD feeds (spec §4.3, §5.2)
   PositionValuer.sol             values a position at oracle prices (spec §4.2, §5.1)
@@ -98,7 +98,8 @@ src/
   constants/RobinhoodChain.sol   deployed addresses (spec §18)
   interfaces/                    ICollateralPolicy, IPositionValuer, IPriceOracle, IAggregatorV3
   libraries/                     PositionAmounts, PriceMath, HookPermissions, TierPresets,
-                                 MarketLedger, MarketDebt, MarketMint
+                                 MarketLedger, MarketDebt, MarketMint, MarketLiquidation,
+                                 LiquidationMath, DebtMath
 test/
   base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
               PositionMinter (mints positions in the fork for shapes the chain lacks),
@@ -113,35 +114,35 @@ script/
   InspectPositions.s.sol         prints everything the valuer reads, for one position
 ```
 
-`MarketDebt` and `MarketMint` are linked delegatecall libraries. Deploy and link them in
-order: `MarketDebt`, then `MarketMint` linked to `MarketDebt`, then the market implementation
-linked to both (and `MarketLiquidation` when FAR-10 lands). They write only the market's
-ERC-7201 ledger namespace and preserve the market's caller, events, and storage.
+`MarketDebt`, `MarketMint` and `MarketLiquidation` are linked delegatecall libraries. Deploy
+and link them in order: `MarketDebt`, then `MarketMint` linked to `MarketDebt`, then
+`MarketLiquidation` (§8 seizure), then the market implementation linked to all three. They
+write only the market's ERC-7201 ledger namespace and preserve the market's caller, events,
+and storage.
 `MarketLens` is a separate read-only contract bound to one proxy, so deploy one lens for
 each Blue-chip or Meme market and direct risk-view consumers to that lens.
 
 ## What `FarmentaMarket` does today
 
-The custody half, and only that. Positions can be deposited, deposited with a signed
-permit, minted straight into custody from the tokens themselves, withdrawn once nothing
-is owed, and rescued by the owner if one arrives unrecorded. The debt ledger, interest accrual, borrowing, repayment and liquidation
-are Phase 1 (spec §16). The ERC-4626 side is inherited and works, but earns nothing
-yet: with no borrows, `totalAssets` is just the USDG held.
+Custody, lending and liquidation.
 
-Two vault overrides are owed to that same change, and are written down here rather
-than left to be found later:
+- **Custody.** Positions can be deposited, deposited with a signed permit, minted straight
+  into custody from the tokens themselves, withdrawn once nothing is owed, and rescued by the
+  owner if one arrives unrecorded.
+- **Lending.** Borrowing and repayment run on an index-based ledger that accrues interest
+  (spec §7), and every borrow passes the §5.2 price gates first. The vault counts
+  `totalBorrows` less `reserves` in `totalAssets`, and `maxWithdraw`/`maxRedeem` are bounded by
+  the cash on hand (spec §4.1, §7).
+- **Liquidation.** An underwater position can be liquidated in part or whole, and bad debt is
+  taken from reserves before it reaches depositors (spec §8, §9).
 
-- `totalAssets` must count `totalBorrows` and subtract `reserves` (spec §7).
-- `maxWithdraw` and `maxRedeem` must be bounded by the cash on hand (spec §4.1). The
-  inherited versions measure against `totalAssets`, which is correct only while
-  nothing is borrowed. Once it is, they would advertise more than the vault can pay
-  and `withdraw` would fail inside the token transfer rather than reverting as
-  `ERC4626ExceededMaxWithdraw`.
+Still owed: `collectFees`, `decreaseLiquidity` and `increaseLiquidity` (FAR-7/8/9), and the
+meme price path (FAR-16).
 
 Custody is the design rather than a detail. `PositionManager` gates
 `DECREASE_LIQUIDITY` and `BURN_POSITION` behind `onlyIfApproved(msgSender())`, so
-owning the NFT is precisely what will let the market pull liquidity during
-liquidation. A market that recorded the loan but left the token with the borrower
+owning the NFT is precisely what lets the market pull liquidity during liquidation
+(spec §8). A market that recorded the loan but left the token with the borrower
 could never liquidate it. The subscriber mechanism cannot substitute: an owner can
 always unsubscribe, and a transfer unsubscribes automatically (spec §10).
 

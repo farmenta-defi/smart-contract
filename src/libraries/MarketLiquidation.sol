@@ -30,9 +30,10 @@ interface INativeWrapper {
 ///      It runs in the market's context, so `address(this)` is the market and `msg.sender` is
 ///      still the liquidator: the USDG pull, the `modifyLiquidities` call that only the NFT's
 ///      owner may make, and every payout all behave exactly as they would inside the market.
-///      And its code lives at its own address, which is the reason this file exists at all —
-///      `FarmentaMarket` had 1,474 bytes left under EIP-170 and this logic is about 5,000
-///      (foundry.toml's `deploy` note predicted the squeeze and named the way out).
+///      And its code lives at its own address, which is the reason this file exists at all:
+///      the seizure is several kilobytes, and the market implementation has to stay under
+///      EIP-170 while §4.1's remaining entrypoints still arrive. Since FAR-32 that is the rule
+///      for every path (§4.1 v0.33): logic in a linked library, a wrapper in the market.
 ///
 ///      It writes the market's ledger too, through `MarketLedger` — the one declaration of
 ///      that layout, shared rather than copied, so the two compilation units cannot drift into
