@@ -223,6 +223,38 @@ contract MarketLiquidateForkTest is MarketForkTest {
         );
     }
 
+    /// @notice A partial seizure pays out what it charged for: the slice of liquidity plus the fee
+    ///         credit, worth at least `repay × (1 + bonus)`, and the position shrinks by exactly
+    ///         the liquidity that slice needs.
+    /// @dev The floor to the fuzz's ceiling. On the natural fixture the seizure outruns the fees,
+    ///      so real liquidity has to come out; a slice that pulled none would still hand over the
+    ///      fees and leave every other assertion green (review of PR #16, mutation M1). The payout
+    ///      is valued at oracle prices, which on this fixture sit on the pool's own price.
+    function test_aPartialSeizurePaysTheSliceItChargedFor() public {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+        assertGt(lens.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
+
+        uint256 repay = market.debtOf(tokenId) / 2;
+        uint256 liquidityBefore = positionManager.getPositionLiquidity(tokenId);
+        uint256 slice = _expectedSlice(repay);
+        assertGt(slice, 0, "the seizure must outrun the fees and pull liquidity");
+
+        vm.prank(liquidator);
+        (uint256 repaid, uint256 out0, uint256 out1,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertEq(repaid, repay, "with no fees left over, only the close factor is repaid");
+        assertEq(
+            liquidityBefore - positionManager.getPositionLiquidity(tokenId), slice, "the position shrank by the slice"
+        );
+        assertGe(
+            _usdValue(out0, out1),
+            repay * 1e12 * 10_500 / 10_000 * 9990 / 10_000,
+            "the liquidator received the seizure it paid for, within 0,1% of rounding"
+        );
+    }
+
     /// @notice The minimums are measured on what the liquidator receives (§8 step 5), not on
     ///         what reached the market.
     function test_slippageIsCheckedOnWhatTheLiquidatorReceives() public {
@@ -750,6 +782,16 @@ contract MarketLiquidateForkTest is MarketForkTest {
             RobinhoodChain.USDG_DECIMALS,
             debt - repay - appliedUsdg
         );
+    }
+
+    /// @dev The liquidity a partial seizure of `repay` pulls (§8 step 5), from the valuation alone:
+    ///      what the seizure is worth beyond the fees, as a share of principal. No haircut here.
+    function _expectedSlice(
+        uint256 repay
+    ) private view returns (uint256) {
+        IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
+        uint256 seizeUsd = DebtMath.debtUsd(repay, ONE_USD, RobinhoodChain.USDG_DECIMALS) * 10_500 / 10_000;
+        return Math.mulDiv(v.liquidity, seizeUsd - v.feesUsd, v.principalUsd);
     }
 
     function _ethWorth(
