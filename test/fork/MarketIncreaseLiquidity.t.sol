@@ -4,7 +4,8 @@ pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolDonateTest} from "@uniswap/v4-core/src/test/PoolDonateTest.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {SlippageCheck} from "@uniswap/v4-periphery/src/libraries/SlippageCheck.sol";
@@ -15,6 +16,7 @@ import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
+import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {Permit2Signer} from "../base/Permit2Signer.sol";
@@ -142,20 +144,20 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
     }
 
     /// @notice A borrower close to liquidation strengthens the position by adding to it.
-    /// @dev The case the function exists for. The position borrows its maximum, then ETH falls
-    ///      until its health factor is under 1.05 while still above 1. Adding liquidity must go
-    ///      through with no health-factor gate in the way, and leave the health factor higher.
+    /// @dev The case the function exists for. The position borrows its maximum, then interest
+    ///      carries its health factor under 1.05 while it is still above 1. Adding liquidity must
+    ///      go through and leave the health factor higher.
+    ///
+    ///      Interest, not a price move: since v0.47 an indebted addition runs §5.2's borrow price
+    ///      gates, and dropping the oracle would refuse it on the ±2% spot gate instead
+    ///      (`test_anIndebtedAdditionRunsTheSpotGate`).
     function test_raisesTheHealthFactorOfAnIndebtedPosition() public {
         uint256 tokenId = _depositFresh(wethKey);
         uint256 amount = lens.maxBorrow(tokenId);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
 
-        uint256 price = ETH_AT_POOL_SPOT;
-        for (uint256 i; i < 100 && lens.healthFactor(tokenId) >= 1.05e18; ++i) {
-            price = price * 995 / 1000;
-            oracle.set(Currency.wrap(RobinhoodChain.WETH), price, 18);
-        }
+        _ageUntilHealthFactorBelow(tokenId, 1.05e18);
         uint256 healthBefore = lens.healthFactor(tokenId);
         assertLt(healthBefore, 1.05e18, "setup: the health factor should be under 1.05");
         assertGe(healthBefore, 1e18, "setup: the position should still be healthy");
@@ -193,6 +195,88 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         }
     }
 
+    /* ----------------------------- the fee claim ------------------------------ */
+
+    /// @notice A position whose fees exceed what the addition costs on a leg can still be added to.
+    /// @dev The case v0.47 was decided for. `POS_WETH_USDG_ABOVE_RANGE` is all USDG with fees
+    ///      uncollected on both legs, so the WETH leg costs nothing while holding fees:
+    ///      `INCREASE_LIQUIDITY` would credit them and `SETTLE` would refuse the positive delta
+    ///      (`DeltaNotNegative`), at any size. Claiming first is what makes this go through.
+    function test_anOutOfRangePositionWithFeesCanStillBeAddedTo() public {
+        uint256 tokenId = _depositFixture(Fixtures.POS_WETH_USDG_ABOVE_RANGE);
+        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
+        assertGt(valuation.fees0, 0, "the fixture must hold fees on the leg the addition does not spend");
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        uint256 wethBefore = IERC20(RobinhoodChain.WETH).balanceOf(borrower);
+
+        _increase(tokenId, liquidity, WETH_BUDGET, USDG_BUDGET, 0);
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), 2 * liquidity, "liquidity was not added");
+        assertEq(
+            IERC20(RobinhoodChain.WETH).balanceOf(borrower) - wethBefore,
+            valuation.fees0,
+            "the fees on the unspent leg did not reach the borrower"
+        );
+        assertEq(valuer.value(tokenId).fees0, 0, "the position still holds fees");
+    }
+
+    /// @notice With debt outstanding, the claim may not leave the position under water.
+    /// @dev The claim takes the counted fees out of the collateral value (capped at 10% of
+    ///      principal, §6.2), so a maximum borrow plus a small addition ends below 1. §7's
+    ///      post-condition is checked after the whole action, as `collectFees` checks it (v0.40).
+    function test_anAdditionThatWouldLeaveThePositionUnhealthyReverts() public {
+        uint256 tokenId = _openIndebtedFixture(type(uint256).max);
+        _ageUntilHealthFactorBelow(tokenId, 1.05e18);
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId) / 100;
+        vm.deal(borrower, 1 ether);
+
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) =
+            _signedPermit(_keyOf(tokenId), 0.1 ether, USDG_BUDGET, 0);
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.PositionWouldBeUnhealthy.selector);
+        market.increaseLiquidity{value: 0.1 ether}(
+            tokenId, liquidity, 0.1 ether, uint128(USDG_BUDGET), permit, signature
+        );
+    }
+
+    /// @notice An indebted addition runs §5.2's USDG band, which applies to every tier.
+    function test_anIndebtedAdditionRunsTheUsdgBand() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        _borrow(tokenId, 10e6);
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
+
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) =
+            _signedPermit(wethKey, WETH_BUDGET, USDG_BUDGET, 0);
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UsdgPriceOutOfBounds.selector, 0.96e18));
+        market.increaseLiquidity(tokenId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
+    }
+
+    /// @notice An indebted addition on a blue-chip market runs the ±2% spot gate too.
+    /// @dev The cost of v0.47 that the PR names: a pool far from the oracle refuses the addition,
+    ///      even though the addition itself only adds value.
+    function test_anIndebtedAdditionRunsTheSpotGate() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        _borrow(tokenId, 10e6);
+        oracle.set(Currency.wrap(RobinhoodChain.WETH), ETH_AT_POOL_SPOT * 90 / 100, 18);
+
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) =
+            _signedPermit(wethKey, WETH_BUDGET, USDG_BUDGET, 0);
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.SpotPriceDeviation.selector);
+        market.increaseLiquidity(tokenId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
+    }
+
+    /// @notice A position owing nothing passes neither gate, because there is no debt to protect.
+    function test_anAdditionWithoutDebtRunsNoGate() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
+
+        _increase(tokenId, LIQUIDITY, WETH_BUDGET, USDG_BUDGET, 0);
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), 2 * LIQUIDITY, "liquidity was not added");
+    }
+
     /* --------------------------------- native ETH ----------------------------- */
 
     /// @notice A native-ETH pool spends from `msg.value` and sends the rest back, and the
@@ -207,6 +291,9 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         uint256 ethBudget = 1 ether;
         vm.deal(borrower, ethBudget);
 
+        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
+        assertGt(valuation.fees0, 0, "the fixture must hold ETH fees");
+        assertGt(valuation.fees1, 0, "the fixture must hold USDG fees");
         uint256 borrowerEth = borrower.balance;
         uint256 marketEth = address(market).balance;
         uint256 strayEth = RobinhoodChain.POSITION_MANAGER.balance;
@@ -559,11 +646,97 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         vm.stopPrank();
     }
 
-    /// @dev A real position, moved to the borrower and deposited by them after its pool is listed.
+    /// @dev The fixture deposited, its fees donated up to a third of its principal, and borrowed
+    ///      against to `amount` (or the maximum). Enough fee value to matter: the health check
+    ///      counts fees only up to 10% of principal (§6.2), and the claim takes all of it out.
+    function _openIndebtedFixture(
+        uint256 amount
+    ) internal returns (uint256 tokenId) {
+        tokenId = _depositFixture(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        _donateFees(tokenId, 0, valuer.value(tokenId).principalUsd / 1e12 / 3);
+
+        deal(RobinhoodChain.USDG, lender, LENDER_DEPOSIT);
+        vm.startPrank(lender);
+        IERC20(RobinhoodChain.USDG).approve(address(market), LENDER_DEPOSIT);
+        market.deposit(LENDER_DEPOSIT, lender);
+        vm.stopPrank();
+
+        uint256 maximum = lens.maxBorrow(tokenId);
+        _borrow(tokenId, amount > maximum ? maximum : amount);
+    }
+
+    /// @dev Interest carries the position under `target`, which leaves the oracle exactly where it
+    ///      is. A price move would refuse the addition on §5.2's ±2% spot gate instead (v0.47), and
+    ///      that is a different test. The lender's cash goes first: at the utilisation this suite
+    ///      lends at, the blue-chip curve barely accrues at all.
+    function _ageUntilHealthFactorBelow(
+        uint256 tokenId,
+        uint256 target
+    ) internal {
+        _drainLenderCash();
+        for (uint256 i; i < 600 && lens.healthFactor(tokenId) >= target; ++i) {
+            vm.warp(block.timestamp + 7 days);
+            market.accrue();
+        }
+        assertLt(lens.healthFactor(tokenId), target, "setup: the health factor never fell far enough");
+    }
+
+    /// @dev Takes the lender's cash back out, so what is borrowed is most of what is left.
+    function _drainLenderCash() internal {
+        uint256 cash = market.maxWithdraw(lender);
+        if (cash == 0) return;
+        vm.prank(lender);
+        market.withdraw(cash, lender, lender);
+    }
+
+    /// @dev Read before the prank: an external call in the argument list would spend it.
+    function _borrow(
+        uint256 tokenId,
+        uint256 amount
+    ) internal {
+        vm.prank(borrower);
+        market.borrow(tokenId, amount, borrower);
+    }
+
+    /// @dev Fees the position did not earn, donated into its pool so its share is `amount0`/
+    ///      `amount1`. The fork holds no swaps, so this is the only way to a fee-rich position.
+    function _donateFees(
+        uint256 tokenId,
+        uint256 amount0,
+        uint256 amount1
+    ) internal {
+        PoolKey memory key = _keyOf(tokenId);
+        uint256 poolLiquidity = stateView.getLiquidity(key.toId());
+        uint256 positionLiquidity = positionManager.getPositionLiquidity(tokenId);
+        uint256 donation0 = amount0 * poolLiquidity / positionLiquidity;
+        uint256 donation1 = amount1 * poolLiquidity / positionLiquidity;
+
+        PoolDonateTest donor = new PoolDonateTest(poolManager);
+        uint256 value;
+        if (key.currency0.isAddressZero()) {
+            value = donation0;
+            vm.deal(address(this), donation0);
+        } else {
+            deal(Currency.unwrap(key.currency0), address(this), donation0);
+            IERC20(Currency.unwrap(key.currency0)).approve(address(donor), donation0);
+        }
+        deal(Currency.unwrap(key.currency1), address(this), donation1);
+        IERC20(Currency.unwrap(key.currency1)).approve(address(donor), donation1);
+        donor.donate{value: value}(key, donation0, donation1, "");
+    }
+
     function _depositFixture(
         uint256 tokenId
     ) internal returns (uint256) {
-        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        return _depositFixture(tokenId, TierPresets.blueChip().minPositionUsd);
+    }
+
+    /// @dev A real position, moved to the borrower and deposited by them after its pool is listed.
+    function _depositFixture(
+        uint256 tokenId,
+        uint128 minPositionUsd
+    ) internal returns (uint256) {
+        _listPoolOf(tokenId, minPositionUsd);
         // Read before the prank: an external call in the argument list would spend it.
         address holder = nft.ownerOf(tokenId);
         vm.prank(holder);
