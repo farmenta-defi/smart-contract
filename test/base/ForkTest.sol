@@ -16,8 +16,8 @@ import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 ///      `ROBINHOOD_RPC_URL` (see `.env.example`); the `robinhood` alias resolves it via
 ///      `[rpc_endpoints]` in foundry.toml.
 ///
-///      Tests inheriting this live under `test/fork/` and are excluded from the fast CI
-///      lane, which runs without network access.
+///      Tests inheriting this live under `test/fork/` or `test/upgrade/` and are excluded
+///      from the fast CI lane, which runs without network access.
 abstract contract ForkTest is Test {
     /// @notice Pinned fork block. Raising it invalidates any hard-coded expectation about
     ///         live third-party positions, so re-run the fixture checks when you change it.
