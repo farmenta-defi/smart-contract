@@ -423,6 +423,10 @@ contract FarmentaMarket is
     ///      paused. A frozen or delisted pool does not stop it (§6.5): nothing here asks whether
     ///      the pool still accepts positions, only for its terms.
     ///
+    ///      On a meme market the claim records the pool's TWAP observation first, as every market
+    ///      transaction touching a meme pool does (§5.3): the health check prices the position
+    ///      through it.
+    ///
     ///      The claim runs from `MarketLiquidity`, which documents the recipient rule, the
     ///      post-claim health check and its price gates (§5.2 v0.40), and why nothing is written
     ///      after the first outbound call.
@@ -430,6 +434,7 @@ contract FarmentaMarket is
         uint256 tokenId,
         address to
     ) external whenNotPaused nonReentrant {
+        _recordMemePosition(tokenId);
         MarketLiquidity.collectFees(
             MarketLiquidity.Env({positionManager: positionManager, debt: _debtEnv()}), tokenId, to
         );
