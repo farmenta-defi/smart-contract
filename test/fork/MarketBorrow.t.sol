@@ -51,16 +51,6 @@ contract MarketBorrowForkTest is MarketForkTest {
         market.borrow(tokenId, 200e6, holder);
     }
 
-    function test_blueChipBorrowDoesNotRecordTwap() public {
-        (uint256 tokenId, address holder) = _prepareLoan();
-        PoolKey memory key = _keyOf(tokenId);
-        assertEq(oracle.recordCount(key.toId()), 0);
-
-        vm.prank(holder);
-        market.borrow(tokenId, 10e6, holder);
-        assertEq(oracle.recordCount(key.toId()), 0);
-    }
-
     function test_borrowRejectsAnUnverifiedOraclePrice() public {
         (uint256 tokenId, address holder) = _prepareLoan();
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
@@ -176,7 +166,6 @@ contract MarketBorrowForkTest is MarketForkTest {
         nft.approve(address(memeMarket), tokenId);
         memeMarket.depositCollateral(tokenId);
         vm.stopPrank();
-        assertEq(oracle.recordCount(key.toId()), 1);
 
         deal(address(RobinhoodChain.USDG), lender, 300e6);
         vm.startPrank(lender);
@@ -188,7 +177,6 @@ contract MarketBorrowForkTest is MarketForkTest {
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2400e18, 18);
         vm.prank(holder);
         memeMarket.borrow(tokenId, 10e6, holder);
-        assertEq(oracle.recordCount(key.toId()), 2);
 
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
         vm.prank(holder);

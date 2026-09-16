@@ -6,7 +6,6 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {PositionValuer} from "../../src/PositionValuer.sol";
 import {PriceOracle} from "../../src/PriceOracle.sol";
-import {TwapRecorder} from "../../src/TwapRecorder.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {IAggregatorV3} from "../../src/interfaces/IAggregatorV3.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
@@ -51,7 +50,7 @@ contract PriceOracleForkTest is ForkTest {
         );
         vm.stopPrank();
 
-        oracle = new PriceOracle(policy, IPyth(RobinhoodChain.PYTH), new TwapRecorder(stateView));
+        oracle = new PriceOracle(policy, IPyth(RobinhoodChain.PYTH));
     }
 
     function test_usdgPriceMatchesTheDirectFeedRead() public view {

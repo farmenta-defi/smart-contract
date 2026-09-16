@@ -2,7 +2,6 @@
 pragma solidity 0.8.26;
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
-import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 /// @title IPriceOracle
 /// @notice USD prices for the currencies Farmenta accepts (ARCHITECTURE §4.3, §5.2).
@@ -14,30 +13,12 @@ interface IPriceOracle {
         Currency currency
     ) external view returns (uint256 usd1e18);
 
-    /// @notice USD price for one whole pool currency, scaled 1e18.
-    /// @dev Meme prices need the pool's tick; blue-chip prices ignore `key`.
-    function price(
-        Currency currency,
-        PoolKey calldata key
-    ) external view returns (uint256 usd1e18);
-
     /// @notice USD price used when deciding whether a position is liquidatable.
     /// @dev Kept distinct from `price` even while MVP returns the same source, so a future
     ///      liquidation-specific source does not require changing every liquidation caller.
     function priceForLiquidation(
         Currency currency
     ) external view returns (uint256 usd1e18);
-
-    /// @notice Liquidation price for one whole pool currency, scaled 1e18.
-    function priceForLiquidation(
-        Currency currency,
-        PoolKey calldata key
-    ) external view returns (uint256 usd1e18);
-
-    /// @notice Records a meme-pool observation and is a no-op for blue-chip pools.
-    function record(
-        PoolKey calldata key
-    ) external;
 
     /// @notice Returns a normalized Pyth ETH/USD observation, or zero values when unavailable.
     /// @dev Freshness and deviation are risk decisions owned by `FarmentaMarket`.

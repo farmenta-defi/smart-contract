@@ -34,8 +34,6 @@ library TierPresets {
     }
 
     uint16 internal constant BPS = 10_000;
-    uint16 internal constant MEME_STALE_HAIRCUT_BPS = 2000;
-    uint16 internal constant MEME_CRASH_THRESHOLD_BPS = 2500;
 
     /// @notice Blue-chip: ETH/USDG and WETH/USDG.
     function blueChip() internal pure returns (Preset memory) {
