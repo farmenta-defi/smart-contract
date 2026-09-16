@@ -141,7 +141,10 @@ Custody, lending and liquidation.
   the health factor at or above 1 (spec §4.1, §5.2 v0.40).
 - **Adding liquidity.** A borrower can add to a position in custody with a Permit2 signature,
   while its pool still passes §6.1. The tokens go straight to `PositionManager` and never through
-  the market (FAR-9).
+  the market. The position's fees are claimed to the borrower in the same transaction, so a
+  position whose fees exceed what the addition costs can still be added to; with debt outstanding
+  that claim passes the same §5.2 price gates as a borrow and must leave the health factor at or
+  above 1 (spec §4.1 v0.47, FAR-9).
 
 Still owed: `decreaseLiquidity` (FAR-8).
 
