@@ -4,13 +4,16 @@ pragma solidity 0.8.26;
 import {Test} from "forge-std/Test.sol";
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {IStateView} from "@uniswap/v4-periphery/src/interfaces/IStateView.sol";
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {PriceOracle} from "../../src/PriceOracle.sol";
+import {TwapRecorder} from "../../src/TwapRecorder.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IPyth} from "../../src/interfaces/IPyth.sol";
 import {MockAggregatorV3} from "../mocks/MockAggregatorV3.sol";
 import {MockPyth} from "../mocks/MockPyth.sol";
+import {MockStateView} from "../mocks/MockStateView.sol";
 
 /// @notice Unit tests for Chainlink normalization and policy-backed token metadata.
 contract PriceOracleTest is Test {
@@ -45,7 +48,7 @@ contract PriceOracleTest is Test {
         policy.setTokenConfig(NATIVE, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(ethUsd));
         vm.stopPrank();
 
-        oracle = new PriceOracle(policy, pyth);
+        oracle = new PriceOracle(policy, pyth, new TwapRecorder(IStateView(address(new MockStateView()))));
     }
 
     function test_priceNormalizesFeedDecimalsToUsd1e18() public view {

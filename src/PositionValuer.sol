@@ -75,8 +75,8 @@ contract PositionValuer is IPositionValuer {
         int24 tickLower = info.tickLower();
         int24 tickUpper = info.tickUpper();
 
-        uint256 price0 = _price(key.currency0, forLiquidation);
-        uint256 price1 = _price(key.currency1, forLiquidation);
+        uint256 price0 = _price(key.currency0, key, forLiquidation);
+        uint256 price1 = _price(key.currency1, key, forLiquidation);
         uint8 decimals0 = oracle.decimals(key.currency0);
         uint8 decimals1 = oracle.decimals(key.currency1);
 
@@ -100,9 +100,10 @@ contract PositionValuer is IPositionValuer {
     /// @dev The one place the two price surfaces of §4.3 are told apart.
     function _price(
         Currency currency,
+        PoolKey memory key,
         bool forLiquidation
     ) internal view returns (uint256) {
-        return forLiquidation ? oracle.priceForLiquidation(currency) : oracle.price(currency);
+        return forLiquidation ? oracle.priceForLiquidation(currency, key) : oracle.price(currency, key);
     }
 
     /// @dev One read of the position's pool-side state, feeding both the principal and the
