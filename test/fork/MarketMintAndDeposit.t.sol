@@ -425,6 +425,23 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         market.mintAndDeposit(tightUsdg, permit, signature);
     }
 
+    /// @notice The permit must carry one entry per ERC-20 leg, two for this pair.
+    /// @dev The count check lives in the helper `increaseLiquidity` (FAR-9) shares, so both callers
+    ///      test it. A short permit must be refused by name, not by an arithmetic panic further in.
+    function test_permitMustCarryOneEntryPerErc20Leg() public {
+        _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
+        FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        ISignatureTransfer.PermitBatchTransferFrom memory permit = _permitFor(p, 0, block.timestamp + 1 hours);
+        ISignatureTransfer.TokenPermissions[] memory one = new ISignatureTransfer.TokenPermissions[](1);
+        one[0] = permit.permitted[0];
+        permit.permitted = one;
+        bytes memory signature = _sign(BORROWER_PK, permit);
+
+        vm.prank(borrower);
+        vm.expectRevert(FarmentaMarket.PermitDoesNotMatchPool.selector);
+        market.mintAndDeposit(p, permit, signature);
+    }
+
     function test_expiredPermitReverts() public {
         _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
         FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);

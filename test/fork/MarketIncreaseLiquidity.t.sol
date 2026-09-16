@@ -2,7 +2,9 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {PoolDonateTest} from "@uniswap/v4-core/src/test/PoolDonateTest.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -277,6 +279,21 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         assertEq(positionManager.getPositionLiquidity(tokenId), 2 * LIQUIDITY, "liquidity was not added");
     }
 
+    /// @notice The addition accrues before it reads anything.
+    /// @dev The tiket asks for `accrue()` first. Without it the health check below would price the
+    ///      position against a stale index.
+    function test_theAdditionAccruesFirst() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        _borrow(tokenId, 100e6);
+        _drainLenderCash();
+        vm.warp(block.timestamp + 30 days);
+        uint256 indexBefore = market.borrowIndex();
+
+        _increase(tokenId, LIQUIDITY, WETH_BUDGET, USDG_BUDGET, 0);
+
+        assertGt(market.borrowIndex(), indexBefore, "the addition did not accrue first");
+    }
+
     /* --------------------------------- native ETH ----------------------------- */
 
     /// @notice A native-ETH pool spends from `msg.value` and sends the rest back, and the
@@ -476,6 +493,48 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         market.increaseLiquidity(tokenId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
     }
 
+    /// @notice A zero addition is refused: that is a fee claim, and `collectFees` is its function.
+    function test_zeroLiquidityReverts() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) =
+            _signedPermit(wethKey, WETH_BUDGET, USDG_BUDGET, 0);
+
+        vm.prank(borrower);
+        vm.expectRevert(FarmentaMarket.ZeroLiquidity.selector);
+        market.increaseLiquidity(tokenId, 0, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
+    }
+
+    /// @notice The permit must carry one entry per ERC-20 leg: two for a pair, one for a native pool.
+    /// @dev The count check guards the helper `mintAndDeposit` shares. A permit that is simply short
+    ///      or long must be refused by name, not by an arithmetic panic further in.
+    function test_permitMustCarryOneEntryPerErc20Leg() public {
+        uint256 wethId = _depositFresh(wethKey);
+        ISignatureTransfer.PermitBatchTransferFrom memory permit =
+            _permitFor(wethKey, WETH_BUDGET, USDG_BUDGET, 0, block.timestamp + 1 hours);
+        ISignatureTransfer.TokenPermissions[] memory one = new ISignatureTransfer.TokenPermissions[](1);
+        one[0] = permit.permitted[0];
+        permit.permitted = one;
+        bytes memory signature = _sign(BORROWER_PK, permit);
+
+        vm.prank(borrower);
+        vm.expectRevert(FarmentaMarket.PermitDoesNotMatchPool.selector);
+        market.increaseLiquidity(wethId, LIQUIDITY, uint128(WETH_BUDGET), uint128(USDG_BUDGET), permit, signature);
+
+        uint256 ethId = _depositFixture(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        vm.deal(borrower, 1 ether);
+        permit = _permitFor(_keyOf(ethId), 1 ether, USDG_BUDGET, 0, block.timestamp + 1 hours);
+        ISignatureTransfer.TokenPermissions[] memory two = new ISignatureTransfer.TokenPermissions[](2);
+        (two[0], two[1]) = (permit.permitted[0], permit.permitted[0]);
+        permit.permitted = two;
+        signature = _sign(BORROWER_PK, permit);
+
+        vm.prank(borrower);
+        vm.expectRevert(FarmentaMarket.PermitDoesNotMatchPool.selector);
+        market.increaseLiquidity{value: 1 ether}(
+            ethId, LIQUIDITY, uint128(1 ether), uint128(USDG_BUDGET), permit, signature
+        );
+    }
+
     /// @notice Only the address a position is recorded to may add to it.
     /// @dev A broadcast permit is public, but it cannot be spent here by anyone else: the
     ///      record is checked before Permit2 is called, and Permit2 would refuse the signer too.
@@ -567,6 +626,63 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
             "the borrower paid for the redemption"
         );
         assertEq(afterIncrease.marketUsdg, before.marketUsdg - redeemed, "the market paid out more than the redeem");
+    }
+
+    /// @notice A caller that re-enters a guarded market function while the ETH is being paid out
+    ///         gets nowhere, and takes its own addition down with it.
+    /// @dev The guard on the wrapper, exercised where a contract caller first runs code: the `TAKE`
+    ///      of the ETH fees. `repay` of zero is the call it makes, which succeeds if the guard is
+    ///      gone. The ETH transfer reverting is what PoolManager reports.
+    function test_aReentrantCallerIsRefused() public {
+        ContractBorrower caller = new ContractBorrower(market);
+        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
+        address holder = nft.ownerOf(tokenId);
+        vm.prank(holder);
+        nft.transferFrom(holder, address(caller), tokenId);
+        caller.deposit(tokenId);
+        caller.approve(RobinhoodChain.USDG, RobinhoodChain.PERMIT2);
+        deal(RobinhoodChain.USDG, address(caller), USDG_BUDGET);
+        vm.deal(address(this), 1 ether);
+        caller.armReentry(tokenId);
+
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        ISignatureTransfer.PermitBatchTransferFrom memory permit =
+            _permitFor(_keyOf(tokenId), 1 ether, USDG_BUDGET, 0, block.timestamp + 1 hours);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(caller),
+                bytes4(0),
+                abi.encodeWithSelector(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector),
+                abi.encodeWithSelector(CurrencyLibrary.NativeTransferFailed.selector)
+            )
+        );
+        caller.increase{value: 1 ether}(tokenId, liquidity, uint128(1 ether), uint128(USDG_BUDGET), permit);
+    }
+
+    /// @notice Even with both approval layers standing, the market never pays for an addition.
+    /// @dev A market that has ever run `mintAndDeposit` leaves `token → Permit2 → PositionManager`
+    ///      at the maximum. `SETTLE` with `payerIsUser = true` would then draw the USDG leg from
+    ///      lenders' cash through Permit2. Nothing here is a payer, so the balances do not move.
+    function test_aStandingAllowanceStillDoesNotLetTheMarketPay() public {
+        uint256 tokenId = _depositFresh(wethKey);
+        vm.startPrank(address(market));
+        IERC20(RobinhoodChain.WETH).approve(RobinhoodChain.PERMIT2, type(uint256).max);
+        IERC20(RobinhoodChain.USDG).approve(RobinhoodChain.PERMIT2, type(uint256).max);
+        IAllowanceTransfer(RobinhoodChain.PERMIT2)
+            .approve(RobinhoodChain.WETH, RobinhoodChain.POSITION_MANAGER, type(uint160).max, type(uint48).max);
+        IAllowanceTransfer(RobinhoodChain.PERMIT2)
+            .approve(RobinhoodChain.USDG, RobinhoodChain.POSITION_MANAGER, type(uint160).max, type(uint48).max);
+        vm.stopPrank();
+
+        Balances memory before = _balances();
+        _increase(tokenId, LIQUIDITY, WETH_BUDGET, USDG_BUDGET, 0);
+        Balances memory afterIncrease = _balances();
+
+        assertEq(afterIncrease.marketUsdg, before.marketUsdg, "lenders' USDG paid for the addition");
+        assertEq(afterIncrease.marketWeth, before.marketWeth, "the market's WETH paid for the addition");
     }
 
     /* --------------------------------- helpers -------------------------------- */

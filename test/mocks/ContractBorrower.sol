@@ -55,7 +55,25 @@ contract ContractBorrower is IERC1271 {
         market.increaseLiquidity{value: msg.value}(tokenId, liquidity, amount0Max, amount1Max, permit, "");
     }
 
+    /// @notice Set by `armReentry`: the position a re-entrant call names when ETH arrives.
+    uint256 public reentrantTokenId;
+    bool internal reenter;
+
+    /// @notice Arms one re-entrant call into a guarded market function, made from `receive`.
+    /// @dev `repay` of zero is the call to make: it is `nonReentrant`, and with the guard gone it
+    ///      succeeds instead of reverting, so a test that expects a revert fails on that mutant.
+    function armReentry(
+        uint256 tokenId
+    ) external {
+        reentrantTokenId = tokenId;
+        reenter = true;
+    }
+
     receive() external payable {
         usdgOnEthArrival = IERC20(market.asset()).balanceOf(address(this));
+        if (reenter) {
+            reenter = false;
+            market.repay(reentrantTokenId, 0);
+        }
     }
 }
