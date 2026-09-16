@@ -809,6 +809,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
         oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT / 2);
 
         assertGt(lens.healthFactor(tokenId), 1e18, "the borrow surface still calls it healthy");
+        assertLt(lens.liquidationHealthFactor(tokenId), 1e18, "the lens must follow the liquidation surface");
 
         vm.prank(liquidator);
         (uint256 repaid,,,) = market.liquidate(tokenId, 10e6, 0, 0, liquidator);

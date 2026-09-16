@@ -10,6 +10,7 @@ import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
 import {IPositionValuer} from "./interfaces/IPositionValuer.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {DebtMath} from "./libraries/DebtMath.sol";
+import {LiquidationMath} from "./libraries/LiquidationMath.sol";
 import {MarketLedger} from "./libraries/MarketLedger.sol";
 
 /// @title MarketLens
@@ -73,6 +74,29 @@ contract MarketLens {
         MarketLedger.Loan memory loan = market.loanOf(tokenId);
         uint256 debtUsd = _debtUsd(debt);
         return DebtMath.healthFactor(positionValue(tokenId), policy.termsOf(loan.poolKeyId).ltBps, debtUsd);
+    }
+
+    /// @notice Health factor on the exact price surface used by `liquidate`, scaled by 1e18.
+    /// @dev Use this—not `healthFactor`—to decide whether to submit a liquidation transaction.
+    function liquidationHealthFactor(
+        uint256 tokenId
+    ) external view returns (uint256) {
+        uint256 debt = market.debtOf(tokenId);
+        if (debt == 0) return type(uint256).max;
+
+        MarketLedger.Loan memory loan = market.loanOf(tokenId);
+        ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
+        IPositionValuer.Valuation memory valuation = valuer.valueForLiquidation(tokenId);
+        Currency assetCurrency = Currency.wrap(address(asset));
+        return LiquidationMath.healthFactor(
+            valuation.principalUsd,
+            valuation.feesUsd,
+            terms.removeHaircutBps,
+            terms.ltBps,
+            debt,
+            oracle.priceForLiquidation(assetCurrency),
+            oracle.decimals(assetCurrency)
+        );
     }
 
     /// @notice Lender-protection reserve floor for the market's current assets.
