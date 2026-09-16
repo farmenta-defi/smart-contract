@@ -284,10 +284,8 @@ library MarketLiquidation {
         c.usdgPrice = env.oracle.priceForLiquidation(Currency.wrap(env.asset));
         c.usdgDecimals = env.oracle.decimals(Currency.wrap(env.asset));
 
-        uint256 hf = DebtMath.healthFactor(
-            DebtMath.collateralValue(v.principalUsd, v.feesUsd, terms.removeHaircutBps),
-            terms.ltBps,
-            DebtMath.debtUsd(debt, c.usdgPrice, c.usdgDecimals)
+        uint256 hf = LiquidationMath.healthFactor(
+            v.principalUsd, v.feesUsd, terms.removeHaircutBps, terms.ltBps, debt, c.usdgPrice, c.usdgDecimals
         );
         if (hf >= WAD) revert PositionIsHealthy(r.tokenId, hf);
 

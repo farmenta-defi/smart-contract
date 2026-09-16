@@ -44,6 +44,25 @@ library LiquidationMath {
     ///      move the boundary at which a liquidator may close a whole position.
     uint256 internal constant FULL_CLOSE_DEBT_USDG = 100e6;
 
+    /// @notice The health factor used by the liquidation gate and its read-only lens.
+    /// @dev Keeping this calculation here prevents a keeper-facing view from drifting from the
+    ///      gate when liquidation prices differ from borrow prices (for example, meme TWAP).
+    function healthFactor(
+        uint256 principalUsd,
+        uint256 feesUsd,
+        uint16 removeHaircutBps,
+        uint16 ltBps,
+        uint256 debt,
+        uint256 debtPrice,
+        uint8 debtDecimals
+    ) internal pure returns (uint256) {
+        return DebtMath.healthFactor(
+            DebtMath.collateralValue(principalUsd, feesUsd, removeHaircutBps),
+            ltBps,
+            DebtMath.debtUsd(debt, debtPrice, debtDecimals)
+        );
+    }
+
     /// @param debt What the position owes, USDG 6 decimals.
     /// @param repayRequested What the liquidator asked to repay, USDG 6 decimals.
     /// @param realizableUsd `value` of §8 step 1: principal + **all** fees, after the §6.3
@@ -91,11 +110,11 @@ library LiquidationMath {
     ///      arrive before the next move.
     function closeFactorBps(
         ICollateralPolicy.Tier tier,
-        uint256 healthFactor,
+        uint256 healthFactor_,
         uint256 debt
     ) internal pure returns (uint16) {
         if (tier == ICollateralPolicy.Tier.MEME) return uint16(BPS);
-        if (healthFactor < FULL_CLOSE_HF || debt < FULL_CLOSE_DEBT_USDG) return uint16(BPS);
+        if (healthFactor_ < FULL_CLOSE_HF || debt < FULL_CLOSE_DEBT_USDG) return uint16(BPS);
         return BLUE_CHIP_CLOSE_FACTOR_BPS;
     }
 
