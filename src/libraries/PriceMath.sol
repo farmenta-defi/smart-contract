@@ -79,26 +79,4 @@ library PriceMath {
         uint256 diff = spot > derived ? spot - derived : derived - spot;
         return FullMath.mulDiv(diff, BPS, derived);
     }
-
-    /// @notice Quotes `baseAmount` of one pool leg in the other leg at `tick`.
-    /// @dev This is Uniswap's Q64.96 tick conversion kept next to the other price math so
-    ///      callers never reconstruct the square-and-scale arithmetic themselves.
-    function quoteAtTick(
-        int24 tick,
-        uint256 baseAmount,
-        bool baseIsCurrency0
-    ) internal pure returns (uint256 quoteAmount) {
-        uint160 sqrtRatioX96 = TickMath.getSqrtPriceAtTick(tick);
-        if (sqrtRatioX96 <= type(uint128).max) {
-            uint256 ratioX192 = uint256(sqrtRatioX96) * sqrtRatioX96;
-            return baseIsCurrency0
-                ? FullMath.mulDiv(ratioX192, baseAmount, 1 << 192)
-                : FullMath.mulDiv(1 << 192, baseAmount, ratioX192);
-        }
-
-        uint256 ratioX128 = FullMath.mulDiv(sqrtRatioX96, sqrtRatioX96, 1 << 64);
-        return baseIsCurrency0
-            ? FullMath.mulDiv(ratioX128, baseAmount, 1 << 128)
-            : FullMath.mulDiv(1 << 128, baseAmount, ratioX128);
-    }
 }

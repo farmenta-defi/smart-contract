@@ -259,7 +259,6 @@ contract FarmentaMarket is
     function depositCollateral(
         uint256 tokenId
     ) external whenNotPaused nonReentrant {
-        _recordMemePosition(tokenId);
         IERC721(address(positionManager)).transferFrom(msg.sender, address(this), tokenId);
         MarketMint.acceptCollateral(_mintEnv(), msg.sender, tokenId);
     }
@@ -305,7 +304,6 @@ contract FarmentaMarket is
         catch {
             if (nft.getApproved(tokenId) != address(this)) revert PermitRejected(tokenId);
         }
-        _recordMemePosition(tokenId);
         nft.transferFrom(depositor, address(this), tokenId);
         MarketMint.acceptCollateral(_mintEnv(), depositor, tokenId);
     }
@@ -354,7 +352,6 @@ contract FarmentaMarket is
         ISignatureTransfer.PermitBatchTransferFrom calldata permit,
         bytes calldata signature
     ) external payable whenNotPaused nonReentrant returns (uint256 tokenId) {
-        _recordMemePool(p.poolKey);
         return MarketMint.mintAndDeposit(_mintEnv(), _mintParams(p), permit, signature);
     }
 
@@ -379,7 +376,6 @@ contract FarmentaMarket is
         bytes memory
     ) public override whenNotPaused nonReentrant returns (bytes4) {
         if (msg.sender != address(positionManager)) revert NotThePositionManager(msg.sender);
-        _recordMemePosition(tokenId);
         MarketMint.acceptCollateral(_mintEnv(), from, tokenId);
         return this.onERC721Received.selector;
     }
@@ -427,10 +423,6 @@ contract FarmentaMarket is
     ///      paused. A frozen or delisted pool does not stop it (§6.5): nothing here asks whether
     ///      the pool still accepts positions, only for its terms.
     ///
-    ///      On a meme market the claim records the pool's TWAP observation first, as every market
-    ///      transaction touching a meme pool does (§5.3): the health check prices the position
-    ///      through it.
-    ///
     ///      The claim runs from `MarketLiquidity`, which documents the recipient rule, the
     ///      post-claim health check and its price gates (§5.2 v0.40), and why nothing is written
     ///      after the first outbound call.
@@ -438,7 +430,6 @@ contract FarmentaMarket is
         uint256 tokenId,
         address to
     ) external whenNotPaused nonReentrant {
-        _recordMemePosition(tokenId);
         MarketLiquidity.collectFees(
             MarketLiquidity.Env({positionManager: positionManager, debt: _debtEnv()}), tokenId, to
         );
@@ -480,7 +471,6 @@ contract FarmentaMarket is
         uint256 amount,
         address to
     ) external whenNotPaused nonReentrant {
-        _recordMemePosition(tokenId);
         MarketDebt.borrow(_debtEnv(), tokenId, amount, to);
     }
 
@@ -532,6 +522,10 @@ contract FarmentaMarket is
     ///      here is what has to be visible from outside: the pause, the reentrancy guard, the
     ///      accrual, and every event.
     ///
+    ///      §8 step 1 also asks for a TWAP `record` on meme pools. That belongs with the meme
+    ///      price path (FAR-16) and arrives with it: this market has no recorder to call yet,
+    ///      and a liquidation priced off a TWAP nothing reads would be worse than one priced
+    ///      off Chainlink.
     function liquidate(
         uint256 tokenId,
         uint256 repayAmount,
@@ -540,7 +534,6 @@ contract FarmentaMarket is
         address to
     ) external whenNotPaused nonReentrant returns (uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt) {
         accrue();
-        _recordMemePosition(tokenId);
 
         MarketLiquidation.Outcome memory outcome = MarketLiquidation.execute(
             MarketLiquidation.Env({
@@ -806,22 +799,6 @@ contract FarmentaMarket is
 
     function _mintEnv() private view returns (MarketMint.Env memory) {
         return MarketMint.Env({positionManager: positionManager, policy: policy, valuer: valuer, debt: _debtEnv()});
-    }
-
-    /// @dev Blue-chip calls stop before the external oracle call, so their existing price path
-    ///      neither records observations nor pays the recorder's gas.
-    function _recordMemePosition(
-        uint256 tokenId
-    ) private {
-        if (_marketStorage().tier != ICollateralPolicy.Tier.MEME) return;
-        (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(tokenId);
-        oracle.record(key);
-    }
-
-    function _recordMemePool(
-        PoolKey memory key
-    ) private {
-        if (_marketStorage().tier == ICollateralPolicy.Tier.MEME) oracle.record(key);
     }
 
     function _mintParams(
