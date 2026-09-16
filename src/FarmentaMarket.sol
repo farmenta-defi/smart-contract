@@ -185,6 +185,7 @@ contract FarmentaMarket is
     error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
     error PositionWouldBeUnhealthy(uint256 tokenId, uint256 healthFactor);
     error NativeValueMismatch(uint256 expected, uint256 sent);
+    error ZeroLiquidity();
     error PermitDoesNotMatchPool();
     error ReserveWithdrawalExceedsAvailable(uint256 amount, uint256 available);
 
@@ -373,21 +374,31 @@ contract FarmentaMarket is
     /// @param permit A Permit2 batch transfer naming this market as spender, listing the pool's
     ///        ERC-20 currencies in pool order, each for at least its maximum.
     /// @param signature The caller's signature over `permit`.
-    /// @dev **No health-factor gate** (§4.1). The caller pays in and takes nothing out, so no value
-    ///      can leave the position this way. Fees the addition realises are spent on it rather
-    ///      than paid out, which is why a leg whose uncollected fees exceed its cost reverts
-    ///      (`DeltaNotNegative`) instead of handing the surplus over past `collectFees`' health
-    ///      check. That spending is also the one way the health factor can dip, and only at second
-    ///      order: the fees leave the valuation, and when the pool price is off the oracle the
-    ///      liquidity they bought, valued at the oracle (§5.1), is worth slightly less than they
-    ///      were. What moves is the caller's own money, and it never reaches anyone else.
+    /// @dev **The position's fees are claimed to the caller first** (§4.1 v0.47, decided on PR
+    ///      #19). `INCREASE_LIQUIDITY` credits uncollected fees against what the addition costs,
+    ///      and a leg whose fees exceed its cost leaves PositionManager owed nothing, which
+    ///      `SETTLE` refuses (`DeltaNotNegative`). That is every addition to an out-of-range
+    ///      position holding fees on the leg it no longer spends, whatever its size. So the claim
+    ///      is made explicitly first — `DECREASE_LIQUIDITY(0)` and a `TAKE` per leg — and the
+    ///      addition that follows can only owe. It is the same claim `collectFees` makes, in the
+    ///      same transaction, which is why it carries the same protections:
+    ///
+    ///      **with debt outstanding the position is checked afterwards, not before.** The addition
+    ///      pays in and the claim pays out, so the health factor is read once both have happened
+    ///      and must be at least 1 (`MarketDebt.requireHealthy`, §7). That check runs §5.2's borrow
+    ///      price gates first, exactly as `collectFees` does (v0.40): fees must not leave at a price
+    ///      the market refuses to lend against. A position owing nothing runs neither, because
+    ///      there is no debt to protect.
     ///
     ///      **The pool must still pass §6.1**, checked before any token moves: it may have been
     ///      frozen, or lost a token or its hook allowlisting, since the position was deposited
-    ///      (§6.5), and new capital must not go where the policy itself refuses it.
+    ///      (§6.5), and new capital must not go where the policy itself refuses it. A zero
+    ///      `liquidity` is refused too: that is a fee claim, and `collectFees` is the function for
+    ///      one.
     ///
     ///      On a meme market the addition records the pool's TWAP observation first, as every
-    ///      market transaction touching a meme pool does (§5.3).
+    ///      market transaction touching a meme pool does (§5.3). It runs inside the library, after
+    ///      the checks above, so a refusal names its own reason.
     ///
     ///      **The tokens never touch this market, departing from §4.1's `SETTLE_PAIR`.** Permit2
     ///      delivers the caller's maxima straight to PositionManager, which settles out of its
@@ -404,7 +415,6 @@ contract FarmentaMarket is
         ISignatureTransfer.PermitBatchTransferFrom calldata permit,
         bytes calldata signature
     ) external payable whenNotPaused nonReentrant {
-        _recordMemePosition(tokenId);
         MarketMint.increaseLiquidity(
             _mintEnv(),
             MarketMint.IncreaseParams({

@@ -30,6 +30,7 @@ library MarketMint {
     event LiquidityChanged(uint256 indexed tokenId, PoolId indexed poolId, int256 liqDelta);
 
     error NotTheDepositor(uint256 tokenId, address depositor);
+    error ZeroLiquidity();
     error PositionAlreadyHeld(uint256 tokenId);
     error PositionIsEmpty(uint256 tokenId);
     error PositionBelowMinimum(uint256 principalUsd, uint256 minimumUsd);
@@ -101,16 +102,19 @@ library MarketMint {
         }
     }
 
-    /// @dev Adds liquidity to a recorded position. The caller's tokens go straight from Permit2
-    ///      to PositionManager, which settles out of that balance and sweeps the rest back, so
-    ///      nothing passes through the market while the pool's hook runs. See
-    ///      `FarmentaMarket.increaseLiquidity`.
+    /// @dev Adds liquidity to a recorded position, having first claimed the fees it holds. The
+    ///      caller's tokens go straight from Permit2 to PositionManager, which settles out of that
+    ///      balance and sweeps the rest back, so nothing passes through the market while the pool's
+    ///      hook runs. See `FarmentaMarket.increaseLiquidity`.
     function increaseLiquidity(
         Env calldata env,
         IncreaseParams calldata p,
         ISignatureTransfer.PermitBatchTransferFrom calldata permit,
         bytes calldata signature
     ) external {
+        // A zero addition would be a fee claim with no recipient argument and no `CollectFees`
+        // event: `collectFees` is that function (FAR-7). It would also run the pool's remove hook.
+        if (p.liquidity == 0) revert ZeroLiquidity();
         MarketDebt.accrue(env.debt);
 
         (PoolKey memory key, PoolId poolId) = _admitIncrease(env, p.tokenId);
@@ -124,6 +128,10 @@ library MarketMint {
             _increaseActions(key, p, address(env.debt.asset)), permit.deadline
         );
 
+        // The claim is what can lower the health factor, so it is checked after the whole action
+        // (§7, as `collectFees` does in v0.40). A position owing nothing skips both this and the
+        // §5.2 price gates it runs.
+        MarketDebt.requireHealthy(env.debt, p.tokenId);
         emit LiquidityChanged(p.tokenId, poolId, int256(uint256(p.liquidity)));
     }
 
@@ -134,13 +142,17 @@ library MarketMint {
     function _admitIncrease(
         Env calldata env,
         uint256 tokenId
-    ) private view returns (PoolKey memory key, PoolId poolId) {
+    ) private returns (PoolKey memory key, PoolId poolId) {
         MarketLedger.Layout storage $ = MarketLedger.layout();
         MarketLedger.Loan storage loan = $.loans[tokenId];
         if (loan.owner != msg.sender) revert NotTheDepositor(tokenId, loan.owner);
 
         (key,) = env.positionManager.getPoolAndPositionInfo(tokenId);
         env.policy.checkPool(key, $.tier);
+        // §5.3: every market transaction touching a meme pool records an observation first, which
+        // is also what the health check below prices the position through. Placed after the checks
+        // above so a refusal names its own reason rather than `TwapUnavailable`.
+        if ($.tier == ICollateralPolicy.Tier.MEME) env.debt.oracle.record(key);
         poolId = loan.poolKeyId;
     }
 
@@ -260,12 +272,19 @@ library MarketMint {
         return abi.encode(actions, params);
     }
 
-    /// @dev PositionManager pays each leg's full debt out of its own balance (`payerIsUser =
-    ///      false`), which is what Permit2 just delivered plus `msg.value`, then sweeps whatever is
-    ///      left of each currency back to the caller. The fees the increase realises offset its
-    ///      cost; a leg whose fees exceed its cost has a credit, not a debt, and `SETTLE` reverts.
+    /// @dev The fees come out first, then the liquidity goes in. `INCREASE_LIQUIDITY` credits the
+    ///      position's whole uncollected fee balance against its cost, and `SETTLE` reverts
+    ///      (`DeltaNotNegative`) on a leg where that credit exceeds the cost — which is every
+    ///      addition to an out-of-range position holding fees on the leg it no longer spends. So the
+    ///      claim is made first, as its own `DECREASE_LIQUIDITY(0)` plus a `TAKE` per leg, and the
+    ///      addition that follows can only owe (v0.47, decided on PR #19).
     ///
-    ///      **The borrow asset is swept first** (§4.1 v0.26, as `collectFees` does in v0.40). In a
+    ///      PositionManager pays each leg's full debt out of its own balance (`payerIsUser =
+    ///      false`), which is what Permit2 just delivered plus `msg.value`, then sweeps whatever is
+    ///      left of each currency back to the caller.
+    ///
+    ///      **The borrow asset is taken and swept first** (§4.1 v0.26, as `collectFees` does in
+    ///      v0.40). In a
     ///      native-ETH pool the ETH is `currency0`, and sending it runs the caller's code; the USDG
     ///      change has left by then. None of the market's own cash is on this path either way; the
     ///      order is kept so that no function is an exception to the rule.
@@ -275,20 +294,28 @@ library MarketMint {
         address asset
     ) private view returns (bytes memory) {
         bytes memory actions = abi.encodePacked(
+            uint8(Actions.DECREASE_LIQUIDITY),
+            uint8(Actions.TAKE),
+            uint8(Actions.TAKE),
             uint8(Actions.INCREASE_LIQUIDITY),
             uint8(Actions.SETTLE),
             uint8(Actions.SETTLE),
             uint8(Actions.SWEEP),
             uint8(Actions.SWEEP)
         );
-        bytes[] memory params = new bytes[](5);
-        params[0] = abi.encode(p.tokenId, uint256(p.liquidity), p.amount0Max, p.amount1Max, bytes(""));
-        params[1] = abi.encode(key.currency0, ActionConstants.OPEN_DELTA, false);
-        params[2] = abi.encode(key.currency1, ActionConstants.OPEN_DELTA, false);
         (Currency first, Currency second) =
             Currency.unwrap(key.currency1) == asset ? (key.currency1, key.currency0) : (key.currency0, key.currency1);
-        params[3] = abi.encode(first, msg.sender);
-        params[4] = abi.encode(second, msg.sender);
+        bytes[] memory params = new bytes[](8);
+        // A `DECREASE_LIQUIDITY` of zero realises the whole fee balance and no principal, the same
+        // claim `collectFees` makes (FAR-7).
+        params[0] = abi.encode(p.tokenId, uint256(0), uint128(0), uint128(0), bytes(""));
+        params[1] = abi.encode(first, msg.sender, uint256(ActionConstants.OPEN_DELTA));
+        params[2] = abi.encode(second, msg.sender, uint256(ActionConstants.OPEN_DELTA));
+        params[3] = abi.encode(p.tokenId, uint256(p.liquidity), p.amount0Max, p.amount1Max, bytes(""));
+        params[4] = abi.encode(key.currency0, ActionConstants.OPEN_DELTA, false);
+        params[5] = abi.encode(key.currency1, ActionConstants.OPEN_DELTA, false);
+        params[6] = abi.encode(first, msg.sender);
+        params[7] = abi.encode(second, msg.sender);
         return abi.encode(actions, params);
     }
 
