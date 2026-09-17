@@ -647,6 +647,24 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         assertEq(attacker.redeemed(), fair, "a share redeemed mid-removal is worth what it is worth after");
     }
 
+    /// @notice §4.1 v0.26: the accrual, the removal's only write, is done before the first outbound call.
+    /// @dev Thirty days of interest are left unaccrued. The recipient reads the market's borrow index
+    ///      from inside the ETH payout: an index still at its old value there means the ledger was
+    ///      written after code the market does not control had already run. The redeem test above
+    ///      cannot see this, because `redeem` accrues for itself.
+    function test_theLedgerIsAccruedBeforeTheFirstOutboundCall() public {
+        _openLoan(100e6);
+        RedeemingRecipient receiver = new RedeemingRecipient(market);
+        uint256 staleIndex = market.borrowIndex();
+        vm.warp(block.timestamp + 30 days);
+
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, address(receiver));
+
+        assertGt(market.borrowIndex(), staleIndex, "thirty days must move the index");
+        assertEq(receiver.borrowIndexOnEthArrival(), market.borrowIndex(), "the index was current when the ETH arrived");
+    }
+
     /// @notice A recipient that calls back into the market from the ETH it is paid gets nowhere, and
     ///         takes the removal down with it.
     /// @dev The guard on the wrapper. `repay` of zero is the call the recipient makes, which succeeds

@@ -19,6 +19,11 @@ contract RedeemingRecipient {
     /// @notice This contract's USDG balance when the ETH arrived, read before anything else runs.
     uint256 public usdgOnEthArrival;
 
+    /// @notice The market's borrow index when the ETH arrived.
+    /// @dev The payout is an outbound call, and §4.1 v0.26 wants every write done before the first
+    ///      one. An index still at its pre-accrual value here means the accrual came after.
+    uint256 public borrowIndexOnEthArrival;
+
     constructor(
         FarmentaMarket market_
     ) {
@@ -39,6 +44,7 @@ contract RedeemingRecipient {
 
     receive() external payable {
         usdgOnEthArrival = IERC20(market.asset()).balanceOf(address(this));
+        borrowIndexOnEthArrival = market.borrowIndex();
         if (!armed) return;
         armed = false;
         redeemed = market.redeem(market.balanceOf(address(this)), address(this), address(this));
