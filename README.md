@@ -145,8 +145,13 @@ Custody, lending and liquidation.
   position whose fees exceed what the addition costs can still be added to; with debt outstanding
   that claim passes the same §5.2 price gates as a borrow and must leave the health factor at or
   above 1 (spec §4.1 v0.47, FAR-9).
-
-Still owed: `decreaseLiquidity` (FAR-8).
+- **Removing liquidity.** A borrower can take part of a position's liquidity out without taking the
+  position out of custody. The slice's principal and every fee the position holds go straight to
+  the recipient, USDG first, and `min0`/`min1` bound the principal alone. What stays must still
+  clear the pool's minimum position value (principal after the removal haircut, fees excluded),
+  owing or not, so the whole of a position never leaves this way; with debt outstanding the
+  removal passes the same §5.2 price gates as a borrow and must leave the health factor at or
+  above 1. A frozen pool does not stop it (spec §4.1, §5.2, §6.1, §6.5, FAR-8).
 
 Custody is the design rather than a detail. `PositionManager` gates
 `DECREASE_LIQUIDITY` and `BURN_POSITION` behind `onlyIfApproved(msgSender())`, so
