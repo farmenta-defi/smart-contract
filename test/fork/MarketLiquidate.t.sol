@@ -110,6 +110,66 @@ contract MarketLiquidateForkTest is MarketForkTest {
         market.liquidate(tokenId, type(uint256).max, 0, 0, address(market));
     }
 
+    /// @notice §4.1 v0.43 on the partial branch, which pays by plain transfer: `address(1)` and
+    ///         `address(2)` would burn the seizure at a precompile, and PositionManager would hold
+    ///         the ERC-20 leg for anyone to `SWEEP`.
+    function test_thePartialSeizureRefusesWhatPositionManagerReadsAsSomeoneElse() public {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        _assertTheRecipientIsRefused(address(1));
+        _assertTheRecipientIsRefused(address(2));
+        _assertTheRecipientIsRefused(address(positionManager));
+
+        vm.prank(liquidator);
+        (,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+        assertEq(badDebt, 0, "this test needs the partial branch");
+    }
+
+    /// @notice §4.1 v0.43 on the full branch, where `TAKE_PAIR` is handed `to` as it came:
+    ///         `address(1)` is the market, so the seizure would sit there with its ETH open to
+    ///         `rescueUnaccountedEth` and its USDG to nobody; `address(2)` and PositionManager are
+    ///         PositionManager's own balance, which anyone empties with `SWEEP`.
+    function test_theFullSeizureRefusesWhatPositionManagerReadsAsSomeoneElse() public {
+        _open(0);
+        _fundLiquidator(2000e6);
+        _dropEthPrice(1200e18);
+
+        _assertTheRecipientIsRefused(address(1));
+        _assertTheRecipientIsRefused(address(2));
+        _assertTheRecipientIsRefused(address(positionManager));
+
+        vm.prank(liquidator);
+        (,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+        assertGt(badDebt, 0, "this test needs the full-seizure branch");
+    }
+
+    /// @dev The refusal, and that it left nothing behind: no ETH or USDG in the market or in
+    ///      PositionManager, the liquidator's USDG unspent, and the debt where it was.
+    function _assertTheRecipientIsRefused(
+        address to
+    ) private {
+        address pm = address(positionManager);
+        uint256 marketEth = address(market).balance;
+        uint256 marketUsdg = usdg.balanceOf(address(market));
+        uint256 pmEth = pm.balance;
+        uint256 pmUsdg = usdg.balanceOf(pm);
+        uint256 liquidatorUsdg = usdg.balanceOf(liquidator);
+        uint256 debt = market.debtOf(tokenId);
+
+        vm.prank(liquidator);
+        vm.expectRevert(abi.encodeWithSelector(MarketLiquidation.InvalidRecipient.selector, to));
+        market.liquidate(tokenId, type(uint256).max, 0, 0, to);
+
+        assertEq(address(market).balance, marketEth, "no ETH stops at the market");
+        assertEq(usdg.balanceOf(address(market)), marketUsdg, "and no USDG");
+        assertEq(pm.balance, pmEth, "no ETH is left in PositionManager for a SWEEP");
+        assertEq(usdg.balanceOf(pm), pmUsdg, "and no USDG");
+        assertEq(usdg.balanceOf(liquidator), liquidatorUsdg, "the liquidator paid nothing");
+        assertEq(market.debtOf(tokenId), debt, "and the debt is where it was");
+    }
+
     /// @dev §4.1 puts `liquidate` in the paused set: it reads oracle prices, and a pause is
     ///      the admission that those cannot be trusted right now.
     function test_pausingStopsLiquidation() public {

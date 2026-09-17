@@ -17,6 +17,7 @@ import {IPriceOracle} from "../interfaces/IPriceOracle.sol";
 import {DebtMath} from "./DebtMath.sol";
 import {LiquidationMath} from "./LiquidationMath.sol";
 import {MarketLedger} from "./MarketLedger.sol";
+import {MarketLiquidity} from "./MarketLiquidity.sol";
 
 /// @dev The one PositionManager getter this library needs that `IPositionManager` does not
 ///      declare. It comes from periphery's `NativeWrapper`, which PositionManager inherits.
@@ -67,7 +68,7 @@ library MarketLiquidation {
     /// @param repayAmount USDG the liquidator offered.
     /// @param minOut0 Least currency0 the liquidator accepts, on what they receive.
     /// @param minOut1 Least currency1 the liquidator accepts, on what they receive.
-    /// @param to Where the seized tokens go.
+    /// @param to Where the seized tokens go. See `InvalidRecipient` for what is refused.
     struct Request {
         uint256 tokenId;
         uint256 repayAmount;
@@ -119,7 +120,10 @@ library MarketLiquidation {
     /// @notice The liquidator received less than they said they would accept.
     error SeizureBelowMinimum(uint256 out0, uint256 out1);
 
-    /// @notice The seized tokens were addressed nowhere, or back at the market itself.
+    /// @notice The seized tokens were addressed somewhere they would not reach the liquidator:
+    ///         nowhere, the market itself, `address(1)`, which PositionManager reads as the market,
+    ///         or `address(2)` and PositionManager itself, where anyone can `SWEEP` them
+    ///         (§4.1 v0.43). See `MarketLiquidity.refusesRecipient`.
     error InvalidRecipient(address to);
 
     /// @notice The market is not holding this position as anyone's collateral.
@@ -155,11 +159,17 @@ library MarketLiquidation {
     ///
     ///      Pool hooks run inside `modifyLiquidities` as well. On the partial branch they see the
     ///      market untouched, on the full branch settled, and never a state in between.
+    ///
+    ///      **The recipient is checked once, before the branch is chosen** (§4.1 v0.43, §8). The
+    ///      full branch hands `to` to `TAKE_PAIR`, which reads `address(1)` as the market and
+    ///      `address(2)` as PositionManager; the partial branch pays by plain transfer, where
+    ///      the same addresses burn the seizure or leave it in PositionManager for anyone to
+    ///      `SWEEP`. One rule up front closes both, and it is `collectFees`' rule, not a copy.
     function execute(
         Env memory env,
         Request memory r
     ) public returns (Outcome memory o) {
-        if (r.to == address(0) || r.to == address(this)) revert InvalidRecipient(r.to);
+        if (MarketLiquidity.refusesRecipient(env.positionManager, r.to)) revert InvalidRecipient(r.to);
 
         MarketLedger.Loan memory loan = MarketLedger.layout().loans[r.tokenId];
         if (loan.owner == address(0)) revert PositionNotCollateral(r.tokenId);
