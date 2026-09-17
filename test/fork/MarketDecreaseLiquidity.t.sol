@@ -502,6 +502,74 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         memeMarket.decreaseLiquidity(tokenId, liquidity / 8, 0, 0, recipient);
     }
 
+    /* ------------------------------ outbound calls ---------------------------- */
+
+    /// @notice §4.1 v0.26: the borrow asset leaves before any other leg, so a native-ETH recipient
+    ///         already holds its USDG when its code first runs.
+    /// @dev `TAKE_PAIR` pays `currency0` first, and in this pool that is the ETH: under it the
+    ///      recipient would see no USDG at all.
+    function test_theUsdgLegLeavesBeforeTheEth() public {
+        _deposit(tokenId);
+        Probe memory expected = _probe(tokenId, liquidity / 2);
+        RedeemingRecipient receiver = new RedeemingRecipient(market);
+
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, liquidity / 2, 0, 0, address(receiver));
+
+        assertEq(receiver.usdgOnEthArrival(), expected.out1, "the USDG leg was already there when the ETH arrived");
+        assertEq(address(receiver).balance, expected.out0, "and the ETH leg arrived in full");
+    }
+
+    /// @notice §4.1 v0.26: a vault redeem made from inside the removal's ETH payout is priced exactly
+    ///         as one made after the removal.
+    /// @dev Thirty days of interest are left unaccrued, so the redeem inside the payout is the first
+    ///      thing to see them unless the removal's own accrual already has. The removal moves no
+    ///      cash, debt or reserve, so there is no half-written ledger for the redeem to read; this
+    ///      pins that down for the day `decreaseLiquidity` starts writing anything more.
+    function test_aRedeemFromInsideTheRemovalGainsNothing() public {
+        _openLoan(100e6);
+        RedeemingRecipient attacker = new RedeemingRecipient(market);
+        deal(address(usdg), address(attacker), 100e6);
+        attacker.deposit(100e6);
+        vm.warp(block.timestamp + 30 days);
+
+        uint256 shares = market.balanceOf(address(attacker));
+        uint256 snapshot = vm.snapshotState();
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
+        uint256 fair = market.previewRedeem(shares);
+        vm.revertToState(snapshot);
+
+        attacker.arm();
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, address(attacker));
+
+        assertGt(attacker.redeemed(), 0, "the redeem must actually run inside the payout");
+        assertEq(attacker.redeemed(), fair, "a share redeemed mid-removal is worth what it is worth after");
+    }
+
+    /// @notice A recipient that calls back into the market from the ETH it is paid gets nowhere, and
+    ///         takes the removal down with it.
+    /// @dev The guard on the wrapper. `repay` of zero is the call the recipient makes, which succeeds
+    ///      if the guard is gone. The ETH transfer reverting is what PoolManager reports.
+    function test_aReentrantRecipientIsRefused() public {
+        _deposit(tokenId);
+        ContractBorrower receiver = new ContractBorrower(market);
+        receiver.armReentry(tokenId);
+
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(receiver),
+                bytes4(0),
+                abi.encodeWithSelector(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector),
+                abi.encodeWithSelector(CurrencyLibrary.NativeTransferFailed.selector)
+            )
+        );
+        market.decreaseLiquidity(tokenId, liquidity / 2, 0, 0, address(receiver));
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _deposit(
