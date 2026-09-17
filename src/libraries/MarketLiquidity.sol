@@ -76,11 +76,33 @@ library MarketLiquidity {
         uint256 amount0 = key.currency0.balanceOf(to);
         uint256 amount1 = key.currency1.balanceOf(to);
 
+        _decreaseTo(env, key, tokenId, 0, 0, 0, to);
+
+        amount0 = key.currency0.balanceOf(to) - amount0;
+        amount1 = key.currency1.balanceOf(to) - amount1;
+
+        MarketDebt.requireHealthy(env.debt, tokenId);
+        emit CollectFees(tokenId, loan.poolKeyId, amount0, amount1);
+    }
+
+    /// @dev One `DECREASE_LIQUIDITY` paid straight to `to`, each leg by its own `TAKE` with the borrow
+    ///      asset first (§4.1 v0.26, v0.40). Whatever `liquidity` is, the decrease realises the
+    ///      position's whole fee balance as well, so both `TAKE`s carry principal and fees together.
+    ///      The minimums are PositionManager's: it holds them against the principal alone.
+    function _decreaseTo(
+        Env calldata env,
+        PoolKey memory key,
+        uint256 tokenId,
+        uint256 liquidity,
+        uint128 amount0Min,
+        uint128 amount1Min,
+        address to
+    ) private {
         (Currency first, Currency second) = Currency.unwrap(key.currency1) == address(env.debt.asset)
             ? (key.currency1, key.currency0)
             : (key.currency0, key.currency1);
         bytes[] memory params = new bytes[](3);
-        params[0] = abi.encode(tokenId, uint256(0), uint128(0), uint128(0), bytes(""));
+        params[0] = abi.encode(tokenId, liquidity, amount0Min, amount1Min, bytes(""));
         params[1] = abi.encode(first, to, uint256(ActionConstants.OPEN_DELTA));
         params[2] = abi.encode(second, to, uint256(ActionConstants.OPEN_DELTA));
         env.positionManager
@@ -91,12 +113,6 @@ library MarketLiquidity {
                 ),
                 block.timestamp
             );
-
-        amount0 = key.currency0.balanceOf(to) - amount0;
-        amount1 = key.currency1.balanceOf(to) - amount1;
-
-        MarketDebt.requireHealthy(env.debt, tokenId);
-        emit CollectFees(tokenId, loan.poolKeyId, amount0, amount1);
     }
 
     /// @notice Whether `to` is refused as the recipient of a payout PositionManager makes for this
