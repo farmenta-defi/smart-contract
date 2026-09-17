@@ -317,6 +317,38 @@ contract FarmentaMarketTest is Test {
         market.collectFees(1, stranger);
     }
 
+    /* ----------------------------- decreaseLiquidity -------------------------- */
+
+    /// @notice §4.1: with debt outstanding a removal prices the position, so pausing stops it.
+    function test_pausingStopsDecreaseLiquidity() public {
+        vm.prank(owner);
+        market.pause();
+
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        market.decreaseLiquidity(1, 1, 0, 0, stranger);
+    }
+
+    /// @notice Removing nothing is a fee claim, and `collectFees` is the function for that.
+    function test_decreaseLiquidityRefusesZeroLiquidity() public {
+        vm.expectRevert(FarmentaMarket.ZeroLiquidity.selector);
+        market.decreaseLiquidity(1, 0, 0, 0, stranger);
+    }
+
+    /// @notice One recipient rule for every payout PositionManager makes for the market (§4.1 v0.43).
+    function test_decreaseLiquidityRefusesARecipientThatIsNotOne() public {
+        address[5] memory refused = [address(0), address(1), address(2), address(market), posm];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.InvalidRecipient.selector, refused[i]));
+            market.decreaseLiquidity(1, 1, 0, 0, refused[i]);
+        }
+    }
+
+    /// @notice A position the market does not hold has no depositor, so nobody may remove from it.
+    function test_decreaseLiquidityRefusesAPositionNotInCustody() public {
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotTheDepositor.selector, 1, address(0)));
+        market.decreaseLiquidity(1, 1, 0, 0, stranger);
+    }
+
     /// @dev Ownership moves in two steps, so a typo in the new owner cannot lock the market.
     function test_ownershipTransferIsTwoStep() public {
         vm.prank(owner);

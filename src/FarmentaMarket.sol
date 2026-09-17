@@ -35,12 +35,14 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 /// @dev **The lending side is whole as of §8.** Collateral goes in and comes back out, the
 ///      index-based ledger of §7 accrues against it, and an underwater position can now be
 ///      liquidated — which is what makes a lent dollar a dollar with a way home. A depositor
-///      can also claim a held position's fees (`collectFees`, FAR-7) and add liquidity to it
-///      (`increaseLiquidity`, FAR-9). What §4.1 still owes: `decreaseLiquidity` (FAR-8).
+///      can also claim a held position's fees (`collectFees`, FAR-7), add liquidity to it
+///      (`increaseLiquidity`, FAR-9) and remove part of it (`decreaseLiquidity`, FAR-8), which
+///      completes §4.1's borrower surface.
 ///
 ///      **Logic lives in linked libraries; this contract keeps the wrappers** (§4.1 v0.33).
 ///      Borrow and repay run from `MarketDebt`, collateral intake from `MarketMint`, §8's seizure
-///      from `MarketLiquidation` and fee claims from `MarketLiquidity`, each by `delegatecall`:
+///      from `MarketLiquidation`, fee claims and liquidity removals from `MarketLiquidity`, each by
+///      `delegatecall`:
 ///      the market's storage, the
 ///      market's address, the caller's `msg.sender`, code at its own address. Risk views are
 ///      read from `MarketLens`, one per proxy. That is what keeps the implementation under
@@ -50,8 +52,8 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///      native-ETH pool pays its seizure out as ETH, so `receive()` is on the path rather than
 ///      ahead of it. Nothing legitimate stays: liquidation forwards both legs in the same call,
 ///      the change of `mintAndDeposit` and `increaseLiquidity` leaves through `SWEEP` straight
-///      from PositionManager, and a fee claim's ETH goes from PoolManager to its recipient
-///      without touching the market. So
+///      from PositionManager, and the ETH of a fee claim or a liquidity removal goes from
+///      PoolManager to its recipient without touching the market. So
 ///      ETH found here between transactions belongs to no one the market can name, and
 ///      `rescueUnaccountedEth` sweeps it — spec open item §15 no. 12, decided with §8 as that
 ///      item asked. Nor can a borrower use ETH to block its own liquidation: its share goes
@@ -186,6 +188,7 @@ contract FarmentaMarket is
     error PositionWouldBeUnhealthy(uint256 tokenId, uint256 healthFactor);
     error NativeValueMismatch(uint256 expected, uint256 sent);
     error ZeroLiquidity();
+    error LiquidityExceedsPosition(uint256 tokenId, uint128 requested, uint128 available);
     error PermitDoesNotMatchPool();
     error ReserveWithdrawalExceedsAvailable(uint256 amount, uint256 available);
 
@@ -511,6 +514,38 @@ contract FarmentaMarket is
         );
     }
 
+    /// @notice Removes part of a collateral position's liquidity, to `to` (§4.1).
+    /// @param tokenId The position. Only its depositor may remove from it.
+    /// @param liq How much liquidity to remove. Not zero (`collectFees` claims fees alone), not more
+    ///        than the position holds, and never so much that what stays falls under the pool's
+    ///        minimum position value (§6.1), debt or no debt.
+    /// @param min0 The least `currency0` principal the removal must return, or it reverts.
+    /// @param min1 The same for `currency1`. PositionManager holds both against the principal only:
+    ///        the position's fees are paid out as well, and never count towards either.
+    /// @param to Where both legs go, native ETH included. Refused exactly as `collectFees` refuses
+    ///        a recipient (§4.1 v0.43).
+    /// @dev **Pausable**, like `collectFees`: with debt outstanding the removal prices the position
+    ///      (§4.1 pause scope). A frozen or delisted pool does not stop it (§6.5).
+    ///
+    ///      The removal runs from `MarketLiquidity`, which documents why `to` receives every fee as
+    ///      well, the minimum held on what remains, the post-removal health check and its price
+    ///      gates (§5.2), the meme observation (§5.3), and why nothing is written after the first
+    ///      outbound call.
+    function decreaseLiquidity(
+        uint256 tokenId,
+        uint128 liq,
+        uint128 min0,
+        uint128 min1,
+        address to
+    ) external whenNotPaused nonReentrant {
+        MarketLiquidity.decreaseLiquidity(
+            MarketLiquidity.Env({positionManager: positionManager, debt: _debtEnv()}),
+            MarketLiquidity.DecreaseParams({
+                tokenId: tokenId, liquidity: liq, amount0Min: min0, amount1Min: min1, to: to
+            })
+        );
+    }
+
     /// @notice Accepts native ETH (§4.1).
     /// @dev Pools whose `currency0` is `address(0)` pay out in ETH, and §8's partial seizure is
     ///      the first path that takes delivery here: `TAKE_PAIR` pays the market, which forwards
@@ -766,8 +801,9 @@ contract FarmentaMarket is
     ///      between transactions. Every path that takes delivery of ETH pays all of it out
     ///      before its own call returns: liquidation forwards the liquidator's and the
     ///      borrower's legs, and `mintAndDeposit` and `increaseLiquidity` return change through
-    ///      `SWEEP` straight from PositionManager. `collectFees` never takes delivery at all: each
-    ///      `TAKE` pays its recipient, and `address(1)`, which would route the ETH here, is refused.
+    ///      `SWEEP` straight from PositionManager. `collectFees` and `decreaseLiquidity` never take
+    ///      delivery at all: each `TAKE` pays its recipient, and `address(1)`, which would route the
+    ///      ETH here, is refused.
     ///      What is left was sent by mistake or by force, and taking it takes
     ///      nothing a lender or a borrower is owed.
     ///
