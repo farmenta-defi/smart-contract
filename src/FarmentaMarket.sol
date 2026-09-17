@@ -186,6 +186,7 @@ contract FarmentaMarket is
     error UsdgPriceOutOfBounds(uint256 price);
     error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
     error PositionWouldBeUnhealthy(uint256 tokenId, uint256 healthFactor);
+    error RemovalExceedsBorrowLimit(uint256 tokenId, uint256 debtUsd, uint256 limitUsd);
     error NativeValueMismatch(uint256 expected, uint256 sent);
     error ZeroLiquidity();
     error LiquidityExceedsPosition(uint256 tokenId, uint128 requested, uint128 available);
@@ -517,8 +518,9 @@ contract FarmentaMarket is
     /// @notice Removes part of a collateral position's liquidity, to `to` (§4.1).
     /// @param tokenId The position. Only its depositor may remove from it.
     /// @param liq How much liquidity to remove. Not zero (`collectFees` claims fees alone), not more
-    ///        than the position holds, and never so much that what stays falls under the pool's
-    ///        minimum position value (§6.1), debt or no debt.
+    ///        than the position holds, never so much that what stays falls under the pool's minimum
+    ///        position value (§6.1), debt or no debt, and with debt outstanding never so much that
+    ///        the debt no longer fits the borrow limit of what stays (§4.1 v0.59).
     /// @param min0 The least `currency0` principal the removal must return, or it reverts.
     /// @param min1 The same for `currency1`. PositionManager holds both against the principal only:
     ///        the position's fees are paid out as well, and never count towards either.
@@ -528,7 +530,7 @@ contract FarmentaMarket is
     ///      (§4.1 pause scope). A frozen or delisted pool does not stop it (§6.5).
     ///
     ///      The removal runs from `MarketLiquidity`, which documents why `to` receives every fee as
-    ///      well, the minimum held on what remains, the post-removal health check and its price
+    ///      well, the minimum held on what remains, the post-removal borrow limit and its price
     ///      gates (§5.2), the meme observation (§5.3), and why nothing is written after the first
     ///      outbound call.
     function decreaseLiquidity(

@@ -105,7 +105,7 @@ library MarketLiquidity {
     }
 
     /// @notice Removes `p.liquidity` from `p.tokenId` to `p.to`, and leaves behind a position that
-    ///         is still worth holding and still healthy.
+    ///         is still worth holding and still within its borrow limit.
     /// @dev The same `DECREASE_LIQUIDITY` and two `TAKE`s as `collectFees`, USDG first, with the
     ///      liquidity no longer zero. `_decrease` realises the position's whole fee balance
     ///      whatever it removes, so `to` receives the slice's principal **and every fee**. That is
@@ -129,11 +129,14 @@ library MarketLiquidity {
     ///      way: a borrower owing nothing takes the NFT back with `withdrawCollateral`. Measured
     ///      after the removal, on the position as it now is.
     ///
-    ///      **The health factor is checked after the removal, through §5.2's borrow price gates**
-    ///      (decided on FAR-8, 17 Sep 2026; the same `requireHealthy` as `collectFees`, v0.40).
-    ///      Principal leaving lowers the health factor exactly as a borrow does, so it is refused at
-    ///      the prices a borrow is. With nothing owed neither runs. A pool's `removeHaircutBps` is
-    ///      inside that value already (§6.2), applied to what remains.
+    ///      **With debt outstanding, what is owed must still fit the borrow limit of what is left**
+    ///      (§4.1 v0.59, decided on the review of PR #23), read through §5.2's borrow price gates
+    ///      (decided on FAR-8, 17 Sep 2026). Principal leaving lowers the health factor exactly as a
+    ///      borrow does, so it is held to a borrow's limit and refused at the prices a borrow is;
+    ///      a health factor of 1 would let a removal walk a loan from `maxLtvBps` up to the
+    ///      liquidation threshold. See `MarketDebt.requireWithinBorrowLimit`. With nothing owed
+    ///      neither runs. A pool's `removeHaircutBps` is inside that value already (§6.2), applied
+    ///      to what remains.
     ///
     ///      A frozen or delisted pool does not stop a removal (§6.5): only its terms are read.
     ///
@@ -171,7 +174,7 @@ library MarketLiquidity {
             DebtMath.recoverablePrincipal(env.debt.valuer.value(p.tokenId).principalUsd, terms.removeHaircutBps);
         if (recoverableUsd < terms.minPositionUsd) revert PositionBelowMinimum(recoverableUsd, terms.minPositionUsd);
 
-        MarketDebt.requireHealthy(env.debt, p.tokenId);
+        MarketDebt.requireWithinBorrowLimit(env.debt, p.tokenId);
         emit LiquidityChanged(p.tokenId, loan.poolKeyId, -int256(uint256(p.liquidity)));
     }
 
