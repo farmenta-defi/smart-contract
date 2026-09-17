@@ -22,6 +22,9 @@ contract MarketHandler is Test {
     bool public sawFloorBreach;
     /// @dev Set when a fee claim went through and left the position unhealthy (§7 post-condition).
     bool public sawUnhealthyClaim;
+    /// @dev Set when a liquidity removal went through and left the position unhealthy, or what stayed
+    ///      under the pool's minimum (§7 post-condition, §4.1 v0.54).
+    bool public sawUnsoundRemoval;
     address internal constant FEE_RECIPIENT = address(0xFEE5);
 
     constructor(
@@ -106,6 +109,22 @@ contract MarketHandler is Test {
         if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyClaim = true;
     }
 
+    /// @dev Up to a fifth of what the position holds at a time, so a run reaches several removals at
+    ///      whatever debt and index the other actions left, rather than one that empties it. The
+    ///      market refuses the ones that would go too far, and the handler discards those reverts; what
+    ///      is recorded is any removal it let through that it should not have.
+    function decreaseLiquidity(
+        uint128 amount
+    ) external {
+        uint128 held = market.positionManager().getPositionLiquidity(tokenId);
+        amount = uint128(bound(amount, 1, held / 5));
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, amount, 0, 0, FEE_RECIPIENT);
+        if (lens.healthFactor(tokenId) < 1e18 || market.valuer().value(tokenId).principalUsd < 50e18) {
+            sawUnsoundRemoval = true;
+        }
+    }
+
     function passTime(
         uint40 elapsed
     ) external {
@@ -160,6 +179,10 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
 
     function invariant_aClaimNeverLeavesThePositionUnhealthy() public view {
         assertFalse(handler.sawUnhealthyClaim(), "a fee claim left the position unhealthy");
+    }
+
+    function invariant_aRemovalNeverLeavesThePositionUnsound() public view {
+        assertFalse(handler.sawUnsoundRemoval(), "a liquidity removal left the position unhealthy or under the minimum");
     }
 
     function invariant_withdrawalNeverBreachesTheFloor() public view {
