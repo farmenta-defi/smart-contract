@@ -18,6 +18,15 @@ contract ContractBorrower is IERC1271 {
     /// @notice This contract's USDG balance when the ETH arrived, read before anything else runs.
     uint256 public usdgOnEthArrival;
 
+    /// @notice The same, read the **first** time ETH arrived.
+    /// @dev An addition pays ETH twice: the fee `TAKE`, then the `SWEEP` of the change. Only the
+    ///      first reading says which leg the claim paid first, so a test that reads the last one
+    ///      pins the sweep order and nothing else.
+    uint256 public usdgOnFirstEthArrival;
+
+    /// @notice How many times ETH has arrived here.
+    uint256 public ethArrivals;
+
     constructor(
         FarmentaMarket market_
     ) {
@@ -71,6 +80,8 @@ contract ContractBorrower is IERC1271 {
 
     receive() external payable {
         usdgOnEthArrival = IERC20(market.asset()).balanceOf(address(this));
+        if (ethArrivals == 0) usdgOnFirstEthArrival = usdgOnEthArrival;
+        ++ethArrivals;
         if (reenter) {
             reenter = false;
             market.repay(reentrantTokenId, 0);

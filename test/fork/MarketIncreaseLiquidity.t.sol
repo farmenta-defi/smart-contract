@@ -356,12 +356,20 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         vm.deal(address(this), 1 ether);
 
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        IPositionValuer.Valuation memory valuation = valuer.value(tokenId);
+        assertGt(valuation.fees0, 0, "the fixture must hold ETH fees");
+        assertGt(valuation.fees1, 0, "the fixture must hold USDG fees");
         ISignatureTransfer.PermitBatchTransferFrom memory permit =
             _permitFor(_keyOf(tokenId), 1 ether, USDG_BUDGET, 0, block.timestamp + 1 hours);
         caller.increase{value: 1 ether}(tokenId, liquidity, uint128(1 ether), uint128(USDG_BUDGET), permit);
 
+        // ETH arrives twice, and each arrival pins one order: the fee `TAKE` first, the `SWEEP` of
+        // the change second. Reading only the last one would leave the claim's order untested.
+        assertEq(caller.ethArrivals(), 2, "the fee TAKE and the SWEEP should each have paid ETH");
+        assertEq(caller.usdgOnFirstEthArrival(), valuation.fees1, "the USDG fees had not arrived when the ETH fees did");
+
         uint256 usdgChange = IERC20(RobinhoodChain.USDG).balanceOf(address(caller));
-        assertGt(usdgChange, 0, "the USDG maximum should leave change");
+        assertGt(usdgChange, valuation.fees1, "the USDG maximum should leave change");
         assertGt(address(caller).balance, 0, "the ETH maximum should leave change");
         assertEq(caller.usdgOnEthArrival(), usdgChange, "the USDG change had not arrived when the ETH did");
     }
