@@ -235,6 +235,57 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         assertGe(valuer.value(tokenId).principalUsd, 50e18, "what stays clears the minimum");
     }
 
+    /// @notice The minimum binds to the unit: a remainder worth exactly the minimum stays, and a minimum
+    ///         one unit higher refuses the same removal.
+    /// @dev The pool is listed with the minimum set to what the probed removal leaves, which is the
+    ///      only way to land on the boundary itself rather than near it.
+    function test_theMinimumBindsToTheUnit() public {
+        uint128 half = liquidity / 2;
+        uint256 snapshot = vm.snapshotState();
+        _deposit(tokenId);
+        uint256 left = _probe(tokenId, half).principalUsdLeft;
+        vm.revertToState(snapshot);
+
+        _depositListed(tokenId, uint128(left), 0);
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, half, 0, 0, recipient);
+        assertEq(valuer.value(tokenId).principalUsd, left, "exactly the minimum stays");
+        vm.revertToState(snapshot);
+
+        _depositListed(tokenId, uint128(left + 1), 0);
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, left, left + 1));
+        market.decreaseLiquidity(tokenId, half, 0, 0, recipient);
+    }
+
+    /// @notice The minimum holds with debt outstanding too, and is what a removal failing both checks
+    ///         reports.
+    /// @dev First a debt small enough that about $45 of principal still covers it, so the minimum is
+    ///      the only thing in the way. Then one that the remainder cannot carry either: the minimum is
+    ///      checked first, and names itself.
+    function test_theMinimumHoldsWithDebtAndIsCheckedBeforeTheLimit() public {
+        _openLoan(10e6);
+        uint256 principalUsd = valuer.value(tokenId).principalUsd;
+        uint128 tooMuch = liquidity - uint128(uint256(liquidity) * 45e18 / principalUsd);
+        Probe memory expected = _probe(tokenId, tooMuch);
+        assertLe(_usd(market.debtOf(tokenId)), _limit(expected, MAX_LTV_BPS), "the debt must still fit what stays");
+
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, expected.principalUsdLeft, 50e18)
+        );
+        market.decreaseLiquidity(tokenId, tooMuch, 0, 0, recipient);
+
+        vm.prank(borrower);
+        market.borrow(tokenId, 90e6, borrower);
+        assertGt(_usd(market.debtOf(tokenId)), _limit(expected, MAX_LTV_BPS), "now the debt does not fit either");
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, expected.principalUsdLeft, 50e18)
+        );
+        market.decreaseLiquidity(tokenId, tooMuch, 0, 0, recipient);
+    }
+
     /// @notice Fees do not count towards the minimum (§6.1 v0.6): they can be claimed a second later.
     /// @dev The position is given fees worth several times the minimum. They leave with the removal
     ///      anyway, and the floor is measured on the principal that stays.
