@@ -164,6 +164,51 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         assertEq(usdg.balanceOf(recipient), expected.out1, "a frozen pool's liquidity can still be removed");
     }
 
+    /* --------------------------------- slippage ------------------------------- */
+
+    /// @notice A minimum the pool meets, to the unit, passes.
+    /// @dev The minimums are the slice's principal: what the probe paid, less the fees that came with
+    ///      it.
+    function test_aMinimumThePoolMeetsExactlyPasses() public {
+        _deposit(tokenId);
+        IPositionValuer.Valuation memory before = valuer.value(tokenId);
+        Probe memory expected = _probe(tokenId, liquidity / 2);
+        uint128 principal0 = uint128(expected.out0 - before.fees0);
+        uint128 principal1 = uint128(expected.out1 - before.fees1);
+
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, liquidity / 2, principal0, principal1, recipient);
+
+        assertEq(recipient.balance, expected.out0, "the removal went through");
+    }
+
+    /// @notice A minimum one unit above what the pool returns reverts, and the fees paid out alongside
+    ///         do not make up the difference.
+    /// @dev PositionManager holds the minimums against the principal alone. The fixture's fees are far
+    ///      more than one unit on either leg, so a check that counted them would let both of these
+    ///      through.
+    function test_aMinimumAboveThePrincipalRevertsWhateverTheFees() public {
+        _deposit(tokenId);
+        IPositionValuer.Valuation memory before = valuer.value(tokenId);
+        Probe memory expected = _probe(tokenId, liquidity / 2);
+        uint128 principal0 = uint128(expected.out0 - before.fees0);
+        uint128 principal1 = uint128(expected.out1 - before.fees1);
+
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(SlippageCheck.MinimumAmountInsufficient.selector, principal0 + 1, principal0)
+        );
+        market.decreaseLiquidity(tokenId, liquidity / 2, principal0 + 1, 0, recipient);
+
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(SlippageCheck.MinimumAmountInsufficient.selector, principal1 + 1, principal1)
+        );
+        market.decreaseLiquidity(tokenId, liquidity / 2, 0, principal1 + 1, recipient);
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), liquidity, "the liquidity stays in the position");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _deposit(
