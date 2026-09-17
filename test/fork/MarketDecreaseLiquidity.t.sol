@@ -37,8 +37,12 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         uint256 out0;
         uint256 out1;
         uint256 principalUsdLeft;
+        uint256 positionValueLeft;
         uint256 healthFactorLeft;
     }
+
+    /// @dev The blue-chip preset's borrow limit, which every listing here uses.
+    uint256 internal constant MAX_LTV_BPS = 6500;
 
     address internal lender = address(0x1E4DE2);
     address internal recipient = makeAddr("recipient");
@@ -279,113 +283,198 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
     }
 
-    /* -------------------------------- health factor --------------------------- */
+    /* -------------------------------- borrow limit ---------------------------- */
 
-    /// @notice An indebted position that stays healthy keeps its removal, and its debt is untouched.
-    function test_anIndebtedRemovalThatStaysHealthySucceeds() public {
+    /// @notice An indebted removal that leaves the debt within the borrow limit goes through, and the
+    ///         debt is untouched.
+    function test_anIndebtedRemovalWithinTheBorrowLimitSucceeds() public {
         _openLoan(100e6);
         uint256 debt = market.debtOf(tokenId);
-        Probe memory expected = _probe(tokenId, liquidity / 4);
-        assertGe(expected.healthFactorLeft, 1e18, "the removal must leave the position healthy");
+        uint128 quarter = liquidity / 4;
+        Probe memory expected = _probe(tokenId, quarter);
+        assertLe(_usd(debt), _limit(expected, MAX_LTV_BPS), "the removal must stay within the borrow limit");
 
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.LiquidityChanged(tokenId, _keyOf(tokenId).toId(), -int256(uint256(quarter)));
         vm.prank(borrower);
-        market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
+        market.decreaseLiquidity(tokenId, quarter, 0, 0, recipient);
 
         assertEq(usdg.balanceOf(recipient), expected.out1, "the USDG leg reaches the recipient");
         assertEq(market.debtOf(tokenId), debt, "the removal does not touch the debt");
-        assertEq(lens.healthFactor(tokenId), expected.healthFactorLeft, "and the position is as healthy as probed");
+        assertEq(lens.positionValue(tokenId), expected.positionValueLeft, "and the position is worth what was probed");
     }
 
-    /// @notice A removal that would leave the position under water is refused, with the health factor
-    ///         the lens reports for the state the removal would have left.
-    /// @dev Borrowed to the limit, where the health factor is LT/LTV, about 1.15: removing a third of
-    ///      the principal takes it well under 1, while what stays is still far above the minimum.
-    function test_aRemovalThatWouldLeaveThePositionUnderwaterIsRefused() public {
+    /// @notice §4.1 v0.59: the debt must fit `maxLtvBps` of what is left, to the unit.
+    /// @dev The removal is fixed and the debt is set against it. The borrow limit of what the removal
+    ///      leaves comes from the probe; a debt of exactly that (rounded down to a USDG unit) passes,
+    ///      and one unit more is refused with both figures in the error.
+    function test_theBorrowLimitOfWhatIsLeftBindsToTheUnit() public {
+        _deposit(tokenId);
+        _lend(300e6);
+        uint128 amount = liquidity / 4;
+        uint256 limitUsd = _limit(_probe(tokenId, amount), MAX_LTV_BPS);
+        uint256 debt = limitUsd / 1e12;
+        uint256 snapshot = vm.snapshotState();
+
+        vm.prank(borrower);
+        market.borrow(tokenId, debt, borrower);
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+        assertEq(positionManager.getPositionLiquidity(tokenId), liquidity - amount, "at the limit it goes through");
+        vm.revertToState(snapshot);
+
+        vm.prank(borrower);
+        market.borrow(tokenId, debt + 1, borrower);
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.RemovalExceedsBorrowLimit.selector, tokenId, _usd(debt + 1), limitUsd)
+        );
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+    }
+
+    /// @notice Borrowed to `maxLtvBps`, a position has no liquidity to spare: a health factor of 1 is
+    ///         not the bar (§15 no. 22).
+    /// @dev The removal is a thousandth of the position. It leaves the health factor near LT/LTV,
+    ///      about 1.15, which the rule before v0.59 accepted; two calls then reached a loan-to-value
+    ///      `borrow` refuses.
+    function test_borrowedToTheLimitNothingCanBeRemoved() public {
         _deposit(tokenId);
         _lend(300e6);
         uint256 limit = lens.maxBorrow(tokenId);
         vm.prank(borrower);
         market.borrow(tokenId, limit, borrower);
+        uint128 amount = liquidity / 1000;
+        Probe memory expected = _probe(tokenId, amount);
+        assertGe(expected.healthFactorLeft, 1.1e18, "the position stays far from liquidation");
 
-        Probe memory expected = _probe(tokenId, liquidity / 3);
-        assertGe(lens.healthFactor(tokenId), 1e18, "the position must be healthy before the removal");
-        assertLt(expected.healthFactorLeft, 1e18, "and under water after it");
-        assertGt(expected.principalUsdLeft, 50e18, "with the minimum out of the picture");
-
+        // Read before the prank: `debtOf` is an external call and would spend it.
+        uint256 debtUsd = _usd(market.debtOf(tokenId));
         vm.prank(borrower);
         vm.expectRevert(
-            abi.encodeWithSelector(FarmentaMarket.PositionWouldBeUnhealthy.selector, tokenId, expected.healthFactorLeft)
+            abi.encodeWithSelector(
+                FarmentaMarket.RemovalExceedsBorrowLimit.selector, tokenId, debtUsd, _limit(expected, MAX_LTV_BPS)
+            )
         );
-        market.decreaseLiquidity(tokenId, liquidity / 3, 0, 0, recipient);
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
 
         assertEq(positionManager.getPositionLiquidity(tokenId), liquidity, "the liquidity stays in the position");
         assertEq(usdg.balanceOf(recipient), 0, "and nothing reached the recipient");
     }
 
-    /// @notice §6.3: the health check values what remains after the pool's removal haircut.
-    /// @dev The same debt and the same removal on the same position. With no haircut it leaves a
-    ///      health factor a little over 1; a 5% haircut on what remains takes that under 1.
-    function test_theHealthCheckCountsTheRemovalHaircut() public {
-        uint128 amount = uint128(uint256(liquidity) * 14 / 100);
-        uint256 snapshot = vm.snapshotState();
-
-        _depositWithHaircut(tokenId, 500);
-        _lend(300e6);
-        uint256 debt = lens.maxBorrow(tokenId);
-        vm.revertToState(snapshot);
-
+    /// @notice A position already over its borrow limit, but healthy, removes nothing until it repays,
+    ///         while its fee claim still goes through.
+    /// @dev ETH falls 1.5%, inside the 2% spot gate, which carries a loan borrowed to the limit just
+    ///      past it. `collectFees` keeps `HF >= 1` (v0.40): between `maxLtvBps` and LT it still pays.
+    function test_overTheBorrowLimitButHealthyRemovesNothingAndStillClaims() public {
         _deposit(tokenId);
         _lend(300e6);
-        vm.prank(borrower);
-        market.borrow(tokenId, debt, borrower);
-        assertGe(_probe(tokenId, amount).healthFactorLeft, 1e18, "healthy after the removal with no haircut");
-        vm.prank(borrower);
-        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
-        vm.revertToState(snapshot);
-
-        _depositWithHaircut(tokenId, 500);
-        _lend(300e6);
-        vm.prank(borrower);
-        market.borrow(tokenId, debt, borrower);
-        uint256 healthLeft = _probe(tokenId, amount).healthFactorLeft;
-        assertLt(healthLeft, 1e18, "under water after the same removal with a 5% haircut");
-
-        vm.prank(borrower);
-        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PositionWouldBeUnhealthy.selector, tokenId, healthLeft));
-        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
-    }
-
-    /// @notice §7: the removal accrues before it checks the health factor, so interest nobody has
-    ///         accrued yet still counts against it.
-    /// @dev The removal is sized to leave the health factor just above 1 at the stored index. Sixty
-    ///      days then pass with nothing accrued: the stored index still says healthy, the accrued one
-    ///      does not. The lender's cash is nearly all lent out, so the curve accrues at a rate that
-    ///      matters over that time.
-    function test_theRemovalAccruesBeforeItChecksTheHealthFactor() public {
-        _deposit(tokenId);
-        // With the fees claimed first, the health factor falls in step with the liquidity that stays.
-        vm.prank(borrower);
-        market.collectFees(tokenId, borrower);
         uint256 limit = lens.maxBorrow(tokenId);
-        _lend(limit + 1e6);
         vm.prank(borrower);
         market.borrow(tokenId, limit, borrower);
-
-        // Aim for 1.003.
-        uint128 amount = liquidity - uint128(uint256(liquidity) * 1.003e18 / lens.healthFactor(tokenId));
-        vm.warp(block.timestamp + 60 days);
-        uint256 healthLeft = _probe(tokenId, amount).healthFactorLeft;
-        assertGe(healthLeft, 1e18, "at the stored index the removal must pass");
-        assertLt(healthLeft, 1.01e18, "and only just");
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 985 / 1000, 18);
+        assertEq(lens.maxBorrow(tokenId), 0, "the loan must be over its borrow limit");
+        assertGe(lens.healthFactor(tokenId), 1.1e18, "and still far from liquidation");
 
         vm.prank(borrower);
-        vm.expectPartialRevert(FarmentaMarket.PositionWouldBeUnhealthy.selector);
+        vm.expectPartialRevert(FarmentaMarket.RemovalExceedsBorrowLimit.selector);
+        market.decreaseLiquidity(tokenId, liquidity / 1000, 0, 0, recipient);
+
+        uint256 fees1 = valuer.value(tokenId).fees1;
+        vm.prank(borrower);
+        market.collectFees(tokenId, recipient);
+        assertEq(usdg.balanceOf(recipient), fees1, "the fee claim is held to HF >= 1, and passes");
+    }
+
+    /// @notice §6.5: on a frozen pool ramped under its borrow limit, the liquidation threshold is what
+    ///         binds, so a removal never leaves a position that can be liquidated at once.
+    /// @dev LT is ramped to 50% against a `maxLtvBps` of 65%. A debt between the two limits of what
+    ///      the removal leaves is refused at the 50% figure; one under both goes through.
+    function test_onAFrozenPoolRampedUnderMaxLtvTheThresholdBinds() public {
+        _deposit(tokenId);
+        _lend(300e6);
+        uint128 amount = liquidity / 4;
+        Probe memory expected = _probe(tokenId, amount);
+        uint256 snapshot = vm.snapshotState();
+
+        _borrowThenRampTo5000((_limit(expected, 5000) + _limit(expected, MAX_LTV_BPS)) / 2 / 1e12);
+        // Read before the prank: `debtOf` is an external call and would spend it.
+        uint256 debtUsd = _usd(market.debtOf(tokenId));
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                FarmentaMarket.RemovalExceedsBorrowLimit.selector, tokenId, debtUsd, _limit(expected, 5000)
+            )
+        );
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+        vm.revertToState(snapshot);
+
+        _borrowThenRampTo5000(_limit(expected, 5000) / 1e12 * 99 / 100);
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+        assertEq(positionManager.getPositionLiquidity(tokenId), liquidity - amount, "under both limits it goes through");
+    }
+
+    /// @notice §6.3: the borrow limit is taken on what remains after the pool's removal haircut.
+    /// @dev The same debt and the same removal on the same position. The debt sits between the limit
+    ///      the removal leaves with no haircut and the one it leaves with 5% taken off.
+    function test_theBorrowLimitCountsTheRemovalHaircut() public {
+        uint128 amount = liquidity / 4;
+        uint256 snapshot = vm.snapshotState();
+
+        _deposit(tokenId);
+        uint256 limitPlain = _limit(_probe(tokenId, amount), MAX_LTV_BPS);
+        vm.revertToState(snapshot);
+        _depositWithHaircut(tokenId, 500);
+        uint256 limitCut = _limit(_probe(tokenId, amount), MAX_LTV_BPS);
+        vm.revertToState(snapshot);
+        assertEq(limitCut, limitPlain * 9500 / 10_000, "the haircut comes off the limit");
+        uint256 debt = (limitPlain + limitCut) / 2 / 1e12;
+
+        _deposit(tokenId);
+        _lend(300e6);
+        vm.prank(borrower);
+        market.borrow(tokenId, debt, borrower);
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+        vm.revertToState(snapshot);
+
+        _depositWithHaircut(tokenId, 500);
+        _lend(300e6);
+        vm.prank(borrower);
+        market.borrow(tokenId, debt, borrower);
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.RemovalExceedsBorrowLimit.selector, tokenId, _usd(debt), limitCut)
+        );
         market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
     }
 
-    /// @notice Whatever is asked for, a removal that goes through leaves a healthy position that still
-    ///         clears the minimum, and one that does not go through moves nothing.
-    function testFuzz_aRemovalThatSucceedsLeavesAHealthyPosition(
+    /// @notice §7: the removal accrues before it checks the limit, so interest nobody has accrued yet
+    ///         still counts against it.
+    /// @dev The debt is set 0.1% under the limit the removal leaves. Sixty days then pass with nothing
+    ///      accrued: at the stored index the debt still fits, at the accrued one it does not. The
+    ///      lender's cash is nearly all lent out, so the curve accrues at a rate that matters.
+    function test_theRemovalAccruesBeforeItChecksTheLimit() public {
+        _deposit(tokenId);
+        uint128 amount = liquidity / 4;
+        uint256 limitUsd = _limit(_probe(tokenId, amount), MAX_LTV_BPS);
+        uint256 debt = limitUsd / 1e12 * 999 / 1000;
+        _lend(debt + 1e6);
+        vm.prank(borrower);
+        market.borrow(tokenId, debt, borrower);
+
+        vm.warp(block.timestamp + 60 days);
+        assertLe(_usd(market.debtOf(tokenId)), limitUsd, "at the stored index the removal must pass");
+
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.RemovalExceedsBorrowLimit.selector);
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+    }
+
+    /// @notice Whatever is asked for, a removal that goes through leaves the debt within the borrow
+    ///         limit and the position over the minimum, and one that does not go through was refused
+    ///         for one of those two reasons and moved nothing.
+    function testFuzz_aRemovalThatSucceedsLeavesTheDebtWithinTheLimit(
         uint128 amount,
         uint256 debt
     ) public {
@@ -398,11 +487,19 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
 
         vm.prank(borrower);
         try market.decreaseLiquidity(tokenId, amount, 0, 0, recipient) {
-            assertGe(lens.healthFactor(tokenId), 1e18, "a removal that succeeded left the position under water");
-            assertGe(valuer.value(tokenId).principalUsd, 50e18, "or under the minimum");
+            assertLe(
+                _usd(debt), lens.positionValue(tokenId) * MAX_LTV_BPS / 10_000, "a removal left the debt over the limit"
+            );
+            assertGe(valuer.value(tokenId).principalUsd, 50e18, "or the position under the minimum");
             assertEq(positionManager.getPositionLiquidity(tokenId), liquidity - amount, "exactly `amount` left");
             assertEq(market.debtOf(tokenId), debt, "the debt is untouched");
-        } catch {
+        } catch (bytes memory reason) {
+            bytes4 selector = bytes4(reason);
+            assertTrue(
+                selector == FarmentaMarket.PositionBelowMinimum.selector
+                    || selector == FarmentaMarket.RemovalExceedsBorrowLimit.selector,
+                "a removal was refused for a reason that is neither the minimum nor the limit"
+            );
             assertEq(positionManager.getPositionLiquidity(tokenId), liquidity, "a refused removal took liquidity");
             assertEq(usdg.balanceOf(recipient), 0, "or paid the recipient");
         }
@@ -464,6 +561,8 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         PoolId poolId = _keyOf(tokenId).toId();
         uint256 records = oracle.recordCount(poolId);
 
+        vm.expectEmit(true, true, false, true, address(memeMarket));
+        emit FarmentaMarket.LiquidityChanged(tokenId, poolId, -int256(uint256(liquidity / 4)));
         vm.prank(borrower);
         memeMarket.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
 
@@ -582,7 +681,15 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         uint256 id,
         uint16 removeHaircutBps
     ) private returns (address holder) {
-        _listPoolOf(id, 50e18, removeHaircutBps);
+        return _depositListed(id, 50e18, removeHaircutBps);
+    }
+
+    function _depositListed(
+        uint256 id,
+        uint128 minPositionUsd,
+        uint16 removeHaircutBps
+    ) private returns (address holder) {
+        _listPoolOf(id, minPositionUsd, removeHaircutBps);
         holder = nft.ownerOf(id);
         vm.startPrank(holder);
         nft.approve(address(market), id);
@@ -609,10 +716,43 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         market.borrow(tokenId, amount, borrower);
     }
 
+    /// @dev A USDG amount in USD 1e18, at the fixture's USDG price of exactly one dollar.
+    function _usd(
+        uint256 debt
+    ) private pure returns (uint256) {
+        return debt * 1e12;
+    }
+
+    /// @dev The debt, in USD 1e18, that `bps` of what the probed removal leaves allows.
+    function _limit(
+        Probe memory probe,
+        uint256 bps
+    ) private pure returns (uint256) {
+        return probe.positionValueLeft * bps / 10_000;
+    }
+
+    /// @dev Borrows `amount`, then freezes the pool and ramps its threshold to 50% over a day, under
+    ///      the 65% borrow limit, and lets the day pass. The ledger is accrued at the end so that
+    ///      `debtOf` is the figure the next call in the same block will see.
+    function _borrowThenRampTo5000(
+        uint256 amount
+    ) private {
+        vm.prank(borrower);
+        market.borrow(tokenId, amount, borrower);
+        PoolId poolId = _keyOf(tokenId).toId();
+        vm.startPrank(owner);
+        policy.setFrozen(poolId, true);
+        policy.scheduleLtRamp(poolId, 5000, uint40(block.timestamp), 1 days);
+        vm.stopPrank();
+        vm.warp(block.timestamp + 1 days);
+        market.accrue();
+        assertEq(policy.termsOf(poolId).ltBps, 5000, "the ramp must have landed");
+    }
+
     /// @dev Removes `amount` from `id` straight on PositionManager, as the market that owns it, and
     ///      reports what that paid and left behind. The chain is rolled back afterwards. It shares no
-    ///      code with the market's path: a `TAKE_PAIR` to a fresh address, and the lens for the health
-    ///      factor.
+    ///      code with the market's path: a `TAKE_PAIR` to a fresh address, and the lens for the
+    ///      collateral value and the health factor.
     function _probe(
         uint256 id,
         uint128 amount
@@ -631,6 +771,7 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         probe.out0 = key.currency0.balanceOf(sink);
         probe.out1 = key.currency1.balanceOf(sink);
         probe.principalUsdLeft = valuer.value(id).principalUsd;
+        probe.positionValueLeft = lens.positionValue(id);
         probe.healthFactorLeft = lens.healthFactor(id);
         vm.revertToState(snapshot);
     }
