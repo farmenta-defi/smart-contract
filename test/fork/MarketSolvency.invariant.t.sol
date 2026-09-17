@@ -2,10 +2,12 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {MarketLens} from "../../src/MarketLens.sol";
+import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 
@@ -15,6 +17,10 @@ contract MarketHandler is Test {
     MarketLens internal immutable lens;
     IERC20 internal immutable usdg;
     uint256 internal immutable tokenId;
+    /// @dev A second position that never borrows, so its removals are stopped by the minimum alone.
+    ///      On the indebted one the borrow limit always binds first.
+    uint256 internal immutable idleTokenId;
+    address internal immutable idleHolder;
     address internal immutable borrower;
     address internal immutable lender;
     address internal immutable owner;
@@ -22,8 +28,8 @@ contract MarketHandler is Test {
     bool public sawFloorBreach;
     /// @dev Set when a fee claim went through and left the position unhealthy (§7 post-condition).
     bool public sawUnhealthyClaim;
-    /// @dev Set when a liquidity removal went through and left the position unhealthy, or what stayed
-    ///      under the pool's minimum (§7 post-condition, §4.1 v0.54).
+    /// @dev Set when a liquidity removal went through and left the debt over the borrow limit, or what
+    ///      stayed under the pool's minimum (§7 post-condition, §4.1 v0.59).
     bool public sawUnsoundRemoval;
     address internal constant FEE_RECIPIENT = address(0xFEE5);
 
@@ -31,6 +37,8 @@ contract MarketHandler is Test {
         FarmentaMarket market_,
         MarketLens lens_,
         uint256 tokenId_,
+        uint256 idleTokenId_,
+        address idleHolder_,
         address borrower_,
         address lender_,
         address owner_
@@ -39,6 +47,8 @@ contract MarketHandler is Test {
         lens = lens_;
         usdg = IERC20(market_.asset());
         tokenId = tokenId_;
+        idleTokenId = idleTokenId_;
+        idleHolder = idleHolder_;
         borrower = borrower_;
         lender = lender_;
         owner = owner_;
@@ -109,18 +119,42 @@ contract MarketHandler is Test {
         if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyClaim = true;
     }
 
-    /// @dev Up to a fifth of what the position holds at a time, so a run reaches several removals at
-    ///      whatever debt and index the other actions left, rather than one that empties it. The
-    ///      market refuses the ones that would go too far, and the handler discards those reverts; what
-    ///      is recorded is any removal it let through that it should not have.
+    /// @dev Any amount up to everything the position holds. The market refuses the removals that go
+    ///      too far, and the handler discards those reverts; what is recorded is one it let through
+    ///      that it should not have: a debt over the borrow limit of what stays (§4.1 v0.59), or a
+    ///      remainder under the pool's minimum after its removal haircut (§6.1). Both bounds are read
+    ///      from the policy, not written here. USDG is priced at exactly one dollar in this suite, so
+    ///      a debt in USD 1e18 is the USDG amount times 1e12.
     function decreaseLiquidity(
         uint128 amount
     ) external {
-        uint128 held = market.positionManager().getPositionLiquidity(tokenId);
-        amount = uint128(bound(amount, 1, held / 5));
-        vm.prank(borrower);
-        market.decreaseLiquidity(tokenId, amount, 0, 0, FEE_RECIPIENT);
-        if (lens.healthFactor(tokenId) < 1e18 || market.valuer().value(tokenId).principalUsd < 50e18) {
+        _remove(tokenId, borrower, amount, 1);
+    }
+
+    /// @dev The same removal on the position that owes nothing, where only the minimum can refuse it.
+    ///      At least half of what is held each time: the fuzzer's amounts are otherwise small against
+    ///      the position, and a run never brings it near the minimum.
+    function decreaseIdleLiquidity(
+        uint128 amount
+    ) external {
+        _remove(idleTokenId, idleHolder, amount, 2);
+    }
+
+    function _remove(
+        uint256 id,
+        address holder,
+        uint128 amount,
+        uint128 leastShare
+    ) private {
+        uint128 held = market.positionManager().getPositionLiquidity(id);
+        amount = uint128(bound(amount, leastShare == 1 ? 1 : held / leastShare, held));
+        vm.prank(holder);
+        market.decreaseLiquidity(id, amount, 0, 0, FEE_RECIPIENT);
+
+        ICollateralPolicy.Terms memory terms = market.policy().termsOf(market.loanOf(id).poolKeyId);
+        uint256 limitUsd = lens.positionValue(id) * Math.min(terms.maxLtvBps, terms.ltBps) / 10_000;
+        uint256 recoverableUsd = market.valuer().value(id).principalUsd * (10_000 - terms.removeHaircutBps) / 10_000;
+        if (market.debtOf(id) * 1e12 > limitUsd || recoverableUsd < terms.minPositionUsd) {
             sawUnsoundRemoval = true;
         }
     }
@@ -165,7 +199,15 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
         uint256 amount = lens.maxBorrow(tokenId) / 2;
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
-        handler = new MarketHandler(market, lens, tokenId, borrower, lender, market.owner());
+        uint256 idleTokenId = Fixtures.POS_WETH_USDG_WIDE_IN_RANGE;
+        _listPoolOf(idleTokenId, 50e18);
+        address idleHolder = nft.ownerOf(idleTokenId);
+        vm.startPrank(idleHolder);
+        nft.approve(address(market), idleTokenId);
+        market.depositCollateral(idleTokenId);
+        vm.stopPrank();
+
+        handler = new MarketHandler(market, lens, tokenId, idleTokenId, idleHolder, borrower, lender, market.owner());
         targetContract(address(handler));
     }
 
@@ -182,7 +224,10 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
     }
 
     function invariant_aRemovalNeverLeavesThePositionUnsound() public view {
-        assertFalse(handler.sawUnsoundRemoval(), "a liquidity removal left the position unhealthy or under the minimum");
+        assertFalse(
+            handler.sawUnsoundRemoval(),
+            "a liquidity removal left the debt over the borrow limit or the position under the minimum"
+        );
     }
 
     function invariant_withdrawalNeverBreachesTheFloor() public view {
