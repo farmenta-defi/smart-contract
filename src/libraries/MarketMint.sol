@@ -15,6 +15,7 @@ import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol"
 
 import {ICollateralPolicy} from "../interfaces/ICollateralPolicy.sol";
 import {IPositionValuer} from "../interfaces/IPositionValuer.sol";
+import {DebtMath} from "./DebtMath.sol";
 import {MarketDebt} from "./MarketDebt.sol";
 import {MarketLedger} from "./MarketLedger.sol";
 
@@ -23,8 +24,6 @@ import {MarketLedger} from "./MarketLedger.sol";
 /// @dev Runs by delegatecall and records collateral in the calling market's ERC-7201 layout.
 library MarketMint {
     using SafeERC20 for IERC20;
-
-    uint256 private constant BPS = 10_000;
 
     event CollateralDeposited(uint256 indexed tokenId, address indexed owner);
     event LiquidityChanged(uint256 indexed tokenId, PoolId indexed poolId, int256 liqDelta);
@@ -187,7 +186,7 @@ library MarketMint {
 
         // Apply the §6.3 removal haircut before checking the minimum: an
         // immediately withdrawable position cannot satisfy the floor only before its haircut.
-        uint256 recoverableUsd = valuation.principalUsd * (BPS - terms.removeHaircutBps) / BPS;
+        uint256 recoverableUsd = DebtMath.recoverablePrincipal(valuation.principalUsd, terms.removeHaircutBps);
         if (recoverableUsd < terms.minPositionUsd) {
             revert PositionBelowMinimum(recoverableUsd, terms.minPositionUsd);
         }

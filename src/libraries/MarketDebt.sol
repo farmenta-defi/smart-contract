@@ -46,6 +46,7 @@ library MarketDebt {
     error UsdgPriceOutOfBounds(uint256 price);
     error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
     error PositionWouldBeUnhealthy(uint256 tokenId, uint256 healthFactor);
+    error RemovalExceedsBorrowLimit(uint256 tokenId, uint256 debtUsd, uint256 limitUsd);
 
     struct Env {
         IERC20 asset;
@@ -150,6 +151,39 @@ library MarketDebt {
             _gatedCollateralValue(env, $.tier, loan.poolKeyId, tokenId);
         uint256 healthFactor = DebtMath.healthFactor(collateralUsd, terms.ltBps, _debtUsd(env.asset, env.oracle, debt));
         if (healthFactor < WAD) revert PositionWouldBeUnhealthy(tokenId, healthFactor);
+    }
+
+    /// @notice Refuses to leave `tokenId` owing more than it could borrow, once liquidity has been
+    ///         taken out of it (§4.1 v0.59, §15 no. 22).
+    /// @dev `requireHealthy` holds an action to the liquidation threshold. That is not enough for a
+    ///      removal of principal: borrow to `maxLtvBps`, remove liquidity until the health factor is
+    ///      1, and two calls have reached a loan-to-value `borrow` refuses, with the buffer between
+    ///      the two thresholds gone. So what is owed must fit the borrow limit of what is left:
+    ///      §6.2's collateral value, read through the same §5.2 price gates as `borrow`, times the
+    ///      lower of `maxLtvBps` and `ltBps`. The lower, because a frozen pool's threshold may be
+    ///      ramped to or under its borrow limit (§6.5), and there it is the threshold that binds: a
+    ///      removal never leaves a position that can be liquidated at once.
+    ///
+    ///      A position already over its borrow limit, through price or interest, can therefore
+    ///      remove nothing until some of its debt is repaid. With nothing owed neither the gates
+    ///      nor the limit run. `collectFees` and `increaseLiquidity` keep `requireHealthy`: the
+    ///      fees they release are capped at a tenth of principal in the collateral value (§6.2).
+    ///
+    ///      A view, safe after the removal's outbound calls for the reason `requireHealthy` is.
+    function requireWithinBorrowLimit(
+        Env calldata env,
+        uint256 tokenId
+    ) external view {
+        MarketLedger.Layout storage $ = MarketLedger.layout();
+        MarketLedger.Loan storage loan = $.loans[tokenId];
+        uint256 debt = DebtMath.debtOf(loan.debtShares, $.borrowIndex);
+        if (debt == 0) return;
+
+        (ICollateralPolicy.Terms memory terms, uint256 collateralUsd) =
+            _gatedCollateralValue(env, $.tier, loan.poolKeyId, tokenId);
+        uint256 debtUsd = _debtUsd(env.asset, env.oracle, debt);
+        uint256 limitUsd = collateralUsd * Math.min(terms.maxLtvBps, terms.ltBps) / BPS;
+        if (debtUsd > limitUsd) revert RemovalExceedsBorrowLimit(tokenId, debtUsd, limitUsd);
     }
 
     function _accrue(

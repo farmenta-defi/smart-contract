@@ -61,6 +61,18 @@ library DebtMath {
         return (principalUsd + Math.min(feesUsd, principalUsd / 10)) * (10_000 - removeHaircutBps) / 10_000;
     }
 
+    /// @notice What §6.1's minimum position value is held against: principal alone, after the §6.3
+    ///         removal haircut, in USD 1e18.
+    /// @dev Fees are left out on purpose (v0.6). They can be claimed a second later, and a position
+    ///      that clears the floor only with them falls under it one transaction on. Stated once for
+    ///      intake and for `decreaseLiquidity`, so what may stay in custody is what may enter it.
+    function recoverablePrincipal(
+        uint256 principalUsd,
+        uint256 removeHaircutBps
+    ) internal pure returns (uint256) {
+        return principalUsd * (10_000 - removeHaircutBps) / 10_000;
+    }
+
     function debtUsd(
         uint256 debt,
         uint256 price,
