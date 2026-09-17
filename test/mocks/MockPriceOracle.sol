@@ -5,6 +5,8 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+
 import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
 
 /// @notice Oracle stub with settable prices, for testing valuation independently of feeds.
@@ -89,9 +91,28 @@ contract MockPriceOracle is IPriceOracle {
         return this.priceForLiquidation(currency);
     }
 
+    /// @notice The watched position's liquidity at the last `record`.
+    /// @dev §5.3 wants the observation taken before the market touches the pool. A count says a
+    ///      `record` happened, not when; what the position held at that moment does.
+    uint128 public liquidityOnLastRecord;
+    IPositionManager internal _watchedManager;
+    uint256 internal _watchedTokenId;
+
+    /// @notice Has `record` note `tokenId`'s liquidity each time it runs.
+    function watch(
+        IPositionManager positionManager,
+        uint256 tokenId
+    ) external {
+        _watchedManager = positionManager;
+        _watchedTokenId = tokenId;
+    }
+
     function record(
         PoolKey calldata key
     ) external {
         ++recordCount[key.toId()];
+        if (address(_watchedManager) != address(0)) {
+            liquidityOnLastRecord = _watchedManager.getPositionLiquidity(_watchedTokenId);
+        }
     }
 }

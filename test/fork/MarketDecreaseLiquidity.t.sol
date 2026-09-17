@@ -560,6 +560,7 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         FarmentaMarket memeMarket = _openMemeMarket();
         PoolId poolId = _keyOf(tokenId).toId();
         uint256 records = oracle.recordCount(poolId);
+        oracle.watch(positionManager, tokenId);
 
         vm.expectEmit(true, true, false, true, address(memeMarket));
         emit FarmentaMarket.LiquidityChanged(tokenId, poolId, -int256(uint256(liquidity / 4)));
@@ -567,6 +568,7 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         memeMarket.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
 
         assertEq(oracle.recordCount(poolId), records + 1, "the removal recorded the pool once");
+        assertEq(oracle.liquidityOnLastRecord(), liquidity, "and did so before any liquidity had left");
     }
 
     /// @notice A blue-chip removal has no TWAP to feed, and pays nothing for one.
