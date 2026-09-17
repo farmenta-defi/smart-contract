@@ -565,7 +565,8 @@ contract FarmentaMarket is
     ///        factor (§6.2), and again by what the position can actually pay for.
     /// @param minOut0 Least currency0 the caller accepts, measured on what **they** receive.
     /// @param minOut1 Least currency1 the caller accepts, on the same basis.
-    /// @param to Where the seized tokens go.
+    /// @param to Where the seized tokens go. The same addresses are refused as for `collectFees`,
+    ///        on both branches (§4.1 v0.43).
     /// @return repaid USDG actually taken off the debt, the borrower's own fees included.
     /// @return out0 currency0 the liquidator received, any fee leg it bought included. On the
     ///         full branch a contract `to` can distort it; see `Liquidate`.
