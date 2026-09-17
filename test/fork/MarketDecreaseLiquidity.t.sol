@@ -209,6 +209,76 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         assertEq(positionManager.getPositionLiquidity(tokenId), liquidity, "the liquidity stays in the position");
     }
 
+    /* ------------------------------ minimum position -------------------------- */
+
+    /// @notice §6.1 on what stays: a remainder under the pool's minimum is refused, one at it is not.
+    /// @dev Owing nothing, which is the case the ticket left open: the floor holds for as long as the
+    ///      position is in custody (decided 17 Sep 2026), because `borrow` never looks at it again.
+    function test_whatStaysMustStillClearTheMinimumEvenWithNoDebt() public {
+        _deposit(tokenId);
+        uint256 principalUsd = valuer.value(tokenId).principalUsd;
+        uint128 tooMuch = liquidity - uint128(uint256(liquidity) * 49.5e18 / principalUsd);
+        uint128 justEnough = liquidity - uint128(uint256(liquidity) * 50.5e18 / principalUsd);
+        uint256 left = _probe(tokenId, tooMuch).principalUsdLeft;
+        assertLt(left, 50e18, "the larger removal must leave less than the minimum");
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, left, 50e18));
+        market.decreaseLiquidity(tokenId, tooMuch, 0, 0, recipient);
+
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, justEnough, 0, 0, recipient);
+        assertGe(valuer.value(tokenId).principalUsd, 50e18, "what stays clears the minimum");
+    }
+
+    /// @notice Fees do not count towards the minimum (§6.1 v0.6): they can be claimed a second later.
+    /// @dev The position is given fees worth several times the minimum. They leave with the removal
+    ///      anyway, and the floor is measured on the principal that stays.
+    function test_unclaimedFeesDoNotCoverTheMinimum() public {
+        _deposit(tokenId);
+        _donateFees(tokenId, 0, 200e6);
+        IPositionValuer.Valuation memory v = valuer.value(tokenId);
+        assertGt(v.feesUsd, 150e18, "the donation must reach the position");
+        uint128 tooMuch = liquidity - uint128(uint256(liquidity) * 40e18 / v.principalUsd);
+
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.PositionBelowMinimum.selector);
+        market.decreaseLiquidity(tokenId, tooMuch, 0, 0, recipient);
+    }
+
+    /// @notice The whole position never leaves this way: nothing would be left to hold as collateral.
+    /// @dev A borrower owing nothing takes the NFT back with `withdrawCollateral` instead.
+    function test_removingEverythingIsRefused() public {
+        _deposit(tokenId);
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, 0, 50e18));
+        market.decreaseLiquidity(tokenId, liquidity, 0, 0, recipient);
+    }
+
+    /// @notice The minimum is held against principal after the pool's removal haircut (§6.3), as at
+    ///         intake.
+    /// @dev The same removal on the same position: it leaves about $51 of principal, which clears $50
+    ///      on a pool with no haircut and falls to about $48.45 on one that takes 5%.
+    function test_theMinimumIsMeasuredAfterTheRemovalHaircut() public {
+        uint256 principalUsd = valuer.value(tokenId).principalUsd;
+        uint128 amount = liquidity - uint128(uint256(liquidity) * 51e18 / principalUsd);
+        uint256 snapshot = vm.snapshotState();
+
+        _deposit(tokenId);
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+        vm.revertToState(snapshot);
+
+        _depositWithHaircut(tokenId, 500);
+        uint256 left = _probe(tokenId, amount).principalUsdLeft;
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, left * 9500 / 10_000, 50e18)
+        );
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _deposit(
