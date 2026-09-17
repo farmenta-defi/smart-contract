@@ -408,6 +408,100 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         }
     }
 
+    /* --------------------------------- price gates ---------------------------- */
+
+    /// @notice §5.2: with debt outstanding, a USDG price outside [0,97; 1,03] refuses the removal.
+    function test_anIndebtedRemovalRunsTheUsdgBand() public {
+        _openLoan(20e6);
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
+
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UsdgPriceOutOfBounds.selector, 0.96e18));
+        market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
+    }
+
+    /// @notice §5.2: with debt outstanding, a fresh Pyth quote over 3% from Chainlink refuses it.
+    function test_anIndebtedRemovalRunsThePythGate() public {
+        _openLoan(20e6);
+        oracle.setPythPrice(ETH_AT_POOL_SPOT * 104 / 100, block.timestamp);
+
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.PythPriceDeviation.selector);
+        market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
+    }
+
+    /// @notice §5.2: with debt outstanding, a pool more than 2% from the oracle refuses it.
+    /// @dev A 3% move keeps the health factor far above 1, so the refusal can only be the gate.
+    function test_anIndebtedRemovalRunsTheSpotGate() public {
+        _openLoan(20e6);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 97 / 100, 18);
+        assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must be outside the 2% gate");
+
+        vm.prank(borrower);
+        vm.expectPartialRevert(FarmentaMarket.SpotPriceDeviation.selector);
+        market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
+    }
+
+    /// @notice With nothing owed there is no debt to protect, so none of the gates apply.
+    function test_aRemovalWithNoDebtRunsNoPriceGate() public {
+        _deposit(tokenId);
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 97 / 100, 18);
+        oracle.setPythPrice(ETH_AT_POOL_SPOT, block.timestamp);
+
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), liquidity - liquidity / 4, "the removal went through");
+    }
+
+    /* --------------------------------- meme market ---------------------------- */
+
+    /// @notice §5.3: every market transaction touching a meme pool records an observation first, and a
+    ///         removal is one of them.
+    function test_aMemeRemovalRecordsAnObservationFirst() public {
+        FarmentaMarket memeMarket = _openMemeMarket();
+        PoolId poolId = _keyOf(tokenId).toId();
+        uint256 records = oracle.recordCount(poolId);
+
+        vm.prank(borrower);
+        memeMarket.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
+
+        assertEq(oracle.recordCount(poolId), records + 1, "the removal recorded the pool once");
+    }
+
+    /// @notice A blue-chip removal has no TWAP to feed, and pays nothing for one.
+    function test_aBlueChipRemovalRecordsNothing() public {
+        _deposit(tokenId);
+        PoolId poolId = _keyOf(tokenId).toId();
+
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
+
+        assertEq(oracle.recordCount(poolId), 0, "no observation for a blue-chip pool");
+    }
+
+    /// @notice §5.2 on a meme market: Pyth and the ±2% spot gate are blue-chip rules, so neither holds
+    ///         up an indebted removal there, while the USDG band still does.
+    function test_anIndebtedMemeRemovalRunsTheMemeGates() public {
+        FarmentaMarket memeMarket = _openMemeMarket();
+        vm.prank(borrower);
+        memeMarket.borrow(tokenId, 10e6, borrower);
+
+        oracle.setPythPrice(ETH_AT_POOL_SPOT * 104 / 100, block.timestamp);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 95 / 100, 18);
+        assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must be outside the blue-chip spot gate");
+
+        vm.prank(borrower);
+        memeMarket.decreaseLiquidity(tokenId, liquidity / 8, 0, 0, recipient);
+        assertEq(positionManager.getPositionLiquidity(tokenId), liquidity - liquidity / 8, "the removal went through");
+
+        oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
+        vm.prank(borrower);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UsdgPriceOutOfBounds.selector, 0.96e18));
+        memeMarket.decreaseLiquidity(tokenId, liquidity / 8, 0, 0, recipient);
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _deposit(
