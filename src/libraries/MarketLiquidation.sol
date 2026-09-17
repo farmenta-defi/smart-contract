@@ -121,7 +121,8 @@ library MarketLiquidation {
     error SeizureBelowMinimum(uint256 out0, uint256 out1);
 
     /// @notice The seized tokens were addressed somewhere they would not reach the liquidator:
-    ///         nowhere, the market itself, or an address PositionManager reads as one of the two
+    ///         nowhere, the market itself, `address(1)`, which PositionManager reads as the market,
+    ///         or `address(2)` and PositionManager itself, where anyone can `SWEEP` them
     ///         (§4.1 v0.43). See `MarketLiquidity.refusesRecipient`.
     error InvalidRecipient(address to);
 
