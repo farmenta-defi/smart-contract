@@ -149,9 +149,12 @@ Custody, lending and liquidation.
   position out of custody. The slice's principal and every fee the position holds go straight to
   the recipient, USDG first, and `min0`/`min1` bound the principal alone. What stays must still
   clear the pool's minimum position value (principal after the removal haircut, fees excluded),
-  owing or not, so the whole of a position never leaves this way; with debt outstanding the
-  removal passes the same §5.2 price gates as a borrow and must leave the health factor at or
-  above 1. A frozen pool does not stop it (spec §4.1, §5.2, §6.1, §6.5, FAR-8).
+  owing or not, so the whole of a position never leaves this way. With debt outstanding the
+  removal passes the same §5.2 price gates as a borrow, and what is owed must still fit the borrow
+  limit of what is left: the collateral value times the lower of max LTV and the liquidation
+  threshold. A health factor of 1 is not enough here, or a loan borrowed to max LTV could be walked
+  up to the threshold in two calls (spec §4.1 v0.59). A frozen pool does not stop it (spec §4.1,
+  §5.2, §6.1, §6.5, FAR-8).
 
 Custody is the design rather than a detail. `PositionManager` gates
 `DECREASE_LIQUIDITY` and `BURN_POSITION` behind `onlyIfApproved(msgSender())`, so
