@@ -68,7 +68,7 @@ library MarketLiquidation {
     /// @param repayAmount USDG the liquidator offered.
     /// @param minOut0 Least currency0 the liquidator accepts, on what they receive.
     /// @param minOut1 Least currency1 the liquidator accepts, on what they receive.
-    /// @param to Where the seized tokens go.
+    /// @param to Where the seized tokens go. See `InvalidRecipient` for what is refused.
     struct Request {
         uint256 tokenId;
         uint256 repayAmount;
