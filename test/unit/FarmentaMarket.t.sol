@@ -599,6 +599,7 @@ contract FarmentaMarketTest is Test {
     function test_healthFactorForDebtFreePositionIsUnlimited() public view {
         assertEq(lens.healthFactor(12_345), type(uint256).max);
         assertEq(lens.liquidationHealthFactor(12_345), type(uint256).max);
+        assertEq(lens.liquidationCloseFactorBps(12_345), 10_000);
     }
 
     /* --------------------------------- helpers -------------------------------- */

@@ -576,6 +576,11 @@ contract FarmentaMarket is
         return _marketStorage().borrowIndex;
     }
 
+    /// @notice Timestamp of the index stored by the most recent accrual.
+    function lastAccrual() external view returns (uint256) {
+        return _marketStorage().lastAccrual;
+    }
+
     function reserves() external view returns (uint256) {
         return _marketStorage().reserves;
     }

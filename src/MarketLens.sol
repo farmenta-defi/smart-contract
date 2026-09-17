@@ -81,10 +81,28 @@ contract MarketLens {
     function liquidationHealthFactor(
         uint256 tokenId
     ) external view returns (uint256) {
-        uint256 debt = market.debtOf(tokenId);
+        MarketLedger.Loan memory loan = market.loanOf(tokenId);
+        uint256 debt = _projectedDebt(loan);
         if (debt == 0) return type(uint256).max;
 
+        return _liquidationHealthFactor(tokenId, loan, debt);
+    }
+
+    /// @notice Close factor the liquidation gate will apply at the current timestamp.
+    function liquidationCloseFactorBps(
+        uint256 tokenId
+    ) external view returns (uint16) {
         MarketLedger.Loan memory loan = market.loanOf(tokenId);
+        uint256 debt = _projectedDebt(loan);
+        return LiquidationMath.closeFactorBps(loan.tier, _liquidationHealthFactor(tokenId, loan, debt), debt);
+    }
+
+    function _liquidationHealthFactor(
+        uint256 tokenId,
+        MarketLedger.Loan memory loan,
+        uint256 debt
+    ) private view returns (uint256) {
+        if (debt == 0) return type(uint256).max;
         ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
         IPositionValuer.Valuation memory valuation = valuer.valueForLiquidation(tokenId);
         Currency assetCurrency = Currency.wrap(address(asset));
@@ -97,6 +115,21 @@ contract MarketLens {
             oracle.priceForLiquidation(assetCurrency),
             oracle.decimals(assetCurrency)
         );
+    }
+
+    function _projectedDebt(
+        MarketLedger.Loan memory loan
+    ) private view returns (uint256) {
+        uint256 borrowIndex = market.borrowIndex();
+        uint256 elapsed = block.timestamp - market.lastAccrual();
+        uint256 totalBorrowShares = market.totalBorrowShares();
+        if (elapsed != 0 && totalBorrowShares != 0) {
+            uint256 totalBorrows = market.totalBorrows();
+            uint256 utilization = totalBorrows * 1e18 / (asset.balanceOf(address(market)) + totalBorrows);
+            uint256 rate = market.interestRateModel().ratePerSecond(market.tier(), utilization);
+            (borrowIndex,,) = DebtMath.accrue(borrowIndex, totalBorrowShares, totalBorrows, rate, elapsed);
+        }
+        return DebtMath.debtOf(loan.debtShares, borrowIndex);
     }
 
     /// @notice Lender-protection reserve floor for the market's current assets.

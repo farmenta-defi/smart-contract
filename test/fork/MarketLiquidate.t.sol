@@ -757,6 +757,62 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertEq(repaid, 10e6, "the liquidation surface is what decides");
     }
 
+    function test_liquidationLensMatchesTheGateWithUsdPriceAndHaircut() public {
+        _open(500);
+        _fundLiquidator(2000e6);
+        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 95 / 100);
+        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.USDG), 1.02e18);
+
+        assertEq(lens.liquidationHealthFactor(tokenId), _healthyGateHealthFactor(), "lens must match the gate exactly");
+    }
+
+    function test_liquidationLensProjectsUnaccruedDebt() public {
+        _open(0);
+        _fundLiquidator(2000e6);
+        _ageUntilHealthFactorBelow(1.002e18);
+
+        vm.warp(block.timestamp + 60 days);
+        assertLt(lens.liquidationHealthFactor(tokenId), 1e18, "the projected debt must make the position liquidatable");
+
+        vm.prank(liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, 100e6, 0, 0, liquidator);
+        assertGt(repaid, 0, "the gate must agree with the projected lens");
+    }
+
+    function test_liquidationCloseFactorUsesTheProjectedHealthFactor() public {
+        _open(0);
+        _ageUntilHealthFactorBelow(1e18);
+        assertGt(lens.liquidationHealthFactor(tokenId), 0.9e18, "this needs the partial close band");
+        assertEq(lens.liquidationCloseFactorBps(tokenId), 5000);
+    }
+
+    function testFuzz_liquidationLensAgreesWithTheGate(
+        uint16 nativeBps,
+        uint16 usdgBps,
+        uint40 elapsed
+    ) public {
+        _open(500);
+        _fundLiquidator(10_000e6);
+        nativeBps = uint16(bound(nativeBps, 5000, 12_000));
+        usdgBps = uint16(bound(usdgBps, 9500, 10_500));
+        elapsed = uint40(bound(uint256(elapsed), 0, 365 days));
+        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * nativeBps / 10_000);
+        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.USDG), ONE_USD * usdgBps / 10_000);
+        vm.warp(block.timestamp + elapsed);
+
+        uint256 healthFactor = lens.liquidationHealthFactor(tokenId);
+        vm.prank(liquidator);
+        (bool succeeded, bytes memory reason) =
+            address(market).call(abi.encodeCall(market.liquidate, (tokenId, type(uint256).max, 0, 0, liquidator)));
+
+        if (succeeded) {
+            assertLt(healthFactor, 1e18, "a successful liquidation needs an unhealthy lens reading");
+        } else {
+            assertEq(bytes4(reason), MarketLiquidation.PositionIsHealthy.selector, "the only healthy-state refusal");
+            assertEq(healthFactor, _healthFactorFromReason(reason), "the lens and gate health factors must agree");
+        }
+    }
+
     /* ----------------------------------- fuzz --------------------------------- */
 
     /// @notice §8 step 5's invariant: whatever the liquidator asks to repay, they never walk
@@ -937,6 +993,23 @@ contract MarketLiquidateForkTest is MarketForkTest {
         deal(address(usdg), liquidator, amount);
         vm.prank(liquidator);
         usdg.approve(address(market), type(uint256).max);
+    }
+
+    function _healthyGateHealthFactor() private returns (uint256 healthFactor) {
+        vm.prank(liquidator);
+        (bool succeeded, bytes memory reason) =
+            address(market).call(abi.encodeCall(market.liquidate, (tokenId, type(uint256).max, 0, 0, liquidator)));
+        assertFalse(succeeded, "the configured position must be healthy");
+        assertEq(bytes4(reason), MarketLiquidation.PositionIsHealthy.selector, "unexpected gate refusal");
+        healthFactor = _healthFactorFromReason(reason);
+    }
+
+    function _healthFactorFromReason(
+        bytes memory reason
+    ) private pure returns (uint256 healthFactor) {
+        assembly {
+            healthFactor := mload(add(reason, 68))
+        }
     }
 
     /// @dev Lets accrued interest carry the position under `target`, which leaves the oracle

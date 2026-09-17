@@ -185,6 +185,8 @@ contract MarketBorrowForkTest is MarketForkTest {
         memeMarket.deposit(300e6, lender);
         vm.stopPrank();
 
+        oracle.setPythPrice(100e18, block.timestamp);
+        oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2400e18, 18);
         uint256 allowed = new MarketLens(memeMarket).maxBorrow(tokenId);
         vm.prank(holder);
         vm.expectPartialRevert(FarmentaMarket.BorrowExceedsMaxLtv.selector);
