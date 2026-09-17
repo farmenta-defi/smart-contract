@@ -42,6 +42,15 @@ contract DebtMathTest is Test {
         assertEq(DebtMath.collateralValue(1000e18, 300e18, 10_000), 0, "a full haircut leaves nothing");
     }
 
+    /// @notice §6.1's floor is held against principal after the removal haircut, to the unit. Intake
+    ///         and `decreaseLiquidity` both call this one function.
+    function test_recoverablePrincipalTakesTheHaircutOffPrincipalAlone() public pure {
+        assertEq(DebtMath.recoverablePrincipal(1000e18, 0), 1000e18, "no haircut, all of it");
+        assertEq(DebtMath.recoverablePrincipal(1000e18, 500), 950e18, "5% off");
+        assertEq(DebtMath.recoverablePrincipal(1000e18, 10_000), 0, "a full haircut leaves nothing");
+        assertEq(DebtMath.recoverablePrincipal(999, 1), 998, "rounded down");
+    }
+
     /// @dev Both divisions round down: a tenth of 999 is 99, and 1098 * 9999 / 10000 is 1097.
     function test_collateralValueRoundsDown() public pure {
         assertEq(DebtMath.collateralValue(999, 1000, 1), 1097);
