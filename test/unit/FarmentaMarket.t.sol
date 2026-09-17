@@ -253,6 +253,28 @@ contract FarmentaMarketTest is Test {
         assertEq(usdg.balanceOf(lender), 600e6, "a paused market trapped a lender's assets");
     }
 
+    /// @notice Adding liquidity stops while the market is paused (§4.1 pause scope).
+    /// @dev It takes on new exposure to a pool, so it sits with deposits and borrowing among what
+    ///      a pause halts, ahead of any other check.
+    function test_increaseLiquidityStopsWhenPaused() public {
+        vm.prank(owner);
+        market.pause();
+
+        ISignatureTransfer.PermitBatchTransferFrom memory permit;
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        market.increaseLiquidity(1, 1, 0, 0, permit, "");
+    }
+
+    /// @notice Only the address a position is recorded to may add liquidity to it.
+    /// @dev Checked before PositionManager, the policy or Permit2 is reached, which is why this
+    ///      runs with nothing but opaque addresses behind the market.
+    function test_increaseLiquidityRefusesAnyoneButTheDepositor() public {
+        ISignatureTransfer.PermitBatchTransferFrom memory permit;
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotTheDepositor.selector, 1, address(0)));
+        market.increaseLiquidity(1, 1, 0, 0, permit, "");
+    }
+
     /// @notice The market accepts native ETH.
     /// @dev Pools whose currency0 is `address(0)` pay out in ETH, so `TAKE_PAIR` will send it
     ///      here once fees, liquidity decreases and liquidations exist (§4.1). Nothing routes
