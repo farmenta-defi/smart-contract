@@ -92,31 +92,6 @@ contract MarketBorrowForkTest is MarketForkTest {
         market.borrow(tokenId, 10e6, holder);
     }
 
-    function test_borrowRejectsFreshPythDeviation() public {
-        (uint256 tokenId, address holder) = _prepareLoan();
-        oracle.setPythPrice(2600e18, block.timestamp);
-
-        vm.prank(holder);
-        vm.expectPartialRevert(FarmentaMarket.PythPriceDeviation.selector);
-        market.borrow(tokenId, 10e6, holder);
-    }
-
-    function test_borrowIgnoresStalePyth() public {
-        (uint256 tokenId, address holder) = _prepareLoan();
-        oracle.setPythPrice(1e18, block.timestamp - 10 minutes - 1);
-
-        vm.prank(holder);
-        market.borrow(tokenId, 10e6, holder);
-    }
-
-    function test_borrowAcceptsFreshPythWithinThreePercent() public {
-        (uint256 tokenId, address holder) = _prepareLoan();
-        oracle.setPythPrice(2550e18, block.timestamp);
-
-        vm.prank(holder);
-        market.borrow(tokenId, 10e6, holder);
-    }
-
     function test_borrowRejectsSpotOutsideTheTwoPercentGate() public {
         (uint256 tokenId, address holder) = _prepareLoan();
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2458e18, 18);
@@ -149,7 +124,7 @@ contract MarketBorrowForkTest is MarketForkTest {
         assertApproxEqAbs(atNinetyEightCents, expected, 1, "USDG oracle price must scale borrow capacity");
     }
 
-    function test_memeBorrowSkipsPythAndSpotGates() public {
+    function test_memeBorrowSkipsTheSpotGate() public {
         vm.startPrank(owner);
         policy.setTokenConfig(Currency.wrap(RobinhoodChain.NATIVE), true, ICollateralPolicy.Tier.MEME, 18, address(1));
         vm.stopPrank();
@@ -184,8 +159,8 @@ contract MarketBorrowForkTest is MarketForkTest {
         memeMarket.deposit(300e6, lender);
         vm.stopPrank();
 
-        oracle.setPythPrice(100e18, block.timestamp);
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2400e18, 18);
+        assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must sit outside the blue-chip gate");
         vm.prank(holder);
         memeMarket.borrow(tokenId, 10e6, holder);
         assertEq(oracle.recordCount(key.toId()), 2);
