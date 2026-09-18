@@ -219,10 +219,53 @@ contract CollateralPolicyTest is Test {
 
     function test_haircutCannotExceedEverything() public {
         CollateralPolicy.ListingParams memory p = _blueChipParams();
-        p.removeHaircutBps = 10_001;
+        p.removeHaircutBps = 2001;
         vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HaircutTooLarge.selector, uint16(10_001)));
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HaircutTooLarge.selector, uint16(2001)));
         policy.list(_blueChipKey(address(0)), p);
+    }
+
+    function test_haircutRequiresAnAfterRemoveLiquidityDeltaHook() public {
+        CollateralPolicy.ListingParams memory p = _blueChipParams();
+        p.removeHaircutBps = 1;
+
+        vm.prank(owner);
+        vm.expectRevert(CollateralPolicy.HaircutRequiresRemoveDeltaHook.selector);
+        policy.list(_blueChipKey(address(0)), p);
+
+        // Low bits 8 and 0 advertise afterRemoveLiquidity and its delta return respectively.
+        address deltaHook = address(0x101);
+        PoolKey memory key = _blueChipKey(deltaHook);
+        vm.startPrank(owner);
+        policy.setHookAllowlist(deltaHook, true);
+        policy.list(key, p);
+        vm.stopPrank();
+
+        assertEq(policy.termsOf(key.toId()).removeHaircutBps, 1, "haircut was not stored");
+    }
+
+    function test_haircutIncreaseRequiresFreezingThePool() public {
+        address deltaHook = address(0x101);
+        PoolKey memory key = _blueChipKey(deltaHook);
+        CollateralPolicy.ListingParams memory p = _blueChipParams();
+        p.removeHaircutBps = 500;
+
+        vm.startPrank(owner);
+        policy.setHookAllowlist(deltaHook, true);
+        policy.list(key, p);
+        vm.stopPrank();
+
+        p.removeHaircutBps = 600;
+        vm.prank(owner);
+        vm.expectRevert(CollateralPolicy.HaircutIncreaseRequiresFreeze.selector);
+        policy.updateTerms(key.toId(), p);
+
+        vm.startPrank(owner);
+        policy.setFrozen(key.toId(), true);
+        policy.updateTerms(key.toId(), p);
+        vm.stopPrank();
+
+        assertEq(policy.termsOf(key.toId()).removeHaircutBps, 600, "frozen update did not take effect");
     }
 
     /* ---------------------------- freeze and delist --------------------------- */

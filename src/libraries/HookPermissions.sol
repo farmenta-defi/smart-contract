@@ -33,4 +33,14 @@ library HookPermissions {
     ) internal pure returns (bool) {
         return uint160(address(hooks)) & REMOVE_LIQUIDITY_MASK == 0;
     }
+
+    /// @notice True if the hook may return a delta from `afterRemoveLiquidity`.
+    /// @dev The before/after callbacks can block removal, but only this return-delta flag can
+    ///      reduce the amount the position manager releases. A configured removal haircut
+    ///      therefore needs this exact permission rather than merely any removal callback.
+    function returnsRemoveLiquidityDelta(
+        IHooks hooks
+    ) internal pure returns (bool) {
+        return uint160(address(hooks)) & Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG != 0;
+    }
 }
