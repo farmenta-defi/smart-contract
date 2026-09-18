@@ -298,16 +298,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
     /// @dev The hook code is installed at 0x101 only because v4 reads hook permissions from the
     ///      address. The pool, position, oracle and liquidation are otherwise the pinned fork's.
     function test_aDeltaHookHaircutKeepsLiquidatorAtBonusCeiling() public {
-        PoolKey memory key = _initRemovalHaircutPool();
-        _fundAndApprove(key, 10 ether, 100_000e6);
-
-        int24 mid = _alignedOracleTick(key.tickSpacing);
-        tokenId = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e14);
-        borrower = address(this);
-
-        vm.prank(owner);
-        policy.setHookAllowlist(REMOVAL_HAIRCUT_HOOK, true);
-        _open(REMOVAL_HAIRCUT_BPS);
+        _openRemovalHaircutPosition(REMOVAL_HAIRCUT_BPS);
         _fundLiquidator(1000e6);
         _ageUntilHealthFactorBelow(1e18);
 
@@ -814,9 +805,9 @@ contract MarketLiquidateForkTest is MarketForkTest {
     }
 
     function test_liquidationLensMatchesTheGateWithUsdPriceAndHaircut() public {
-        _open(500);
+        _openRemovalHaircutPosition(500);
         _fundLiquidator(2000e6);
-        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 95 / 100);
+        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.WETH), ETH_AT_POOL_SPOT * 95 / 100);
         oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.USDG), 1.02e18);
 
         assertEq(lens.liquidationHealthFactor(tokenId), _healthyGateHealthFactor(), "lens must match the gate exactly");
@@ -843,16 +834,16 @@ contract MarketLiquidateForkTest is MarketForkTest {
     }
 
     function testFuzz_liquidationLensAgreesWithTheGate(
-        uint16 nativeBps,
+        uint16 wethBps,
         uint16 usdgBps,
         uint40 elapsed
     ) public {
-        _open(500);
+        _openRemovalHaircutPosition(500);
         _fundLiquidator(10_000e6);
-        nativeBps = uint16(bound(nativeBps, 5000, 12_000));
+        wethBps = uint16(bound(wethBps, 5000, 12_000));
         usdgBps = uint16(bound(usdgBps, 9500, 10_500));
         elapsed = uint40(bound(uint256(elapsed), 0, 365 days));
-        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * nativeBps / 10_000);
+        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.WETH), ETH_AT_POOL_SPOT * wethBps / 10_000);
         oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.USDG), ONE_USD * usdgBps / 10_000);
         vm.warp(block.timestamp + elapsed);
 
@@ -990,6 +981,23 @@ contract MarketLiquidateForkTest is MarketForkTest {
         uint256 amount = lens.maxBorrow(tokenId);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
+    }
+
+    /// @dev The standard fixture's hook has no removal-delta permission, so tests that model a
+    ///      configured haircut must mint the same WETH/USDG shape behind the valid delta hook.
+    function _openRemovalHaircutPosition(
+        uint16 haircutBps
+    ) private {
+        PoolKey memory key = _initRemovalHaircutPool();
+        _fundAndApprove(key, 10 ether, 100_000e6);
+
+        int24 mid = _alignedOracleTick(key.tickSpacing);
+        tokenId = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e14);
+        borrower = address(this);
+
+        vm.prank(owner);
+        policy.setHookAllowlist(REMOVAL_HAIRCUT_HOOK, true);
+        _open(haircutBps);
     }
 
     /// @dev `_open` on a meme market. Native ETH is re-tiered as meme first, which makes the pool
