@@ -4,7 +4,10 @@ pragma solidity 0.8.26;
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -34,8 +37,9 @@ import {MockPyth} from "../mocks/MockPyth.sol";
 ///      the recorder's, and the only substitute left is the Chainlink USDG feed.
 ///
 ///      The pool does not move at the pinned block, so spot and TWAP agree while the recorder is
-///      fresh. What separates the states below is the recorder alone: fresh, the gate prices
-///      ETH at the TWAP; 901 seconds without an observation, at `spot × 0,8`.
+///      fresh. What separates the first two states below is the recorder alone: fresh, the gate
+///      prices ETH at the TWAP; 901 seconds without an observation, at `spot × 0,8`. The third
+///      moves the pool with a real swap, 30% down, which is past `crashThreshold`.
 contract MarketMemeLiquidateForkTest is MarketForkTest {
     uint256 internal constant STALE_AFTER = 900;
 
@@ -177,6 +181,34 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
         recorder.consult(poolId, 1800);
     }
 
+    /* ---------------------------------- a crash ------------------------------- */
+
+    /// @notice §5.2: spot more than `crashThreshold` under a TWAP that has not caught up, so the
+    ///         gate prices at spot. The recorder is fresh throughout, and the record's place
+    ///         makes no difference here; this is the third state the gate and a view of it have
+    ///         to agree in.
+    function test_aCrashPastTheThresholdLiquidatesAtSpot() public {
+        uint256 twapPrice = memeOracle.priceForLiquidation(ETH, key);
+        assertGe(_gateHealthFactor(), 1e18, "the fixture should be healthy before the crash");
+
+        _sellEthUntilSpotIs(7000);
+
+        recorder.consult(poolId, 1800);
+        assertEq(
+            memeOracle.priceForLiquidation(ETH, key),
+            memeOracle.price(ETH, key),
+            "with the TWAP still valid, liquidation reads spot, as borrowing's min(spot, TWAP) does"
+        );
+        assertLt(
+            memeOracle.priceForLiquidation(ETH, key),
+            FullMath.mulDiv(twapPrice, 7500, 10_000),
+            "and spot is past the crash threshold"
+        );
+
+        assertLt(_gateHealthFactor(), 1e18, "a view reads under water");
+        assertTrue(_liquidates(), "and the gate lets it through");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     /// @dev The gate's own arithmetic over the state as it stands, which is what a `view` of the
@@ -219,6 +251,30 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
     function _goStale() private {
         vm.warp(block.timestamp + STALE_AFTER + 1);
     }
+
+    /// @dev Sells native ETH into the pool until spot is `bps` of where it stood. The price limit
+    ///      stops the swap; the router hands back the ETH it did not need.
+    function _sellEthUntilSpotIs(
+        uint256 bps
+    ) private {
+        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(poolId);
+        // sqrt(bps / 10_000), in the same fixed point as the price it scales.
+        uint160 limit = uint160(FullMath.mulDiv(sqrtPriceX96, Math.sqrt(bps * 1e14), 1e9));
+
+        PoolSwapTest router = new PoolSwapTest(poolManager);
+        vm.deal(address(this), 1_000_000 ether);
+        router.swap{value: 1_000_000 ether}(
+            key,
+            IPoolManager.SwapParams({
+                zeroForOne: true, amountSpecified: -int256(1_000_000 ether), sqrtPriceLimitX96: limit
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
+        );
+    }
+
+    /// @dev The swap router refunds unspent ETH to its caller.
+    receive() external payable {}
 
     /// @dev A keeper's five-minute beat for `duration` seconds: the history §5.3 asks of a meme
     ///      pool before its first borrow.
