@@ -25,7 +25,7 @@ import {MarketLedger} from "./MarketLedger.sol";
 library MarketMint {
     using SafeERC20 for IERC20;
 
-    event CollateralDeposited(uint256 indexed tokenId, address indexed owner);
+    event CollateralDeposited(uint256 indexed tokenId, address indexed owner, PoolId indexed poolId);
     event LiquidityChanged(uint256 indexed tokenId, PoolId indexed poolId, int256 liqDelta);
 
     error NotTheDepositor(uint256 tokenId, address depositor);
@@ -193,7 +193,7 @@ library MarketMint {
         }
 
         $.loans[tokenId] = MarketLedger.Loan({owner: depositor, debtShares: 0, poolKeyId: key.toId(), tier: $.tier});
-        emit CollateralDeposited(tokenId, depositor);
+        emit CollateralDeposited(tokenId, depositor, $.loans[tokenId].poolKeyId);
     }
 
     function _leg(

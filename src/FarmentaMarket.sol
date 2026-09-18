@@ -124,10 +124,10 @@ contract FarmentaMarket is
     IInterestRateModel public immutable interestRateModel;
 
     /// @notice A position was taken into custody as collateral.
-    event CollateralDeposited(uint256 indexed tokenId, address indexed owner);
+    event CollateralDeposited(uint256 indexed tokenId, address indexed owner, PoolId indexed poolId);
 
     /// @notice A position was released back to the depositor.
-    event CollateralWithdrawn(uint256 indexed tokenId, address indexed owner);
+    event CollateralWithdrawn(uint256 indexed tokenId, address indexed owner, PoolId indexed poolId);
 
     /// @notice A position that arrived here unrecorded was swept out by the owner.
     event UnaccountedTokenRescued(uint256 indexed tokenId, address indexed to);
@@ -139,8 +139,8 @@ contract FarmentaMarket is
     ///      `eth_call` (§4.1 v0.30, FAR-42). It follows the fields §4.1 lists, as R6 of the
     ///      market-id brainstorm places it and `CollectFees` does: topics `tokenId`, `poolId`.
     event LiquidityChanged(uint256 indexed tokenId, PoolId indexed poolId, int256 liqDelta);
-    event Borrow(uint256 indexed tokenId, uint256 amount);
-    event Repay(uint256 indexed tokenId, uint256 amount);
+    event Borrow(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
+    event Repay(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
 
     /// @notice A collateral position's fees were claimed (§4.1, `poolId` per v0.30).
     /// @dev `amount0`/`amount1` are `to`'s balance change across the claim, not the fees the position
@@ -157,7 +157,13 @@ contract FarmentaMarket is
     ///      pass the ETH straight on. Only its own figure moves and the ledger never reads it,
     ///      but indexers and keepers (§13) must not treat `out0`/`out1` as the amount seized.
     event Liquidate(
-        uint256 indexed tokenId, address indexed liquidator, uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt
+        uint256 indexed tokenId,
+        address indexed liquidator,
+        PoolId indexed poolId,
+        uint256 repaid,
+        uint256 out0,
+        uint256 out1,
+        uint256 badDebt
     );
     event BadDebtSocialized(uint256 amount);
     event ReservesUpdated(uint256 reserves);
@@ -482,7 +488,7 @@ contract FarmentaMarket is
         if (loan.debtShares != 0) revert OutstandingDebt(tokenId, loan.debtShares);
 
         delete $.loans[tokenId];
-        emit CollateralWithdrawn(tokenId, msg.sender);
+        emit CollateralWithdrawn(tokenId, msg.sender, loan.poolKeyId);
 
         IERC721(address(positionManager)).safeTransferFrom(address(this), to, tokenId);
     }
@@ -647,6 +653,7 @@ contract FarmentaMarket is
     ) external whenNotPaused nonReentrant returns (uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt) {
         accrue();
 
+        PoolId poolId = _marketStorage().loans[tokenId].poolKeyId;
         MarketLiquidation.Outcome memory outcome = MarketLiquidation.execute(
             MarketLiquidation.Env({
                 positionManager: positionManager, policy: policy, valuer: valuer, oracle: oracle, asset: asset()
@@ -659,7 +666,7 @@ contract FarmentaMarket is
         (repaid, out0, out1, badDebt) = (outcome.repaid, outcome.out0, outcome.out1, outcome.badDebt);
         emit ReservesUpdated(_marketStorage().reserves);
         if (outcome.socialized != 0) emit BadDebtSocialized(outcome.socialized);
-        emit Liquidate(tokenId, msg.sender, repaid, out0, out1, badDebt);
+        emit Liquidate(tokenId, msg.sender, poolId, repaid, out0, out1, badDebt);
     }
 
     function debtOf(

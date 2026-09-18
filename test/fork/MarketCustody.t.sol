@@ -3,10 +3,12 @@ pragma solidity 0.8.26;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IERC721Permit_v4} from "@uniswap/v4-periphery/src/interfaces/IERC721Permit_v4.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {ERC721PermitHash} from "@uniswap/v4-periphery/src/libraries/ERC721PermitHash.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
@@ -54,8 +56,8 @@ contract MarketCustodyForkTest is MarketForkTest {
         vm.startPrank(holder);
         nft.approve(address(market), tokenId);
 
-        vm.expectEmit(true, true, false, false, address(market));
-        emit FarmentaMarket.CollateralDeposited(tokenId, holder);
+        vm.expectEmit(true, true, true, false, address(market));
+        emit FarmentaMarket.CollateralDeposited(tokenId, holder, _keyOf(tokenId).toId());
         market.depositCollateral(tokenId);
         vm.stopPrank();
 
@@ -85,6 +87,33 @@ contract MarketCustodyForkTest is MarketForkTest {
         assertEq(market.loanOf(tokenId).owner, holder, "depositor not recorded");
     }
 
+    function test_poolTopicSeparatesDepositsFromDifferentPools() public {
+        uint256 poolATokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
+        uint256 poolBTokenId = Fixtures.POS_WETH_USDG_WIDE_IN_RANGE;
+        PoolId poolA = _keyOf(poolATokenId).toId();
+        _listPoolOf(poolATokenId, TierPresets.blueChip().minPositionUsd);
+        _listPoolOf(poolBTokenId, TierPresets.blueChip().minPositionUsd);
+
+        vm.recordLogs();
+        _deposit(poolATokenId, nft.ownerOf(poolATokenId));
+        _deposit(poolBTokenId, nft.ownerOf(poolBTokenId));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        uint256 poolAEvents;
+        uint256 poolBEvents;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != address(market) || logs[i].topics[0] != FarmentaMarket.CollateralDeposited.selector)
+            {
+                continue;
+            }
+            if (logs[i].topics[3] == bytes32(PoolId.unwrap(poolA))) ++poolAEvents;
+            else ++poolBEvents;
+        }
+
+        assertEq(poolAEvents, 1, "pool A topic must return only pool A's position event");
+        assertEq(poolBEvents, 1, "pool B must remain distinguishable by its topic");
+    }
+
     /// @notice A position pushed straight here with `safeTransferFrom` lands as a real deposit.
     /// @dev The second intake path runs the same checks, so it cannot be used to slip a
     ///      position past the policy. It exists so a transfer that would otherwise strand an
@@ -94,6 +123,8 @@ contract MarketCustodyForkTest is MarketForkTest {
         _listPoolOf(tokenId, TierPresets.blueChip().minPositionUsd);
         address holder = nft.ownerOf(tokenId);
 
+        vm.expectEmit(true, true, true, false, address(market));
+        emit FarmentaMarket.CollateralDeposited(tokenId, holder, _keyOf(tokenId).toId());
         vm.prank(holder);
         nft.safeTransferFrom(holder, address(market), tokenId);
 
@@ -200,8 +231,8 @@ contract MarketCustodyForkTest is MarketForkTest {
         address holder = nft.ownerOf(tokenId);
         _deposit(tokenId, holder);
 
-        vm.expectEmit(true, true, false, false, address(market));
-        emit FarmentaMarket.CollateralWithdrawn(tokenId, holder);
+        vm.expectEmit(true, true, true, false, address(market));
+        emit FarmentaMarket.CollateralWithdrawn(tokenId, holder, _keyOf(tokenId).toId());
         vm.prank(holder);
         market.withdrawCollateral(tokenId, holder);
 
@@ -433,6 +464,8 @@ contract MarketCustodyForkTest is MarketForkTest {
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory signature = _signPermit(SIGNER_PK, tokenId, 0, deadline);
 
+        vm.expectEmit(true, true, true, false, address(market));
+        emit FarmentaMarket.CollateralDeposited(tokenId, signer, _keyOf(tokenId).toId());
         vm.prank(signer);
         market.depositCollateralWithPermit(tokenId, deadline, 0, signature);
 

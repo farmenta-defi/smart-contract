@@ -234,12 +234,26 @@ contract MarketLiquidateForkTest is MarketForkTest {
         _ageUntilHealthFactorBelow(0.9e18);
 
         uint256 debt = market.debtOf(tokenId);
+        vm.expectEmit(true, true, true, false, address(market));
+        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0);
         vm.prank(liquidator);
         (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
 
         assertEq(repaid, debt, "the close factor no longer holds anything back");
         assertEq(market.debtOf(tokenId), 0, "the debt is gone");
         assertEq(market.loanOf(tokenId).debtShares, 0, "and so are its shares");
+    }
+
+    function test_partialLiquidationEmitsTheLoanPoolId() public {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+        assertGt(lens.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
+
+        vm.expectEmit(true, true, true, false, address(market));
+        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0);
+        vm.prank(liquidator);
+        market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
     }
 
     /* ----------------------------- what it costs ------------------------------ */
