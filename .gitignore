@@ -20,5 +20,8 @@ lcov.info
 coverage/
 .gas-snapshot
 
+# Deployment address manifests are release outputs, never source of truth.
+deployments/*.json
+
 # macOS
 .DS_Store

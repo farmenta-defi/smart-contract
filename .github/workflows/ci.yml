@@ -37,6 +37,13 @@ jobs:
       - name: Build
         run: forge build
 
+      - name: Reject source address literals
+        run: |
+          if grep -R -nP '(?<![0-9A-Fa-f])0x[0-9A-Fa-f]{40}(?![0-9A-Fa-f])' src --exclude=RobinhoodChain.sol; then
+            echo "::error::Address literals belong only in src/constants/RobinhoodChain.sol"
+            exit 1
+          fi
+
       # Size is gated on the profile that ships, not on `lite`: with the optimizer off the
       # market compiles to ~29 KB and would fail EIP-170 in a build nobody deploys. This is
       # the only via-IR compile in the fast lane, so it is a separate step that names the
@@ -47,7 +54,7 @@ jobs:
           FOUNDRY_PROFILE: deploy
 
       - name: Unit tests (no network)
-        run: forge test --no-match-path "test/fork/**" -vv
+        run: forge test --no-match-path "test/fork/**" --no-match-path "test/upgrade/**" -vv
 
   # Deep lane: fork tests plus long fuzz/invariant campaigns. Runs where the extra
   # minutes and Alchemy quota are worth it — before merging to main, and nightly.
