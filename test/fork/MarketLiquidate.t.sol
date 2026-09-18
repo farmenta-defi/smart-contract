@@ -6,6 +6,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PoolDonateTest} from "@uniswap/v4-core/src/test/PoolDonateTest.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -24,6 +25,7 @@ import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 import {RedeemingLiquidator} from "../mocks/RedeemingLiquidator.sol";
+import {RemovalHaircutHook} from "../mocks/RemovalHaircutHook.sol";
 
 /// @notice §8 against a real position: both seizure branches, the fee credit, the protocol
 ///         fee, the haircut, and §9's bad debt.
@@ -41,6 +43,10 @@ import {RedeemingLiquidator} from "../mocks/RedeemingLiquidator.sol";
 ///      large enough for the full-seizure branch. Tests using it assert *which* branch ran and
 ///      what happened to the debt, never the exact payout.
 contract MarketLiquidateForkTest is MarketForkTest {
+    address internal constant REMOVAL_HAIRCUT_HOOK = address(0x101);
+    uint16 internal constant REMOVAL_HAIRCUT_BPS = 1000;
+    uint256 internal constant PAYOUT_TOLERANCE_USD = 1e16;
+
     address internal lender = address(0x1E4DE2);
     address internal liquidator = address(0x11D);
 
@@ -284,6 +290,44 @@ contract MarketLiquidateForkTest is MarketForkTest {
             usdg.balanceOf(liquidator),
             usdgBefore - repaid - repaid * 50 / 10_000 + out1,
             "the USDG leg nets off against what was paid in"
+        );
+    }
+
+    /// @notice A permitted delta hook can really keep the listed haircut, while the real
+    ///         PositionManager and Market still leave the liquidator below its bonus ceiling.
+    /// @dev The hook code is installed at 0x101 only because v4 reads hook permissions from the
+    ///      address. The pool, position, oracle and liquidation are otherwise the pinned fork's.
+    function test_aDeltaHookHaircutKeepsLiquidatorAtBonusCeiling() public {
+        PoolKey memory key = _initRemovalHaircutPool();
+        _fundAndApprove(key, 10 ether, 100_000e6);
+
+        int24 mid = _alignedOracleTick(key.tickSpacing);
+        tokenId = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e14);
+        borrower = address(this);
+
+        vm.prank(owner);
+        policy.setHookAllowlist(REMOVAL_HAIRCUT_HOOK, true);
+        _open(REMOVAL_HAIRCUT_BPS);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        uint256 hookWethBefore = IERC20(RobinhoodChain.WETH).balanceOf(REMOVAL_HAIRCUT_HOOK);
+        uint256 hookUsdgBefore = usdg.balanceOf(REMOVAL_HAIRCUT_HOOK);
+
+        vm.prank(liquidator);
+        (uint256 repaid, uint256 out0, uint256 out1,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(repaid, 0, "the hook pool must liquidate");
+        assertGt(
+            IERC20(RobinhoodChain.WETH).balanceOf(REMOVAL_HAIRCUT_HOOK) - hookWethBefore
+                + usdg.balanceOf(REMOVAL_HAIRCUT_HOOK) - hookUsdgBefore,
+            0,
+            "the delta hook must keep its configured haircut"
+        );
+        assertLe(
+            _wethUsdgValue(out0, out1),
+            repaid * 1e12 * 10_500 / 10_000 + PAYOUT_TOLERANCE_USD,
+            "the independently valued payout exceeded repay x (1 + bonus)"
         );
     }
 
@@ -1119,6 +1163,22 @@ contract MarketLiquidateForkTest is MarketForkTest {
         }
     }
 
+    function _initRemovalHaircutPool() private returns (PoolKey memory key) {
+        RemovalHaircutHook hook = new RemovalHaircutHook(poolManager, REMOVAL_HAIRCUT_BPS);
+        vm.etch(REMOVAL_HAIRCUT_HOOK, address(hook).code);
+
+        PoolKey memory referenceKey = _keyOf(Fixtures.POS_WETH_USDG_WIDE_IN_RANGE);
+        key = PoolKey({
+            currency0: referenceKey.currency0,
+            currency1: referenceKey.currency1,
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(REMOVAL_HAIRCUT_HOOK)
+        });
+        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(referenceKey.toId());
+        poolManager.initialize(key, sqrtPriceX96);
+    }
+
     /// @dev Lets accrued interest carry the position under `target`, which leaves the oracle
     ///      exactly where it was — on the pool's own price.
     function _ageUntilHealthFactorBelow(
@@ -1146,6 +1206,15 @@ contract MarketLiquidateForkTest is MarketForkTest {
         uint256 amount1
     ) private view returns (uint256) {
         return amount0 * oracle.priceForLiquidation(Currency.wrap(RobinhoodChain.NATIVE)) / 1e18 + amount1
+            * oracle.priceForLiquidation(Currency.wrap(RobinhoodChain.USDG)) / 1e6;
+    }
+
+    /// @dev USD 1e18 for the fresh WETH/USDG hook pool, using the liquidation oracle directly.
+    function _wethUsdgValue(
+        uint256 wethAmount,
+        uint256 usdgAmount
+    ) private view returns (uint256) {
+        return wethAmount * oracle.priceForLiquidation(Currency.wrap(RobinhoodChain.WETH)) / 1e18 + usdgAmount
             * oracle.priceForLiquidation(Currency.wrap(RobinhoodChain.USDG)) / 1e6;
     }
 
