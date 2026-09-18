@@ -50,6 +50,19 @@ contract HookPermissionsTest is Test {
         );
     }
 
+    function test_removeDeltaRequiresTheAfterRemoveLiquidityCallback() public pure {
+        assertFalse(
+            HookPermissions.returnsRemoveLiquidityDelta(IHooks(address(1))), "a delta flag without its callback passed"
+        );
+        assertFalse(
+            HookPermissions.returnsRemoveLiquidityDelta(IHooks(address(1 << 8))),
+            "an after callback without delta passed"
+        );
+        assertTrue(
+            HookPermissions.returnsRemoveLiquidityDelta(IHooks(address(0x101))), "the complete delta hook was rejected"
+        );
+    }
+
     /// @dev Each of the three bits must fail on its own — a mask that only caught two of them
     ///      would still pass every test above, since the real hooks set more than one bit.
     function testFuzz_anySingleRemoveBitFails(

@@ -41,6 +41,7 @@ library HookPermissions {
     function returnsRemoveLiquidityDelta(
         IHooks hooks
     ) internal pure returns (bool) {
-        return uint160(address(hooks)) & Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG != 0;
+        uint160 required = Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG;
+        return uint160(address(hooks)) & required == required;
     }
 }
