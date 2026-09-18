@@ -133,6 +133,13 @@ contract TwapRecorder {
         return int24(twapTick);
     }
 
+    /// @dev Interpolates between the two observations around `target` by dividing first, as
+    ///      Uniswap v3's `Oracle.observeSingle` does. Multiplying first builds `tick × gap²` in
+    ///      int56, which overflows once neighbouring observations are days apart (FAR-48: 5 days
+    ///      at tick -200,000, 3 days at the maximum tick). The quotient is the tick that held
+    ///      between the two, at most 887,272 in magnitude, so the product stays inside int56 for
+    ///      as long as `tickCumulative` itself does. Nothing is lost to the division: `_record`
+    ///      writes neighbours exactly `lastTick × elapsed` apart, so it leaves no remainder.
     function _cumulativeAt(
         PoolId poolId,
         PoolState storage pool,
@@ -165,8 +172,10 @@ contract TwapRecorder {
 
         Observation memory upper = _observationAt(poolId, pool, upperOffset);
         if (target == upper.timestamp) return upper.tickCumulative;
-        return lower.tickCumulative + (upper.tickCumulative - lower.tickCumulative)
-            * int56(uint56(target - lower.timestamp)) / int56(uint56(upper.timestamp - lower.timestamp));
+
+        int56 tickBetween =
+            (upper.tickCumulative - lower.tickCumulative) / int56(uint56(upper.timestamp - lower.timestamp));
+        return lower.tickCumulative + tickBetween * int56(uint56(target - lower.timestamp));
     }
 
     function _currentCumulative(
