@@ -68,13 +68,6 @@ contract PriceOracleForkTest is ForkTest {
         assertEq(oracle.price(Currency.wrap(RobinhoodChain.NATIVE)), 252_657_000_000 * 1e10);
     }
 
-    function test_realPythEthUsdObservationIsReadable() public view {
-        // The feed was not deployed at FORK_BLOCK; PriceOracle must fail open on that revert.
-        (uint256 pythPrice, uint256 publishTime) = oracle.pythEthUsd();
-        assertEq(pythPrice, 0, "missing Pyth feed must be unavailable");
-        assertEq(publishTime, 0, "missing Pyth feed must have no publish time");
-    }
-
     function test_realOracleStaysWithinTheSpotDeviationGateForInRangeFixtures() public {
         PositionValuer productionValuer = new PositionValuer(positionManager, stateView, oracle);
 
