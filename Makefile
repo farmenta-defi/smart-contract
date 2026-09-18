@@ -4,7 +4,7 @@
 -include .env
 export
 
-.PHONY: install build clean fmt fmt-check test test-fork test-all test-deep addresses gas
+.PHONY: install build clean fmt fmt-check test test-fork test-all test-deep addresses gas simulate-risk
 
 install:
 	forge install
@@ -28,6 +28,10 @@ test:
 ## Fork tests against the pinned block.
 test-fork:
 	forge test --match-path "test/fork/**"
+
+## Fork-backed, pinned-risk measurements for ARCHITECTURE §5.3 and §6.2.
+simulate-risk:
+	forge script script/simulate/RiskParameters.s.sol:RiskParameters -vvv
 
 test-all:
 	forge test
