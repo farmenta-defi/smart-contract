@@ -142,6 +142,24 @@ contract TwapRecorderTest is Test {
         _assertConsultAfterGap(50_000, 10 days);
     }
 
+    function test_RevertWhenALongGapIsNotClosedByAFreshRecord() public {
+        // Callers that match on the selector (keeper, indexer) must see `TwapUnavailable` on
+        // both sides of the record that closes a gap, never a panic.
+        _record(-200_000);
+        _recordAfter(1800, -200_000);
+        vm.warp(block.timestamp + 30 days);
+
+        vm.expectRevert(TwapRecorder.TwapUnavailable.selector);
+        recorder.consult(poolId, 1800);
+
+        recorder.record(key);
+        assertEq(recorder.consult(poolId, 1800), -200_000);
+
+        vm.warp(block.timestamp + 901);
+        vm.expectRevert(TwapRecorder.TwapUnavailable.selector);
+        recorder.consult(poolId, 1800);
+    }
+
     function test_observationCapacityIs2048() public {
         assertEq(recorder.OBSERVATION_CAPACITY(), 2048);
     }
