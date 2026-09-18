@@ -184,7 +184,6 @@ contract FarmentaMarket is
     error PoolNotOpenForBorrowing(PoolId poolId);
     error SpotPriceDeviation(uint256 deviationBps, uint256 maximumDeviationBps);
     error UsdgPriceOutOfBounds(uint256 price);
-    error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
     error PositionWouldBeUnhealthy(uint256 tokenId, uint256 healthFactor);
     error RemovalExceedsBorrowLimit(uint256 tokenId, uint256 debtUsd, uint256 limitUsd);
     error NativeValueMismatch(uint256 expected, uint256 sent);
@@ -616,11 +615,10 @@ contract FarmentaMarket is
     ///
     ///      **Nothing on this path touches the borrow price gate of §5.2, and that is the
     ///      point.** Collateral is valued through `valueForLiquidation`, and the debt side is
-    ///      priced with `priceForLiquidation` too, so a USDG outside [0,97; 1,03], a fresh
-    ///      Pyth quote 3% away from Chainlink, or a pool 2% off the oracle all stop borrowing
-    ///      and leave liquidation running. Revert Lend blocks both; Farmenta blocks only
-    ///      borrowing, so there is never a window where an underwater position cannot be
-    ///      cleared (§5.2).
+    ///      priced with `priceForLiquidation` too, so a USDG outside [0,97; 1,03] or a pool 2%
+    ///      off the oracle both stop borrowing and leave liquidation running. Revert Lend blocks
+    ///      both; Farmenta blocks only borrowing, so there is never a window where an underwater
+    ///      position cannot be cleared (§5.2).
     ///
     ///      **The partial branch routes the payout through this contract, and must keep
     ///      doing so.** `_decrease` realises the position's *entire* fee balance no matter how
