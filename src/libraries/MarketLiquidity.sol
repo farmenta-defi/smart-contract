@@ -162,9 +162,10 @@ library MarketLiquidity {
         if (p.liquidity > available) revert LiquidityExceedsPosition(p.tokenId, p.liquidity, available);
 
         (PoolKey memory key,) = env.positionManager.getPoolAndPositionInfo(p.tokenId);
-        // §5.3: every market transaction touching a meme pool records an observation first, which
-        // is also what the health check below prices the position through. Placed after the checks
-        // above so a refusal names its own reason rather than `TwapUnavailable`.
+        // §5.3: every market transaction touching a meme pool but `liquidate` records an
+        // observation first, which is also what the health check below prices the position
+        // through. Placed after the checks above so a refusal names its own reason rather than
+        // `TwapUnavailable`.
         if ($.tier == ICollateralPolicy.Tier.MEME) env.debt.oracle.record(key);
 
         _decreaseTo(env, key, p.tokenId, p.liquidity, p.amount0Min, p.amount1Min, p.to);

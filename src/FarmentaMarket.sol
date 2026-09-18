@@ -401,8 +401,8 @@ contract FarmentaMarket is
     ///      one.
     ///
     ///      On a meme market the addition records the pool's TWAP observation first, as every
-    ///      market transaction touching a meme pool does (§5.3). It runs inside the library, after
-    ///      the checks above, so a refusal names its own reason.
+    ///      market transaction touching a meme pool but `liquidate` does (§5.3). It runs inside
+    ///      the library, after the checks above, so a refusal names its own reason.
     ///
     ///      **The tokens never touch this market, departing from §4.1's `SETTLE_PAIR`.** Permit2
     ///      delivers the caller's maxima straight to PositionManager, which settles out of its
@@ -499,8 +499,8 @@ contract FarmentaMarket is
     ///      the pool still accepts positions, only for its terms.
     ///
     ///      On a meme market the claim records the pool's TWAP observation first, as every market
-    ///      transaction touching a meme pool does (§5.3): the health check prices the position
-    ///      through it.
+    ///      transaction touching a meme pool but `liquidate` does (§5.3): the health check prices
+    ///      the position through it.
     ///
     ///      The claim runs from `MarketLiquidity`, which documents the recipient rule, the
     ///      post-claim health check and its price gates (§5.2 v0.40), and why nothing is written
