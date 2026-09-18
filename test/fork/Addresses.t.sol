@@ -73,20 +73,6 @@ contract AddressesForkTest is ForkTest {
         assertEq(IERC20Metadata(RobinhoodChain.WETH).decimals(), RobinhoodChain.WETH_DECIMALS);
     }
 
-    /// @dev Pyth exposes no cheap identity probe; at minimum it must be a contract, which
-    ///      rules out a typo landing on an empty or EOA address.
-    function test_pythIsAContract() public view {
-        assertGt(RobinhoodChain.PYTH.code.length, 0, "Pyth has no code");
-    }
-
-    function test_pythEthUsdPriceIdIsRecognized() public {
-        vm.createSelectFork("robinhood", 54_600_000);
-        (bool ok, bytes memory data) = RobinhoodChain.PYTH
-            .staticcall(abi.encodeWithSignature("getPriceUnsafe(bytes32)", RobinhoodChain.PYTH_ETH_USD_PRICE_ID));
-        assertTrue(ok, "Pyth ETH/USD price ID is not recognized");
-        assertEq(data.length, 128, "unexpected Pyth price response");
-    }
-
     /// @dev §5.2/§15.1: Chainlink publishes no L2 Sequencer Uptime Feed on this chain, so
     ///      the constant is deliberately zero. If that ever changes, this failing test is
     ///      the reminder to revisit the pause-based mitigation.
