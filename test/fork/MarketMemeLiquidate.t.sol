@@ -178,6 +178,28 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
         recorder.consult(poolId, 1800);
     }
 
+    /// @notice FAR-48: ten days without an observation, then one `record`. The window's start
+    ///         falls inside the gap, and interpolating across it used to overflow int56: a panic
+    ///         the oracle swallowed, so the gate went on pricing at `spot × 0,8` for another 30
+    ///         minutes over a history that was valid again.
+    function test_aRecordAfterATenDayGapPricesTheGateAtTheTwapAgain() public {
+        uint256 twapPrice = memeOracle.priceForLiquidation(ETH, key);
+        (, int24 tick,,) = stateView.getSlot0(poolId);
+
+        vm.warp(block.timestamp + 10 days);
+        usdgFeed.setAnswer(1e8, block.timestamp);
+        assertEq(
+            memeOracle.priceForLiquidation(ETH, key),
+            FullMath.mulDiv(twapPrice, 8000, 10_000),
+            "stale mode prices ETH at spot x 0,8"
+        );
+
+        recorder.record(key);
+
+        assertEq(recorder.consult(poolId, 1800), tick, "the pool stood still, so the TWAP is its tick");
+        assertEq(memeOracle.priceForLiquidation(ETH, key), twapPrice, "and the gate is back on the TWAP");
+    }
+
     /* ---------------------------------- a crash ------------------------------- */
 
     /// @notice §5.2: spot more than `crashThreshold` under a TWAP that has not caught up, so the
