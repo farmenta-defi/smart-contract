@@ -33,6 +33,7 @@ contract RiskParameters is Script {
     uint256 internal constant GAS_PRICE_WEI = 0.02 gwei;
     uint256 internal constant LIQUIDATION_GAS = 750_000;
     uint256 internal constant ROUTING_SLIPPAGE_BPS = 100;
+    address internal constant SIMULATOR = address(0xFA422);
 
     IStateView private stateView;
     IERC20 private usdg;
@@ -58,9 +59,9 @@ contract RiskParameters is Script {
         console.log("fork block", FORK_BLOCK);
         for (uint256 i; i < ids.length; ++i) {
             (, int24 tick,,) = stateView.getSlot0(ids[i]);
-            console.log(
-                "pool index / tick / active liquidity", i, uint256(int256(tick)), stateView.getLiquidity(ids[i])
-            );
+            console.log("pool index", i);
+            console.log("pool tick", int256(tick));
+            console.log("pool active liquidity", stateView.getLiquidity(ids[i]));
         }
     }
 
@@ -96,11 +97,12 @@ contract RiskParameters is Script {
         PoolKey memory key = Fixtures.liveRecorderPoolKeys()[1];
         PoolId poolId = key.toId();
         (uint160 beforeSqrt, int24 beforeTick,,) = stateView.getSlot0(poolId);
-        uint256 usdgBefore = usdg.balanceOf(address(this));
+        uint256 usdgBefore = usdg.balanceOf(SIMULATOR);
 
-        vm.deal(address(this), MAX_SWAP_INPUT);
+        vm.deal(SIMULATOR, MAX_SWAP_INPUT);
         PoolSwapTest router = new PoolSwapTest(IPoolManager(RobinhoodChain.POOL_MANAGER));
         uint160 dumpLimit = uint160(FullMath.mulDiv(beforeSqrt, Math.sqrt(TARGET_DUMP_BPS * 1e14), 1e9));
+        vm.prank(SIMULATOR);
         router.swap{value: MAX_SWAP_INPUT}(
             key,
             IPoolManager.SwapParams({
@@ -109,9 +111,12 @@ contract RiskParameters is Script {
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
             ""
         );
+        (uint160 dumpedSqrt, int24 dumpedTick,,) = stateView.getSlot0(poolId);
 
-        uint256 acquiredUsdg = usdg.balanceOf(address(this)) - usdgBefore;
+        uint256 acquiredUsdg = usdg.balanceOf(SIMULATOR) - usdgBefore;
+        vm.prank(SIMULATOR);
         usdg.approve(address(router), acquiredUsdg);
+        vm.prank(SIMULATOR);
         router.swap(
             key,
             IPoolManager.SwapParams({
@@ -123,10 +128,12 @@ contract RiskParameters is Script {
             ""
         );
 
-        (, int24 afterTick,,) = stateView.getSlot0(poolId);
-        uint256 roundTripLossUsd = _ethToUsd(MAX_SWAP_INPUT - address(this).balance);
+        (, int24 restoredTick,,) = stateView.getSlot0(poolId);
+        uint256 roundTripLossUsd = _ethToUsd(MAX_SWAP_INPUT - SIMULATOR.balance);
         console.log("flash dump pool tick before", int256(beforeTick));
-        console.log("flash dump pool tick after", int256(afterTick));
+        console.log("flash dump pool tick at target", int256(dumpedTick));
+        console.log("flash dump achieved price drop bps", PriceMath.spotDeviationBps(dumpedSqrt, beforeSqrt));
+        console.log("flash dump pool tick after restore", int256(restoredTick));
         console.log("flash dump round-trip loss usd (1e18)", roundTripLossUsd);
         console.log("meme cap bonus usd (1e18)", uint256(2000e18));
     }
