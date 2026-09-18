@@ -8,6 +8,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
+import {MarketLens} from "../../src/MarketLens.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
@@ -161,8 +162,13 @@ contract MarketBorrowForkTest is MarketForkTest {
 
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), 2400e18, 18);
         assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must sit outside the blue-chip gate");
+        uint256 allowed = new MarketLens(memeMarket).maxBorrow(tokenId);
         vm.prank(holder);
-        memeMarket.borrow(tokenId, 10e6, holder);
+        vm.expectPartialRevert(FarmentaMarket.BorrowExceedsMaxLtv.selector);
+        memeMarket.borrow(tokenId, allowed + 1, holder);
+
+        vm.prank(holder);
+        memeMarket.borrow(tokenId, allowed, holder);
         assertEq(oracle.recordCount(key.toId()), 2);
 
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);

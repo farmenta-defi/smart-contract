@@ -10,6 +10,7 @@ import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
 import {IPositionValuer} from "./interfaces/IPositionValuer.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 import {DebtMath} from "./libraries/DebtMath.sol";
+import {LiquidationMath} from "./libraries/LiquidationMath.sol";
 import {MarketLedger} from "./libraries/MarketLedger.sol";
 
 /// @title MarketLens
@@ -73,6 +74,62 @@ contract MarketLens {
         MarketLedger.Loan memory loan = market.loanOf(tokenId);
         uint256 debtUsd = _debtUsd(debt);
         return DebtMath.healthFactor(positionValue(tokenId), policy.termsOf(loan.poolKeyId).ltBps, debtUsd);
+    }
+
+    /// @notice Health factor on the exact price surface used by `liquidate`, scaled by 1e18.
+    /// @dev Use this—not `healthFactor`—to decide whether to submit a liquidation transaction.
+    function liquidationHealthFactor(
+        uint256 tokenId
+    ) external view returns (uint256) {
+        MarketLedger.Loan memory loan = market.loanOf(tokenId);
+        uint256 debt = _projectedDebt(loan);
+        if (debt == 0) return type(uint256).max;
+
+        return _liquidationHealthFactor(tokenId, loan, debt);
+    }
+
+    /// @notice Close factor the liquidation gate will apply at the current timestamp.
+    function liquidationCloseFactorBps(
+        uint256 tokenId
+    ) external view returns (uint16) {
+        MarketLedger.Loan memory loan = market.loanOf(tokenId);
+        uint256 debt = _projectedDebt(loan);
+        return LiquidationMath.closeFactorBps(loan.tier, _liquidationHealthFactor(tokenId, loan, debt), debt);
+    }
+
+    function _liquidationHealthFactor(
+        uint256 tokenId,
+        MarketLedger.Loan memory loan,
+        uint256 debt
+    ) private view returns (uint256) {
+        if (debt == 0) return type(uint256).max;
+        ICollateralPolicy.Terms memory terms = policy.termsOf(loan.poolKeyId);
+        IPositionValuer.Valuation memory valuation = valuer.valueForLiquidation(tokenId);
+        Currency assetCurrency = Currency.wrap(address(asset));
+        return LiquidationMath.healthFactor(
+            valuation.principalUsd,
+            valuation.feesUsd,
+            terms.removeHaircutBps,
+            terms.ltBps,
+            debt,
+            oracle.priceForLiquidation(assetCurrency),
+            oracle.decimals(assetCurrency)
+        );
+    }
+
+    function _projectedDebt(
+        MarketLedger.Loan memory loan
+    ) private view returns (uint256) {
+        uint256 borrowIndex = market.borrowIndex();
+        uint256 elapsed = block.timestamp - market.lastAccrual();
+        uint256 totalBorrowShares = market.totalBorrowShares();
+        if (elapsed != 0 && totalBorrowShares != 0) {
+            uint256 totalBorrows = market.totalBorrows();
+            uint256 utilization = totalBorrows * 1e18 / (asset.balanceOf(address(market)) + totalBorrows);
+            uint256 rate = market.interestRateModel().ratePerSecond(market.tier(), utilization);
+            (borrowIndex,,) = DebtMath.accrue(borrowIndex, totalBorrowShares, totalBorrows, rate, elapsed);
+        }
+        return DebtMath.debtOf(loan.debtShares, borrowIndex);
     }
 
     /// @notice Lender-protection reserve floor for the market's current assets.
