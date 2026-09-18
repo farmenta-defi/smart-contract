@@ -165,6 +165,15 @@ library MarketLiquidation {
     ///      `address(2)` as PositionManager; the partial branch pays by plain transfer, where
     ///      the same addresses burn the seizure or leave it in PositionManager for anyone to
     ///      `SWEEP`. One rule up front closes both, and it is `collectFees`' rule, not a copy.
+    ///
+    ///      **On a meme market the TWAP observation is recorded last, the one path where it is
+    ///      not first** (§5.3 v0.52, FAR-49). `consult` only asks how old the newest observation
+    ///      is, so a `record` ahead of the gate would make a stale recorder fresh again on the
+    ///      spot, filling the unobserved gap with the tick from before it. The gate would then
+    ///      never price at `spot × 0,8`, and would read a position as healthy on a TWAP that
+    ///      missed the whole move. Gate and seizure therefore run on the recorder as they find
+    ///      it, which is also the state a `view` reads, so a lens and this gate cannot disagree.
+    ///      The liquidation still leaves its observation behind, after everything else.
     function execute(
         Env memory env,
         Request memory r
@@ -209,6 +218,10 @@ library MarketLiquidation {
         // Measured on what the liquidator received, not on what reached the market: on the
         // partial branch those differ by exactly the borrower's share of the fees.
         if (o.out0 < r.minOut0 || o.out1 < r.minOut1) revert SeizureBelowMinimum(o.out0, o.out1);
+
+        // §5.3 v0.52: the observation comes last. `key` was read before the full branch burned
+        // the position, which is why it is recorded from here and not from the market's wrapper.
+        if (MarketLedger.layout().tier == ICollateralPolicy.Tier.MEME) env.oracle.record(key);
     }
 
     /// @dev Retires debt shares, and clears the record when the position itself is gone.

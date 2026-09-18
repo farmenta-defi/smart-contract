@@ -401,8 +401,8 @@ contract FarmentaMarket is
     ///      one.
     ///
     ///      On a meme market the addition records the pool's TWAP observation first, as every
-    ///      market transaction touching a meme pool does (§5.3). It runs inside the library, after
-    ///      the checks above, so a refusal names its own reason.
+    ///      market transaction touching a meme pool but `liquidate` does (§5.3). It runs inside
+    ///      the library, after the checks above, so a refusal names its own reason.
     ///
     ///      **The tokens never touch this market, departing from §4.1's `SETTLE_PAIR`.** Permit2
     ///      delivers the caller's maxima straight to PositionManager, which settles out of its
@@ -499,8 +499,8 @@ contract FarmentaMarket is
     ///      the pool still accepts positions, only for its terms.
     ///
     ///      On a meme market the claim records the pool's TWAP observation first, as every market
-    ///      transaction touching a meme pool does (§5.3): the health check prices the position
-    ///      through it.
+    ///      transaction touching a meme pool but `liquidate` does (§5.3): the health check prices
+    ///      the position through it.
     ///
     ///      The claim runs from `MarketLiquidity`, which documents the recipient rule, the
     ///      post-claim health check and its price gates (§5.2 v0.40), and why nothing is written
@@ -637,6 +637,9 @@ contract FarmentaMarket is
     ///      here is what has to be visible from outside: the pause, the reentrancy guard, the
     ///      accrual, and every event.
     ///
+    ///      **No `record` up here, unlike every other meme path.** The library records the
+    ///      observation after the seizure, so the gate prices the recorder as it stands and
+    ///      §5.3's stale mode can actually be reached (§5.3 v0.52, FAR-49).
     function liquidate(
         uint256 tokenId,
         uint256 repayAmount,
@@ -645,7 +648,6 @@ contract FarmentaMarket is
         address to
     ) external whenNotPaused nonReentrant returns (uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt) {
         accrue();
-        _recordMemePosition(tokenId);
 
         MarketLiquidation.Outcome memory outcome = MarketLiquidation.execute(
             MarketLiquidation.Env({

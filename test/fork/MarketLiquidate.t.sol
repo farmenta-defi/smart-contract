@@ -11,12 +11,16 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
+import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
+import {MarketLens} from "../../src/MarketLens.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
+import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {DebtMath} from "../../src/libraries/DebtMath.sol";
 import {LiquidationMath} from "../../src/libraries/LiquidationMath.sol";
 import {MarketLiquidation} from "../../src/libraries/MarketLiquidation.sol";
+import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 import {RedeemingLiquidator} from "../mocks/RedeemingLiquidator.sol";
@@ -816,6 +820,61 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertEq(repaid, 10e6, "the liquidation surface is what decides");
     }
 
+    /* --------------------------------- meme market ---------------------------- */
+
+    /// @notice §5.3 v0.52 (FAR-49): a meme liquidation is the one market path that records its
+    ///         observation last. A count says a `record` happened, not when; what the position
+    ///         held at that moment does.
+    function test_aMemeLiquidationRecordsOnceTheSliceHasLeft() public {
+        _openMeme();
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        PoolId poolId = _keyOf(tokenId).toId();
+        uint256 records = oracle.recordCount(poolId);
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        oracle.watch(positionManager, tokenId);
+
+        vm.prank(liquidator);
+        market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        uint128 left = positionManager.getPositionLiquidity(tokenId);
+        assertLt(left, liquidity, "the fixture should have lost a slice");
+        assertEq(oracle.recordCount(poolId), records + 1, "the liquidation recorded the pool once");
+        assertEq(oracle.liquidityOnLastRecord(), left, "and did so after the slice had left");
+    }
+
+    /// @notice The full branch burns the position, and with it the only way to look its pool up
+    ///         by token id. The observation is still taken.
+    function test_aFullMemeSeizureStillRecords() public {
+        _openMeme();
+        _fundLiquidator(2000e6);
+        _dropEthPrice(100e18);
+
+        PoolId poolId = _keyOf(tokenId).toId();
+        uint256 records = oracle.recordCount(poolId);
+
+        vm.prank(liquidator);
+        (,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(badDebt, 0, "the fixture should have gone to the full branch");
+        vm.expectRevert();
+        IERC721(RobinhoodChain.POSITION_MANAGER).ownerOf(tokenId);
+        assertEq(oracle.recordCount(poolId), records + 1, "the liquidation recorded the pool once");
+    }
+
+    /// @notice A blue-chip liquidation has no TWAP to feed, and pays nothing for one.
+    function test_aBlueChipLiquidationRecordsNothing() public {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        vm.prank(liquidator);
+        market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertEq(oracle.recordCount(_keyOf(tokenId).toId()), 0, "no observation for a blue-chip pool");
+    }
+
     /* ----------------------------------- fuzz --------------------------------- */
 
     /// @notice §8 step 5's invariant: whatever the liquidator asks to repay, they never walk
@@ -879,6 +938,46 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
         // Read before the prank: an external call inside the argument list would spend it,
         // and the borrow would arrive from this test contract instead.
+        uint256 amount = lens.maxBorrow(tokenId);
+        vm.prank(borrower);
+        market.borrow(tokenId, amount, borrower);
+    }
+
+    /// @dev `_open` on a meme market. Native ETH is re-tiered as meme first, which makes the pool
+    ///      meme (§6.1 takes the higher tier). `market` and `lens` are repointed, so every other
+    ///      helper here drives the meme market from then on.
+    function _openMeme() private {
+        vm.prank(owner);
+        policy.setTokenConfig(Currency.wrap(RobinhoodChain.NATIVE), true, ICollateralPolicy.Tier.MEME, 18, address(1));
+        market = _deployMarket(ICollateralPolicy.Tier.MEME);
+        lens = new MarketLens(market);
+
+        PoolKey memory key = _keyOf(tokenId);
+        TierPresets.Preset memory preset = TierPresets.meme();
+        vm.prank(owner);
+        policy.list(
+            key,
+            CollateralPolicy.ListingParams({
+                maxLtvBps: preset.maxLtvBps,
+                ltBps: preset.ltBps,
+                liquidatorBonusBps: preset.minLiquidatorBonusBps,
+                removeHaircutBps: 0,
+                debtCapUsdg: preset.maxDebtCapUsdg,
+                minPositionUsd: preset.minPositionUsd
+            })
+        );
+
+        vm.startPrank(borrower);
+        IERC721(RobinhoodChain.POSITION_MANAGER).approve(address(market), tokenId);
+        market.depositCollateral(tokenId);
+        vm.stopPrank();
+
+        deal(address(usdg), lender, 300e6);
+        vm.startPrank(lender);
+        usdg.approve(address(market), type(uint256).max);
+        market.deposit(300e6, lender);
+        vm.stopPrank();
+
         uint256 amount = lens.maxBorrow(tokenId);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
