@@ -24,6 +24,11 @@ library RobinhoodChain {
     address internal constant POSITION_MANAGER = 0x58daec3116aae6D93017bAAea7749052E8a04fA7;
     address internal constant STATE_VIEW = 0xF3334192D15450CdD385c8B70e03f9A6bD9E673b;
 
+    /// @notice Uniswap v4 quoter used by the off-chain liquidator route builder.
+    address internal constant V4_QUOTER = 0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94;
+    /// @notice Uniswap's primary UniversalRouter deployment on Robinhood Chain.
+    address internal constant UNIVERSAL_ROUTER = 0x8876789976dEcBfCbBbe364623C63652db8C0904;
+
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
     /* --------------------------------- Tokens --------------------------------- */

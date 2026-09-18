@@ -25,6 +25,11 @@ contract AddressesForkTest is ForkTest {
         assertEq(_addressCall(RobinhoodChain.POSITION_MANAGER, "permit2()"), RobinhoodChain.PERMIT2);
     }
 
+    function test_liquidatorPeripheryPointsAtThePoolManager() public view {
+        assertEq(_addressCall(RobinhoodChain.V4_QUOTER, "poolManager()"), RobinhoodChain.POOL_MANAGER);
+        assertEq(_addressCall(RobinhoodChain.UNIVERSAL_ROUTER, "poolManager()"), RobinhoodChain.POOL_MANAGER);
+    }
+
     function test_chainlinkFeedsAreTheClaimedPairs() public view {
         IAggregatorV3 ethUsd = IAggregatorV3(RobinhoodChain.CHAINLINK_ETH_USD);
         assertEq(ethUsd.description(), "ETH / USD", "ETH/USD feed is not ETH/USD");
