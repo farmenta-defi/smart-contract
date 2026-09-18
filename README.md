@@ -4,7 +4,7 @@ Solidity contracts for Farmenta — borrow USDG against Uniswap v4 LP position N
 Robinhood Chain (chain id 4663).
 
 Specification: [`farmenta-defi/docs`](https://github.com/farmenta-defi/docs) →
-`ARCHITECTURE.md` v0.72. **The spec is the source of truth.** Where this repo and the spec
+`ARCHITECTURE.md` v0.78. **The spec is the source of truth.** Where this repo and the spec
 disagree, the spec wins and the code is wrong — except for addresses, which live in exactly
 two places: spec §18 and `src/constants/RobinhoodChain.sol`, kept in sync by a test.
 
