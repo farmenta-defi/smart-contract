@@ -20,8 +20,6 @@ import {PriceOracle} from "../../src/PriceOracle.sol";
 import {TwapRecorder} from "../../src/TwapRecorder.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
-import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
-import {DebtMath} from "../../src/libraries/DebtMath.sol";
 import {MarketLiquidation} from "../../src/libraries/MarketLiquidation.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
@@ -119,7 +117,7 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
     /// @notice The control: on a fresh TWAP the fixture is healthy, and the gate says so with the
     ///         same number the recorder's state gives a `view`.
     function test_aFreshTwapPricesTheGateAtTheTwap() public {
-        uint256 viewed = _gateHealthFactor();
+        uint256 viewed = memeLens.liquidationHealthFactor(tokenId);
         assertGe(viewed, 1e18, "the fixture should be healthy on a fresh TWAP");
 
         vm.prank(liquidator);
@@ -133,7 +131,7 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
     ///         prices ETH at `spot × 0,8`, and a position that the TWAP called healthy goes.
     function test_aStaleTwapLiquidatesAtTheHaircutSpot() public {
         uint256 twapPrice = memeOracle.priceForLiquidation(ETH, key);
-        assertGe(_gateHealthFactor(), 1e18, "the fixture should be healthy on a fresh TWAP");
+        assertGe(memeLens.liquidationHealthFactor(tokenId), 1e18, "the fixture should be healthy on a fresh TWAP");
 
         _goStale();
 
@@ -144,7 +142,7 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
             FullMath.mulDiv(twapPrice, 8000, 10_000),
             "stale mode prices ETH at spot x 0,8"
         );
-        assertLt(_gateHealthFactor(), 1e18, "and at that price the fixture is under water");
+        assertLt(memeLens.liquidationHealthFactor(tokenId), 1e18, "and at that price the fixture is under water");
 
         uint256 debt = memeMarket.debtOf(tokenId);
         vm.prank(liquidator);
@@ -158,12 +156,12 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
     ///         cannot disagree: under 1 exactly when `liquidate` does not answer
     ///         `PositionIsHealthy` (FAR-43's meme acceptance case, which this unblocks).
     function test_theGateAgreesWithAViewOfTheSameState() public {
-        assertGe(_gateHealthFactor(), 1e18, "fresh: a view reads healthy");
+        assertGe(memeLens.liquidationHealthFactor(tokenId), 1e18, "fresh: a view reads healthy");
         assertFalse(_liquidates(), "fresh: and the gate refuses");
 
         _goStale();
 
-        assertLt(_gateHealthFactor(), 1e18, "stale: a view reads under water");
+        assertLt(memeLens.liquidationHealthFactor(tokenId), 1e18, "stale: a view reads under water");
         assertTrue(_liquidates(), "stale: and the gate lets it through");
     }
 
@@ -188,7 +186,7 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
     ///         to agree in.
     function test_aCrashPastTheThresholdLiquidatesAtSpot() public {
         uint256 twapPrice = memeOracle.priceForLiquidation(ETH, key);
-        assertGe(_gateHealthFactor(), 1e18, "the fixture should be healthy before the crash");
+        assertGe(memeLens.liquidationHealthFactor(tokenId), 1e18, "the fixture should be healthy before the crash");
 
         _sellEthUntilSpotIs(7000);
 
@@ -204,29 +202,11 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
             "and spot is past the crash threshold"
         );
 
-        assertLt(_gateHealthFactor(), 1e18, "a view reads under water");
+        assertLt(memeLens.liquidationHealthFactor(tokenId), 1e18, "a view reads under water");
         assertTrue(_liquidates(), "and the gate lets it through");
     }
 
     /* --------------------------------- helpers -------------------------------- */
-
-    /// @dev The gate's own arithmetic over the state as it stands, which is what a `view` of the
-    ///      liquidation health factor has to be. Interest is accrued first so the debt is the one
-    ///      `liquidate` will see; projecting it instead is FAR-43's business.
-    function _gateHealthFactor() private returns (uint256) {
-        memeMarket.accrue();
-        IPositionValuer.Valuation memory v = memeValuer.valueForLiquidation(tokenId);
-        ICollateralPolicy.Terms memory terms = policy.termsOf(memeMarket.loanOf(tokenId).poolKeyId);
-        Currency asset = Currency.wrap(RobinhoodChain.USDG);
-
-        return DebtMath.healthFactor(
-            DebtMath.collateralValue(v.principalUsd, v.feesUsd, terms.removeHaircutBps),
-            terms.ltBps,
-            DebtMath.debtUsd(
-                memeMarket.debtOf(tokenId), memeOracle.priceForLiquidation(asset), memeOracle.decimals(asset)
-            )
-        );
-    }
 
     /// @dev Whether `liquidate` goes through, on a snapshot so the caller's state is untouched.
     ///      Any refusal other than `PositionIsHealthy` fails the test rather than reading as "no".

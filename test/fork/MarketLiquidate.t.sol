@@ -845,7 +845,11 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertEq(lens.liquidationCloseFactorBps(tokenId), 5000);
     }
 
-    function testFuzz_liquidationLensAgreesWithTheGate(uint16 nativeBps, uint16 usdgBps, uint40 elapsed) public {
+    function testFuzz_liquidationLensAgreesWithTheGate(
+        uint16 nativeBps,
+        uint16 usdgBps,
+        uint40 elapsed
+    ) public {
         _open(500);
         _fundLiquidator(10_000e6);
         nativeBps = uint16(bound(nativeBps, 5000, 12_000));
@@ -1143,6 +1147,23 @@ contract MarketLiquidateForkTest is MarketForkTest {
         deal(address(usdg), liquidator, amount);
         vm.prank(liquidator);
         usdg.approve(address(market), type(uint256).max);
+    }
+
+    function _healthyGateHealthFactor() private returns (uint256 healthFactor) {
+        vm.prank(liquidator);
+        (bool succeeded, bytes memory reason) =
+            address(market).call(abi.encodeCall(market.liquidate, (tokenId, type(uint256).max, 0, 0, liquidator)));
+        assertFalse(succeeded, "the configured position must be healthy");
+        assertEq(bytes4(reason), MarketLiquidation.PositionIsHealthy.selector, "unexpected gate refusal");
+        healthFactor = _healthFactorFromReason(reason);
+    }
+
+    function _healthFactorFromReason(
+        bytes memory reason
+    ) private pure returns (uint256 healthFactor) {
+        assembly {
+            healthFactor := mload(add(reason, 68))
+        }
     }
 
     /// @dev Lets accrued interest carry the position under `target`, which leaves the oracle
