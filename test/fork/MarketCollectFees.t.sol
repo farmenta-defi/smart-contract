@@ -287,16 +287,6 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         market.collectFees(tokenId, recipient);
     }
 
-    /// @notice §5.2 v0.40: with debt outstanding, a fresh Pyth quote over 3% from Chainlink refuses it.
-    function test_anIndebtedClaimRunsThePythGate() public {
-        _openLoan(20e6);
-        oracle.setPythPrice(ETH_AT_POOL_SPOT * 104 / 100, block.timestamp);
-
-        vm.prank(borrower);
-        vm.expectPartialRevert(FarmentaMarket.PythPriceDeviation.selector);
-        market.collectFees(tokenId, recipient);
-    }
-
     /// @notice §5.2 v0.40: with debt outstanding, a pool more than 2% from the oracle refuses it.
     /// @dev A 3% move keeps the health factor far above 1, so the refusal can only be the gate.
     function test_anIndebtedClaimRunsTheSpotGate() public {
@@ -328,7 +318,6 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         _deposit(tokenId);
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 80 / 100, 18);
-        oracle.setPythPrice(ETH_AT_POOL_SPOT, block.timestamp);
         uint256 fees1 = valuer.value(tokenId).fees1;
 
         vm.prank(borrower);
@@ -363,16 +352,15 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(oracle.recordCount(poolId), 0, "no observation for a blue-chip pool");
     }
 
-    /// @notice §5.2 v0.40 on a meme market: Pyth and the ±2% spot gate are blue-chip rules, so neither
-    ///         holds up an indebted claim there.
-    /// @dev Both conditions are live at once, and each alone refuses a blue-chip claim. A health check
-    ///      run at the wrong tier fails here with `PythPriceDeviation` (review of PR #18, mutant A5).
-    function test_anIndebtedMemeClaimIsNotHeldByPythOrSpot() public {
+    /// @notice §5.2 v0.40 on a meme market: the ±2% spot gate is a blue-chip rule, so it does not hold
+    ///         up an indebted claim there.
+    /// @dev The same pool refuses a blue-chip claim. A health check run at the wrong tier fails here
+    ///      with `SpotPriceDeviation` (review of PR #18, mutant A5).
+    function test_anIndebtedMemeClaimIsNotHeldBySpot() public {
         FarmentaMarket memeMarket = _openMemeMarket();
         vm.prank(borrower);
         memeMarket.borrow(tokenId, 10e6, borrower);
 
-        oracle.setPythPrice(ETH_AT_POOL_SPOT * 104 / 100, block.timestamp);
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 95 / 100, 18);
         assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must be outside the blue-chip spot gate");
         uint256 fees1 = valuer.value(tokenId).fees1;
