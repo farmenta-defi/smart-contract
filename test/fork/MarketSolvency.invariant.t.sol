@@ -11,7 +11,7 @@ import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 
-/// @notice Restricts invariant fuzzing to valid lender and borrower actions.
+/// @notice Restricts invariant fuzzing to bounded lender and borrower actions.
 contract MarketHandler is Test {
     FarmentaMarket internal immutable market;
     MarketLens internal immutable lens;
@@ -62,7 +62,9 @@ contract MarketHandler is Test {
     ) external {
         uint256 maximum = lens.maxBorrow(tokenId);
         if (maximum < 10e6) return;
-        amount = bound(amount, 10e6, maximum);
+        // Include amounts above max LTV so removing the market gate is observable. Those calls
+        // legitimately revert on the intact market and are discarded by fail_on_revert = false.
+        amount = bound(amount, 10e6, maximum * 2);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
         if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyBorrow = true;
