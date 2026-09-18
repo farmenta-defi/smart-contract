@@ -27,7 +27,6 @@ import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 import {MockAggregatorV3} from "../mocks/MockAggregatorV3.sol";
-import {MockPyth} from "../mocks/MockPyth.sol";
 
 /// @notice §5.3's liquidation price on a meme market, with nothing between the gate and the
 ///         pool: the real `PriceOracle` over a real `TwapRecorder`, FAR-49.
@@ -83,7 +82,7 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
         vm.stopPrank();
 
         recorder = new TwapRecorder(stateView);
-        memeOracle = new PriceOracle(policy, new MockPyth(), recorder);
+        memeOracle = new PriceOracle(policy, recorder);
         memeValuer = new PositionValuer(positionManager, stateView, memeOracle);
         memeMarket = _deployMemeMarket();
         memeLens = new MarketLens(memeMarket);

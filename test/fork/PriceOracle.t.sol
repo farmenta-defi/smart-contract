@@ -11,7 +11,6 @@ import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {IAggregatorV3} from "../../src/interfaces/IAggregatorV3.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
-import {IPyth} from "../../src/interfaces/IPyth.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {ForkTest} from "../base/ForkTest.sol";
 import {MockPriceOracle} from "../mocks/MockPriceOracle.sol";
@@ -51,7 +50,7 @@ contract PriceOracleForkTest is ForkTest {
         );
         vm.stopPrank();
 
-        oracle = new PriceOracle(policy, IPyth(RobinhoodChain.PYTH), new TwapRecorder(stateView));
+        oracle = new PriceOracle(policy, new TwapRecorder(stateView));
     }
 
     function test_usdgPriceMatchesTheDirectFeedRead() public view {

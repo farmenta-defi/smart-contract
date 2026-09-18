@@ -11,7 +11,6 @@ import {PriceOracle} from "../../src/PriceOracle.sol";
 import {TwapRecorder} from "../../src/TwapRecorder.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {MockAggregatorV3} from "../mocks/MockAggregatorV3.sol";
-import {MockPyth} from "../mocks/MockPyth.sol";
 import {MockStateView} from "../mocks/MockStateView.sol";
 
 /// @notice Unit tests for Chainlink normalization and policy-backed token metadata.
@@ -42,7 +41,7 @@ contract PriceOracleTest is Test {
         policy.setTokenConfig(NATIVE, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(ethUsd));
         vm.stopPrank();
 
-        oracle = new PriceOracle(policy, new MockPyth(), new TwapRecorder(IStateView(address(new MockStateView()))));
+        oracle = new PriceOracle(policy, new TwapRecorder(IStateView(address(new MockStateView()))));
     }
 
     function test_priceNormalizesFeedDecimalsToUsd1e18() public view {

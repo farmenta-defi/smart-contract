@@ -10,7 +10,6 @@ import {TwapRecorder} from "./TwapRecorder.sol";
 import {IAggregatorV3} from "./interfaces/IAggregatorV3.sol";
 import {ICollateralPolicy} from "./interfaces/ICollateralPolicy.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
-import {IPyth} from "./interfaces/IPyth.sol";
 import {PriceMath} from "./libraries/PriceMath.sol";
 import {TierPresets} from "./libraries/TierPresets.sol";
 
@@ -24,13 +23,11 @@ contract PriceOracle is IPriceOracle {
     uint8 internal constant USD_DECIMALS = 18;
 
     ICollateralPolicy public immutable policy;
-    IPyth public immutable pyth;
     TwapRecorder public immutable recorder;
 
     error PriceFeedNotConfigured(Currency currency);
     error InvalidPrice(Currency currency, int256 answer);
     error StalePrice(Currency currency, uint256 updatedAt);
-    error PythNotConfigured();
     error TwapRecorderNotConfigured();
     error MemeTwapUnavailable(PoolId poolId);
     error MemeCurrencyNotInPool(Currency currency, PoolId poolId);
@@ -38,13 +35,10 @@ contract PriceOracle is IPriceOracle {
 
     constructor(
         ICollateralPolicy policy_,
-        IPyth pyth_,
         TwapRecorder recorder_
     ) {
         policy = policy_;
-        if (address(pyth_) == address(0)) revert PythNotConfigured();
         if (address(recorder_) == address(0)) revert TwapRecorderNotConfigured();
-        pyth = pyth_;
         recorder = recorder_;
     }
 
