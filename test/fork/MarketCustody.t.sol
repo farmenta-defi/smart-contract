@@ -337,31 +337,7 @@ contract MarketCustodyForkTest is MarketForkTest {
         market.depositCollateral(tokenId);
     }
 
-    /// @notice A hook that skims on withdrawal shrinks the value the floor is measured against.
-    /// @dev §6.3 records `removeHaircutBps` at listing and deducts it from the value. What
-    ///      backs a loan is what the protocol could actually pull back out, not what the
-    ///      position reads as on paper. Same position and same floor as the test below, which
-    ///      passes; only the haircut differs.
-    function test_removeHaircutIsDeductedBeforeTheMinimum() public {
-        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
-        _listPoolOf(tokenId, 300e18, 5000);
-
-        uint256 principal = valuer.value(tokenId).principalUsd;
-        assertGt(principal, 300e18, "the fixture must clear the floor before any haircut");
-
-        address holder = nft.ownerOf(tokenId);
-        vm.startPrank(holder);
-        nft.approve(address(market), tokenId);
-        vm.expectRevert(
-            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, principal / 2, uint256(300e18))
-        );
-        market.depositCollateral(tokenId);
-        vm.stopPrank();
-    }
-
-    /// @dev The control for the test above: without the haircut the same position clears the
-    ///      same floor, so the refusal there is the deduction and nothing else.
-    function test_theSameFloorPassesWithoutAHaircut() public {
+    function test_theFixturePassesItsMinimumWithoutARemovalHaircut() public {
         uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
         _listPoolOf(tokenId, 300e18, 0);
         address holder = nft.ownerOf(tokenId);

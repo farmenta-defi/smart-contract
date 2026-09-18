@@ -77,6 +77,28 @@ contract CollateralPolicyForkTest is ForkTest {
         assertTrue(policy.acceptsNewPositions(key.toId()));
     }
 
+    /// @notice Regression for FAR-44: terms on a live pool can never be rewritten to make a
+    ///         full seizure repay zero.
+    function test_updateTermsCannotSetTheRemovalHaircutToEverything() public {
+        PoolKey memory key = _keyOf(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        _list(key);
+
+        TierPresets.Preset memory preset = TierPresets.blueChip();
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HaircutTooLarge.selector, uint16(10_000)));
+        policy.updateTerms(
+            key.toId(),
+            CollateralPolicy.ListingParams({
+                maxLtvBps: preset.maxLtvBps,
+                ltBps: preset.ltBps,
+                liquidatorBonusBps: preset.minLiquidatorBonusBps,
+                removeHaircutBps: 10_000,
+                debtCapUsdg: preset.maxDebtCapUsdg,
+                minPositionUsd: preset.minPositionUsd
+            })
+        );
+    }
+
     /// @dev Both sides ERC-20 here, unlike the native-ETH pools above.
     function test_realWethPoolPasses() public {
         PoolKey memory key = _keyOf(Fixtures.POS_WETH_USDG_WIDE_IN_RANGE);

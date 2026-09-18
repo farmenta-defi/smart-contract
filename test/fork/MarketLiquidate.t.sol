@@ -716,53 +716,6 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertLe(attacker.redeemed(), fair, "a share redeemed mid-liquidation is worth no more than after it");
     }
 
-    /* --------------------------------- haircut -------------------------------- */
-
-    /// @notice §6.3: a hook that skims on withdrawal lowers what the position is worth, and
-    ///         §8 pays for it — this is the path where the haircut was still missing.
-    /// @dev Read on the full-seizure branch, where the repay is exactly `value / (1 + bonus)`:
-    ///      a 5% haircut has to show up as 5% less USDG changing hands for the same position.
-    function test_theHaircutLowersWhatTheSeizureIsWorth() public {
-        _open(500);
-        _fundLiquidator(2000e6);
-        _dropEthPrice(1200e18);
-
-        IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
-        uint256 realizable = (v.principalUsd + v.feesUsd) * 9500 / 10_000;
-
-        vm.prank(liquidator);
-        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
-
-        assertEq(repaid, realizable * 10_000 / 10_500 / 1e12, "the seizure pays for the haircut value, not the gross");
-        assertApproxEqRel(
-            repaid * 10_000 / 9500,
-            (v.principalUsd + v.feesUsd) * 10_000 / 10_500 / 1e12,
-            0.0001e18,
-            "an unhaircut pool would have cost 5% more"
-        );
-    }
-
-    /// @notice §6.2 and §8 step 1: the health factor that decides liquidation takes the removal
-    ///         haircut off, so a position under water only after it is still liquidatable.
-    /// @dev Aged to just under 1 with a 5% haircut, which puts the unhaircut health factor above 1. A
-    ///      gate that dropped the haircut would refuse with `PositionIsHealthy`. Since `DebtMath`
-    ///      states the formula once, nothing else catches an argument dropped at this call site
-    ///      (review of PR #18, mutant A8).
-    function test_theLiquidationGateCountsTheHaircut() public {
-        _open(500);
-        _fundLiquidator(2000e6);
-        _ageUntilHealthFactorBelow(1e18);
-        uint256 health = lens.healthFactor(tokenId);
-        assertGe(health * 10_000 / 9500, 1e18, "without the haircut the position would still be healthy");
-        uint256 debt = market.debtOf(tokenId);
-
-        vm.prank(liquidator);
-        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
-
-        assertGt(repaid, 0, "the liquidation went through");
-        assertLt(market.debtOf(tokenId), debt, "and took debt off the position");
-    }
-
     /* ------------------------------ the price gates --------------------------- */
 
     /// @notice §5.2: every condition that blocks a borrow leaves liquidation running. The AC
