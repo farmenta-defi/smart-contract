@@ -637,6 +637,9 @@ contract FarmentaMarket is
     ///      here is what has to be visible from outside: the pause, the reentrancy guard, the
     ///      accrual, and every event.
     ///
+    ///      **No `record` up here, unlike every other meme path.** The library records the
+    ///      observation after the seizure, so the gate prices the recorder as it stands and
+    ///      §5.3's stale mode can actually be reached (§5.3 v0.52, FAR-49).
     function liquidate(
         uint256 tokenId,
         uint256 repayAmount,
@@ -645,7 +648,6 @@ contract FarmentaMarket is
         address to
     ) external whenNotPaused nonReentrant returns (uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt) {
         accrue();
-        _recordMemePosition(tokenId);
 
         MarketLiquidation.Outcome memory outcome = MarketLiquidation.execute(
             MarketLiquidation.Env({
