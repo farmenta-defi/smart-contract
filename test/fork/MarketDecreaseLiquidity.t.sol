@@ -568,16 +568,6 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
     }
 
-    /// @notice §5.2: with debt outstanding, a fresh Pyth quote over 3% from Chainlink refuses it.
-    function test_anIndebtedRemovalRunsThePythGate() public {
-        _openLoan(20e6);
-        oracle.setPythPrice(ETH_AT_POOL_SPOT * 104 / 100, block.timestamp);
-
-        vm.prank(borrower);
-        vm.expectPartialRevert(FarmentaMarket.PythPriceDeviation.selector);
-        market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
-    }
-
     /// @notice §5.2: with debt outstanding, a pool more than 2% from the oracle refuses it.
     /// @dev A 3% move keeps the health factor far above 1, so the refusal can only be the gate.
     function test_anIndebtedRemovalRunsTheSpotGate() public {
@@ -595,7 +585,6 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         _deposit(tokenId);
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.96e18, RobinhoodChain.USDG_DECIMALS);
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 97 / 100, 18);
-        oracle.setPythPrice(ETH_AT_POOL_SPOT, block.timestamp);
 
         vm.prank(borrower);
         market.decreaseLiquidity(tokenId, liquidity / 4, 0, 0, recipient);
@@ -633,14 +622,13 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         assertEq(oracle.recordCount(poolId), 0, "no observation for a blue-chip pool");
     }
 
-    /// @notice §5.2 on a meme market: Pyth and the ±2% spot gate are blue-chip rules, so neither holds
-    ///         up an indebted removal there, while the USDG band still does.
+    /// @notice §5.2 on a meme market: the ±2% spot gate is a blue-chip rule, so it does not hold up an
+    ///         indebted removal there, while the USDG band still does.
     function test_anIndebtedMemeRemovalRunsTheMemeGates() public {
         FarmentaMarket memeMarket = _openMemeMarket();
         vm.prank(borrower);
         memeMarket.borrow(tokenId, 10e6, borrower);
 
-        oracle.setPythPrice(ETH_AT_POOL_SPOT * 104 / 100, block.timestamp);
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 95 / 100, 18);
         assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must be outside the blue-chip spot gate");
 

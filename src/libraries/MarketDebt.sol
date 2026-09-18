@@ -7,7 +7,6 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 
-import {RobinhoodChain} from "../constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../interfaces/ICollateralPolicy.sol";
 import {IInterestRateModel} from "../interfaces/IInterestRateModel.sol";
 import {IPositionValuer} from "../interfaces/IPositionValuer.sol";
@@ -25,8 +24,6 @@ library MarketDebt {
     uint256 private constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
     uint256 private constant MAX_SPOT_DEVIATION_BPS = 200;
-    uint256 private constant MAX_PYTH_PRICE_AGE = 10 minutes;
-    uint256 private constant MAX_PYTH_DEVIATION_BPS = 300;
     uint256 private constant USDG_MIN_PRICE = 0.97e18;
     uint256 private constant USDG_MAX_PRICE = 1.03e18;
 
@@ -44,7 +41,6 @@ library MarketDebt {
     error PoolNotOpenForBorrowing(PoolId poolId);
     error SpotPriceDeviation(uint256 deviationBps, uint256 maximumDeviationBps);
     error UsdgPriceOutOfBounds(uint256 price);
-    error PythPriceDeviation(uint256 chainlinkPrice, uint256 pythPrice);
     error PositionWouldBeUnhealthy(uint256 tokenId, uint256 healthFactor);
     error RemovalExceedsBorrowLimit(uint256 tokenId, uint256 debtUsd, uint256 limitUsd);
 
@@ -209,9 +205,8 @@ library MarketDebt {
     }
 
     /// @dev A position's §6.2 collateral value, read only once §5.2's borrow price gates pass: USDG
-    ///      inside [0,97; 1,03], a fresh Pyth quote within 3% of Chainlink, and a blue-chip pool
-    ///      within 2% of the oracle. One function, so every action that sizes risk off this value
-    ///      refuses at the same prices.
+    ///      inside [0,97; 1,03], and a blue-chip pool within 2% of the oracle. One function, so every
+    ///      action that sizes risk off this value refuses at the same prices.
     function _gatedCollateralValue(
         Env calldata env,
         ICollateralPolicy.Tier tier,
@@ -219,7 +214,7 @@ library MarketDebt {
         uint256 tokenId
     ) private view returns (ICollateralPolicy.Terms memory terms, uint256 collateralUsd) {
         terms = env.policy.termsOf(poolId);
-        _checkBorrowPrice(env, tier);
+        _checkBorrowPrice(env);
         IPositionValuer.Valuation memory valuation = env.valuer.value(tokenId);
         if (tier == ICollateralPolicy.Tier.BLUE_CHIP && valuation.spotDeviationBps > MAX_SPOT_DEVIATION_BPS) {
             revert SpotPriceDeviation(valuation.spotDeviationBps, MAX_SPOT_DEVIATION_BPS);
@@ -228,23 +223,10 @@ library MarketDebt {
     }
 
     function _checkBorrowPrice(
-        Env calldata env,
-        ICollateralPolicy.Tier borrowTier
+        Env calldata env
     ) private view {
         uint256 usdgPrice = env.oracle.price(env.policy.quote());
         if (usdgPrice < USDG_MIN_PRICE || usdgPrice > USDG_MAX_PRICE) revert UsdgPriceOutOfBounds(usdgPrice);
-        if (borrowTier != ICollateralPolicy.Tier.BLUE_CHIP) return;
-
-        (uint256 pythPrice, uint256 publishTime) = env.oracle.pythEthUsd();
-        if (publishTime == 0 || publishTime > block.timestamp || block.timestamp - publishTime > MAX_PYTH_PRICE_AGE) {
-            return;
-        }
-
-        uint256 chainlinkPrice = env.oracle.price(Currency.wrap(RobinhoodChain.NATIVE));
-        uint256 difference = chainlinkPrice > pythPrice ? chainlinkPrice - pythPrice : pythPrice - chainlinkPrice;
-        if (Math.mulDiv(difference, BPS, chainlinkPrice) > MAX_PYTH_DEVIATION_BPS) {
-            revert PythPriceDeviation(chainlinkPrice, pythPrice);
-        }
     }
 
     function _debtUsd(

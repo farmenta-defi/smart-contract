@@ -768,12 +768,11 @@ contract MarketLiquidateForkTest is MarketForkTest {
     /// @notice §5.2: every condition that blocks a borrow leaves liquidation running. The AC
     ///         FAR-20 could not test, since `liquidate` did not exist yet (moved here by the
     ///         review of PR #14).
-    /// @dev The gates go on one at a time and none comes off: spot first, then a fresh Pyth
-    ///      quote more than 3% from Chainlink, then USDG outside [0,97; 1,03]. `borrow` checks
-    ///      them in the reverse order (USDG, Pyth, spot), so each new gate becomes the one a
-    ///      borrow hits, which proves it is live on top of the ones already set. A test that only
-    ///      moved prices would pass whether the gates worked or not (review of PR #16, 2.2).
-    ///      With all three shut in the same state, the liquidation still goes through.
+    /// @dev The gates go on one at a time and neither comes off: spot first, then USDG outside
+    ///      [0,97; 1,03]. `borrow` checks them in the reverse order (USDG, spot), so the second
+    ///      gate becomes the one a borrow hits, which proves it is live on top of the one already
+    ///      set. A test that only moved prices would pass whether the gates worked or not (review
+    ///      of PR #16, 2.2). With both shut in the same state, the liquidation still goes through.
     function test_liquidationOutlivesEveryBorrowPriceGate() public {
         _open(0);
         _fundLiquidator(2000e6);
@@ -783,10 +782,6 @@ contract MarketLiquidateForkTest is MarketForkTest {
         oracle.set(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 80 / 100, 18);
         assertGt(valuer.value(tokenId).spotDeviationBps, 200, "the pool must be outside the 2% borrow gate");
         _assertBorrowRefusedBy(FarmentaMarket.SpotPriceDeviation.selector);
-
-        // Pyth: fresh, and 5% away from Chainlink.
-        oracle.setPythPrice(ETH_AT_POOL_SPOT * 80 / 100 * 105 / 100, block.timestamp);
-        _assertBorrowRefusedBy(FarmentaMarket.PythPriceDeviation.selector);
 
         // USDG: off its band.
         oracle.set(Currency.wrap(RobinhoodChain.USDG), 0.9e18, RobinhoodChain.USDG_DECIMALS);

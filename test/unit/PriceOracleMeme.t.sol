@@ -16,7 +16,6 @@ import {TwapRecorder} from "../../src/TwapRecorder.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {PriceMath} from "../../src/libraries/PriceMath.sol";
 import {MockAggregatorV3} from "../mocks/MockAggregatorV3.sol";
-import {MockPyth} from "../mocks/MockPyth.sol";
 import {MockStateView} from "../mocks/MockStateView.sol";
 
 contract PriceOracleMemeTest is Test {
@@ -46,7 +45,7 @@ contract PriceOracleMemeTest is Test {
 
         stateView = new MockStateView();
         recorder = new TwapRecorder(IStateView(address(stateView)));
-        oracle = new PriceOracle(policy, new MockPyth(), recorder);
+        oracle = new PriceOracle(policy, recorder);
     }
 
     function test_borrowUsesTheLowerOfSpotAndTwap() public {

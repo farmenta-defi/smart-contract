@@ -19,8 +19,6 @@ contract MockPriceOracle is IPriceOracle {
     mapping(Currency currency => uint256) internal _liquidationPrice;
     mapping(Currency currency => uint8) internal _decimals;
     mapping(PoolId poolId => uint256) public recordCount;
-    uint256 internal _pythPrice;
-    uint256 internal _pythPublishTime;
 
     function set(
         Currency currency,
@@ -52,18 +50,6 @@ contract MockPriceOracle is IPriceOracle {
         Currency currency
     ) external view returns (uint8) {
         return _decimals[currency];
-    }
-
-    function setPythPrice(
-        uint256 usd1e18,
-        uint256 publishTime
-    ) external {
-        _pythPrice = usd1e18;
-        _pythPublishTime = publishTime;
-    }
-
-    function pythEthUsd() external view returns (uint256 usd1e18, uint256 publishTime) {
-        return (_pythPrice, _pythPublishTime);
     }
 
     /// @notice Moves the liquidation price away from the borrow price.
