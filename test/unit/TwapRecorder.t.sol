@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {Test} from "forge-std/Test.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -128,6 +129,19 @@ contract TwapRecorderTest is Test {
         assertEq(recorder.consult(poolId, 1800), -51);
     }
 
+    function test_consultSurvivesAThirtyDayGapAtTheTickBounds() public {
+        _assertConsultAfterGap(TickMath.MAX_TICK, 30 days);
+        _assertConsultAfterGap(TickMath.MIN_TICK, 30 days);
+    }
+
+    function test_consultSurvivesTheGapsThatOverflowedInt56() public {
+        // FAR-48's measured thresholds: each of these panicked 0x11 while the interpolation
+        // multiplied before it divided.
+        _assertConsultAfterGap(-200_000, 5 days);
+        _assertConsultAfterGap(TickMath.MAX_TICK, 3 days);
+        _assertConsultAfterGap(50_000, 10 days);
+    }
+
     function test_observationCapacityIs2048() public {
         assertEq(recorder.OBSERVATION_CAPACITY(), 2048);
     }
@@ -213,6 +227,23 @@ contract TwapRecorderTest is Test {
         int256 expected = weightedTicks / 1800;
         if (weightedTicks < 0 && weightedTicks % 1800 != 0) --expected;
         assertEq(recorder.consult(poolId, 1800), int24(expected));
+    }
+
+    /// @dev Thirty minutes of history, `gap` seconds of silence, then one record: the window's
+    ///      start now falls inside the gap, which is the interpolation FAR-48 is about. Each call
+    ///      uses a pool of its own, so one test can walk several gaps.
+    function _assertConsultAfterGap(
+        int24 tick,
+        uint256 gap
+    ) internal {
+        key.fee += 1;
+        poolId = key.toId();
+
+        _record(tick);
+        _recordAfter(1800, tick);
+        _recordAfter(gap, tick);
+
+        assertEq(recorder.consult(poolId, 1800), tick);
     }
 
     function _record(
