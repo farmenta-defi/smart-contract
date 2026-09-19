@@ -93,8 +93,8 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         // Signed first: reading Permit2's domain is a call, and would otherwise be the one the
         // expectation below is checked against.
         uint256 expectedId = positionManager.nextTokenId();
-        vm.expectEmit(true, true, false, false, address(market));
-        emit FarmentaMarket.CollateralDeposited(expectedId, borrower);
+        vm.expectEmit(true, true, true, false, address(market));
+        emit FarmentaMarket.CollateralDeposited(expectedId, borrower, wethKey.toId());
         vm.prank(borrower);
         uint256 tokenId = market.mintAndDeposit(p, permit, signature);
 

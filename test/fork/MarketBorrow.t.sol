@@ -52,6 +52,25 @@ contract MarketBorrowForkTest is MarketForkTest {
         market.borrow(tokenId, 200e6, holder);
     }
 
+    function test_borrowAndRepayEmitTheLoanPoolId() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        PoolKey memory key = _keyOf(tokenId);
+        uint256 amount = 10e6;
+
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.Borrow(tokenId, key.toId(), amount);
+        vm.prank(holder);
+        market.borrow(tokenId, amount, holder);
+
+        deal(address(RobinhoodChain.USDG), holder, amount);
+        vm.startPrank(holder);
+        IERC20(address(RobinhoodChain.USDG)).approve(address(market), amount);
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.Repay(tokenId, key.toId(), amount);
+        market.repay(tokenId, amount);
+        vm.stopPrank();
+    }
+
     function test_blueChipBorrowDoesNotRecordTwap() public {
         (uint256 tokenId, address holder) = _prepareLoan();
         PoolKey memory key = _keyOf(tokenId);
