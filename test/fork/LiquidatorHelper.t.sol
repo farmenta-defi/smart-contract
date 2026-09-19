@@ -93,6 +93,12 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         _assertEmpty();
     }
 
+    function test_zeroRepaymentBudgetRevertsBeforeFlashLoan() public {
+        vm.prank(keeper);
+        vm.expectRevert(LiquidatorHelper.ZeroRepayAmount.selector);
+        helper.execute(tokenId, 0, "");
+    }
+
     function _open() private {
         _listPoolOf(tokenId, 50e18);
         vm.startPrank(borrower);
