@@ -350,7 +350,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
         _ageUntilHealthFactorBelow(1e18);
 
         vm.prank(liquidator);
-        (uint256 repaid, uint256 out0, uint256 out1,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+        (uint256 repaid, uint256 out0, uint256 out1,) = market.liquidate(tokenId, 1, 0, 0, liquidator);
 
         assertGt(repaid, 0, "a ceiling haircut must still require repayment");
         assertGt(out0 + out1, 0, "the liquidator must receive the seized position output");
