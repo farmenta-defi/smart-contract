@@ -217,12 +217,22 @@ contract CollateralPolicyTest is Test {
         policy.list(_blueChipKey(address(0)), p);
     }
 
-    function test_haircutCannotExceedEverything() public {
+    function test_aDeltaHookCanListAtTheHaircutCeilingButNotAboveIt() public {
         CollateralPolicy.ListingParams memory p = _blueChipParams();
+        address deltaHook = address(0x101);
+        PoolKey memory key = _blueChipKey(deltaHook);
+
+        p.removeHaircutBps = 2000;
+        vm.startPrank(owner);
+        policy.setHookAllowlist(deltaHook, true);
+        policy.list(key, p);
+        vm.stopPrank();
+        assertEq(policy.termsOf(key.toId()).removeHaircutBps, 2000, "ceiling haircut was not stored");
+
         p.removeHaircutBps = 2001;
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HaircutTooLarge.selector, uint16(2001)));
-        policy.list(_blueChipKey(address(0)), p);
+        policy.updateTerms(key.toId(), p);
     }
 
     function test_haircutRequiresAnAfterRemoveLiquidityDeltaHook() public {
@@ -266,6 +276,57 @@ contract CollateralPolicyTest is Test {
         vm.stopPrank();
 
         assertEq(policy.termsOf(key.toId()).removeHaircutBps, 600, "frozen update did not take effect");
+    }
+
+    function test_updateTermsRejectsANonzeroHaircutWhenTheListedHookHasNoDelta() public {
+        PoolKey memory key = _blueChipKey(address(0));
+        CollateralPolicy.ListingParams memory p = _blueChipParams();
+        _list(key, p);
+
+        p.removeHaircutBps = 1;
+        vm.prank(owner);
+        vm.expectRevert(CollateralPolicy.HaircutRequiresRemoveDeltaHook.selector);
+        policy.updateTerms(key.toId(), p);
+    }
+
+    function test_haircutCanDecreaseImmediatelyOnAnOpenPool() public {
+        address deltaHook = address(0x101);
+        PoolKey memory key = _blueChipKey(deltaHook);
+        CollateralPolicy.ListingParams memory p = _blueChipParams();
+        p.removeHaircutBps = 2000;
+
+        vm.startPrank(owner);
+        policy.setHookAllowlist(deltaHook, true);
+        policy.list(key, p);
+        vm.stopPrank();
+
+        p.removeHaircutBps = 0;
+        vm.prank(owner);
+        policy.updateTerms(key.toId(), p);
+
+        assertEq(policy.termsOf(key.toId()).removeHaircutBps, 0, "open pool could not lower its haircut");
+    }
+
+    function test_aFrozenDeltaHookCanUpdateToTheHaircutCeilingButNotEverything() public {
+        address deltaHook = address(0x101);
+        PoolKey memory key = _blueChipKey(deltaHook);
+        CollateralPolicy.ListingParams memory p = _blueChipParams();
+
+        vm.startPrank(owner);
+        policy.setHookAllowlist(deltaHook, true);
+        policy.list(key, p);
+        policy.setFrozen(key.toId(), true);
+        vm.stopPrank();
+
+        p.removeHaircutBps = 2000;
+        vm.prank(owner);
+        policy.updateTerms(key.toId(), p);
+        assertEq(policy.termsOf(key.toId()).removeHaircutBps, 2000, "ceiling update was not stored");
+
+        p.removeHaircutBps = 10_000;
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HaircutTooLarge.selector, uint16(10_000)));
+        policy.updateTerms(key.toId(), p);
     }
 
     /* ---------------------------- freeze and delist --------------------------- */

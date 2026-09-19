@@ -346,6 +346,20 @@ contract MarketCustodyForkTest is MarketForkTest {
         assertEq(nft.ownerOf(tokenId), address(market), "the position should have been accepted");
     }
 
+    /// @notice The intake floor is measured after the valid hook's actual removal haircut.
+    function test_removeHaircutIsDeductedBeforeTheMinimum() public {
+        uint256 tokenId = _mintRemovalHaircutPosition(1000, 1e14);
+        uint256 principal = valuer.value(tokenId).principalUsd;
+        uint128 minimum = uint128(principal * 95 / 100);
+        _listPoolOf(tokenId, minimum, 1000);
+
+        nft.approve(address(market), tokenId);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, principal * 90 / 100, uint256(minimum))
+        );
+        market.depositCollateral(tokenId);
+    }
+
     /* ---------------------------------- rescue -------------------------------- */
 
     /// @notice A position that arrived without the callback can be swept back out.

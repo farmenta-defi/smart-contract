@@ -311,7 +311,48 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         market.decreaseLiquidity(tokenId, liquidity, 0, 0, recipient);
     }
 
+    /// @notice The minimum remaining position is measured after the permitted hook's haircut.
+    function test_theMinimumIsMeasuredAfterTheRemovalHaircut() public {
+        _useRemovalHaircutFixture(1000);
+        uint256 principal = valuer.value(tokenId).principalUsd;
+        uint128 amount = liquidity - uint128(uint256(liquidity) * 51e18 / principal);
+        _depositListed(tokenId, 50e18, 1000);
+        uint256 rawLeft = _probe(tokenId, amount).principalUsdLeft;
+        assertLt(rawLeft * 90 / 100, 50e18, "the hook haircut must put the remainder below the floor");
+
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, rawLeft * 90 / 100, uint256(50e18))
+        );
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+    }
+
     /* -------------------------------- borrow limit ---------------------------- */
+
+    /// @notice The borrow limit after a removal uses the hook-reduced collateral value.
+    function test_theBorrowLimitCountsTheRemovalHaircut() public {
+        _useRemovalHaircutFixture(1000);
+        uint128 amount = liquidity / 4;
+        uint256 snapshot = vm.snapshotState();
+        _deposit(tokenId);
+        uint256 rawLimit = _limit(_probe(tokenId, amount), MAX_LTV_BPS);
+        vm.revertToState(snapshot);
+
+        _depositListed(tokenId, 50e18, 1000);
+        uint256 haircutLimit = _limit(_probe(tokenId, amount), MAX_LTV_BPS);
+        assertEq(haircutLimit, rawLimit * 90 / 100, "the haircut must reduce the removal limit");
+        uint256 debt = (rawLimit + haircutLimit) / 2 / 1e12;
+
+        _lend(300e6);
+        vm.prank(borrower);
+        market.borrow(tokenId, debt, borrower);
+
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.RemovalExceedsBorrowLimit.selector, tokenId, _usd(debt), haircutLimit)
+        );
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+    }
 
     /// @notice An indebted removal that leaves the debt within the borrow limit goes through, and the
     ///         debt is untouched.
@@ -676,6 +717,14 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         uint256 id
     ) private returns (address holder) {
         return _depositListed(id, 50e18, 0);
+    }
+
+    function _useRemovalHaircutFixture(
+        uint16 haircutBps
+    ) private {
+        tokenId = _mintRemovalHaircutPosition(haircutBps, 1e14);
+        borrower = address(this);
+        liquidity = positionManager.getPositionLiquidity(tokenId);
     }
 
     function _depositListed(

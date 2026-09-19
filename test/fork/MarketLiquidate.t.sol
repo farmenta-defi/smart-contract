@@ -6,7 +6,6 @@ import {Vm} from "forge-std/Vm.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {PoolDonateTest} from "@uniswap/v4-core/src/test/PoolDonateTest.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -25,7 +24,6 @@ import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 import {RedeemingLiquidator} from "../mocks/RedeemingLiquidator.sol";
-import {RemovalHaircutHook} from "../mocks/RemovalHaircutHook.sol";
 
 /// @notice §8 against a real position: both seizure branches, the fee credit, the protocol
 ///         fee, the haircut, and §9's bad debt.
@@ -43,7 +41,6 @@ import {RemovalHaircutHook} from "../mocks/RemovalHaircutHook.sol";
 ///      large enough for the full-seizure branch. Tests using it assert *which* branch ran and
 ///      what happened to the debt, never the exact payout.
 contract MarketLiquidateForkTest is MarketForkTest {
-    address internal constant REMOVAL_HAIRCUT_HOOK = address(0x101);
     uint16 internal constant REMOVAL_HAIRCUT_BPS = 1000;
     uint256 internal constant PAYOUT_TOLERANCE_USD = 1e16;
 
@@ -315,11 +312,48 @@ contract MarketLiquidateForkTest is MarketForkTest {
             0,
             "the delta hook must keep its configured haircut"
         );
+        uint256 payoutUsd = _wethUsdgValue(out0, out1);
+        uint256 bonusPayoutUsd = repaid * 1e12 * 10_500 / 10_000;
+        assertGe(
+            payoutUsd + PAYOUT_TOLERANCE_USD,
+            bonusPayoutUsd,
+            "the hook haircut must not leave the liquidator below the bonus payout"
+        );
         assertLe(
-            _wethUsdgValue(out0, out1),
-            repaid * 1e12 * 10_500 / 10_000 + PAYOUT_TOLERANCE_USD,
+            payoutUsd,
+            bonusPayoutUsd + PAYOUT_TOLERANCE_USD,
             "the independently valued payout exceeded repay x (1 + bonus)"
         );
+    }
+
+    /// @notice The removal haircut also decides the liquidation gate, not only the payout.
+    function test_theLiquidationGateCountsTheRemovalHaircut() public {
+        _openRemovalHaircutPosition(REMOVAL_HAIRCUT_BPS);
+        _fundLiquidator(2000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        uint256 health = lens.healthFactor(tokenId);
+        assertGe(health * 10_000 / (10_000 - REMOVAL_HAIRCUT_BPS), 1e18, "without the haircut the loan is healthy");
+        uint256 debt = market.debtOf(tokenId);
+
+        vm.prank(liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(repaid, 0, "the haircut-only liquidation must proceed");
+        assertLt(market.debtOf(tokenId), debt, "the liquidation must reduce debt");
+    }
+
+    /// @notice Even at the accepted 2,000 bps ceiling, liquidation cannot seize for zero repay.
+    function test_theHaircutCeilingCannotEnableAZeroRepaySeizure() public {
+        _openRemovalHaircutPosition(2000);
+        _fundLiquidator(2000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        vm.prank(liquidator);
+        (uint256 repaid, uint256 out0, uint256 out1,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(repaid, 0, "a ceiling haircut must still require repayment");
+        assertGt(out0 + out1, 0, "the liquidator must receive the seized position output");
     }
 
     /// @notice A partial seizure pays out what it charged for: the slice of liquidity plus the fee
@@ -988,15 +1022,8 @@ contract MarketLiquidateForkTest is MarketForkTest {
     function _openRemovalHaircutPosition(
         uint16 haircutBps
     ) private {
-        PoolKey memory key = _initRemovalHaircutPool();
-        _fundAndApprove(key, 10 ether, 100_000e6);
-
-        int24 mid = _alignedOracleTick(key.tickSpacing);
-        tokenId = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e14);
+        tokenId = _mintRemovalHaircutPosition(haircutBps, 1e14);
         borrower = address(this);
-
-        vm.prank(owner);
-        policy.setHookAllowlist(REMOVAL_HAIRCUT_HOOK, true);
         _open(haircutBps);
     }
 
@@ -1169,22 +1196,6 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assembly {
             healthFactor := mload(add(reason, 68))
         }
-    }
-
-    function _initRemovalHaircutPool() private returns (PoolKey memory key) {
-        RemovalHaircutHook hook = new RemovalHaircutHook(poolManager, REMOVAL_HAIRCUT_BPS);
-        vm.etch(REMOVAL_HAIRCUT_HOOK, address(hook).code);
-
-        PoolKey memory referenceKey = _keyOf(Fixtures.POS_WETH_USDG_WIDE_IN_RANGE);
-        key = PoolKey({
-            currency0: referenceKey.currency0,
-            currency1: referenceKey.currency1,
-            fee: 3000,
-            tickSpacing: 60,
-            hooks: IHooks(REMOVAL_HAIRCUT_HOOK)
-        });
-        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(referenceKey.toId());
-        poolManager.initialize(key, sqrtPriceX96);
     }
 
     /// @dev Lets accrued interest carry the position under `target`, which leaves the oracle
