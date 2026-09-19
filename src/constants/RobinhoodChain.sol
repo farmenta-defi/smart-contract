@@ -25,6 +25,7 @@ library RobinhoodChain {
     address internal constant V4_QUOTER = 0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94;
     /// @notice Uniswap's primary UniversalRouter deployment on Robinhood Chain.
     address internal constant UNIVERSAL_ROUTER = 0x8876789976dEcBfCbBbe364623C63652db8C0904;
+    /// @notice Morpho Blue deployment used as the USDG flash-loan source.
     address internal constant MORPHO_BLUE = 0x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010;
 
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;

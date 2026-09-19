@@ -6,7 +6,6 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 
 import {RobinhoodChain} from "../constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../interfaces/ICollateralPolicy.sol";
@@ -35,14 +34,12 @@ interface ILiquidationMarket {
     ) external returns (uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt);
 }
 
-interface IWETH {
-    function deposit() external payable;
-}
-
 /// @title LiquidatorHelper
 /// @notice Makes a Farmenta liquidation, the collateral swap, and a Morpho flash loan one transaction.
-/// @dev `swapCalldata` is assembled off-chain and carries its own minimum output. This contract
-///      only provides the seized balance and refuses to finish while any seized currency remains.
+/// @dev `swapCalldata` is assembled off-chain and carries its own minimum output. The helper
+///      pushes the complete seized balance to UniversalRouter; the route must use
+///      `SETTLE(..., CONTRACT_BALANCE, false)` and `OPEN_DELTA` so small price movements do not
+///      turn a valid liquidation into a residual-balance revert.
 contract LiquidatorHelper {
     using SafeERC20 for IERC20;
 
@@ -58,8 +55,6 @@ contract LiquidatorHelper {
     IERC20 public immutable usdg;
     IPositionManager public immutable positionManager;
     address public immutable universalRouter;
-    IWETH public immutable weth;
-    IAllowanceTransfer public immutable permit2;
 
     constructor(
         ILiquidationMarket market_,
@@ -71,8 +66,6 @@ contract LiquidatorHelper {
         usdg = market_.asset();
         positionManager = market_.positionManager();
         universalRouter = universalRouter_;
-        weth = IWETH(RobinhoodChain.WETH);
-        permit2 = IAllowanceTransfer(RobinhoodChain.PERMIT2);
     }
 
     receive() external payable {}
@@ -80,6 +73,8 @@ contract LiquidatorHelper {
     /// @notice Flash-borrows the USDG budget, liquidates, swaps the non-USDG leg, and pays profit to the caller.
     /// @param tokenId The collateral position to liquidate.
     /// @param repayAmount The market repayment budget, including any retained-fee purchase budget.
+    ///        The amount is borrowed in full, so callers should include a safety margin for
+    ///        close-factor and interest movement; Morpho's atomic pull reverts if it is short.
     /// @param swapCalldata UniversalRouter calldata, quoted off-chain with its minimum output.
     function execute(
         uint256 tokenId,
@@ -108,6 +103,7 @@ contract LiquidatorHelper {
 
         usdg.forceApprove(address(market), assets);
         market.liquidate(tokenId, repayAmount, 0, 0, address(this));
+        usdg.forceApprove(address(market), 0);
 
         _swap(key, swapCalldata);
         _requireNoResidual(key.currency0);
@@ -129,39 +125,30 @@ contract LiquidatorHelper {
         PoolKey memory key,
         bytes memory swapCalldata
     ) private {
-        _prepareCurrency(key.currency0);
-        _prepareCurrency(key.currency1);
+        uint256 nativeValue = _pushCurrency(key.currency0) + _pushCurrency(key.currency1);
 
-        (bool ok, bytes memory reason) = universalRouter.call(swapCalldata);
+        (bool ok, bytes memory reason) = universalRouter.call{value: nativeValue}(swapCalldata);
         if (!ok) revert SwapFailed(reason);
-
-        // UniversalRouter's unwrap command pays native ETH to this contract. Convert it
-        // back to WETH before checking residual collateral and repaying Morpho.
-        uint256 nativeBalance = address(this).balance;
-        if (nativeBalance != 0) weth.deposit{value: nativeBalance}();
     }
 
-    function _prepareCurrency(
+    function _pushCurrency(
         Currency currency
-    ) private {
+    ) private returns (uint256 nativeValue) {
         address token = Currency.unwrap(currency);
-        if (token == address(usdg)) return;
+        if (token == address(usdg)) return 0;
         if (token == address(0)) {
-            uint256 nativeBalance = address(this).balance;
-            if (nativeBalance != 0) weth.deposit{value: nativeBalance}();
-            token = address(weth);
+            return address(this).balance;
         }
 
-        IERC20(token).forceApprove(address(permit2), type(uint256).max);
-        permit2.approve(token, universalRouter, type(uint160).max, type(uint48).max);
-        IERC20(token).forceApprove(universalRouter, type(uint256).max);
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        if (balance != 0) IERC20(token).safeTransfer(universalRouter, balance);
     }
 
     function _requireNoResidual(
         Currency currency
     ) private view {
         address token = Currency.unwrap(currency);
-        if (token == address(0)) token = address(weth);
+        if (token == address(0)) token = RobinhoodChain.WETH;
         if (token == address(usdg)) return;
 
         uint256 balance = IERC20(token).balanceOf(address(this));

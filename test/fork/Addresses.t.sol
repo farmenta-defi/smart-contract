@@ -30,6 +30,15 @@ contract AddressesForkTest is ForkTest {
         assertEq(_addressCall(RobinhoodChain.UNIVERSAL_ROUTER, "poolManager()"), RobinhoodChain.POOL_MANAGER);
     }
 
+    function test_morphoBlueHasFlashLoanLiquidity() public view {
+        assertGt(RobinhoodChain.MORPHO_BLUE.code.length, 0, "Morpho Blue has no code");
+        assertGt(
+            IERC20Metadata(RobinhoodChain.USDG).balanceOf(RobinhoodChain.MORPHO_BLUE),
+            0,
+            "Morpho Blue has no USDG flash-loan liquidity"
+        );
+    }
+
     function test_chainlinkFeedsAreTheClaimedPairs() public view {
         IAggregatorV3 ethUsd = IAggregatorV3(RobinhoodChain.CHAINLINK_ETH_USD);
         assertEq(ethUsd.description(), "ETH / USD", "ETH/USD feed is not ETH/USD");
