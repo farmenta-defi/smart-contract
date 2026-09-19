@@ -9,12 +9,9 @@ pragma solidity 0.8.26;
 ///      whose truncation matched. `test/fork/Addresses.t.sol` asks each address on-chain
 ///      what it is; `make addresses` runs it.
 ///
-///      Only addresses something actually uses live here. V4Quoter, both UniversalRouters,
-///      Morpho Blue, and the BTC/USD and USDC/USD feeds were removed once it became clear
-///      they were referenced by nothing except the test verifying them — a loop that
-///      justifies itself. They belong to `LiquidatorHelper` and later phases; §18 already
-///      holds them, and they come back the same way these arrived: copied from §18, verified
-///      against the chain.
+///      Only addresses something actually uses live here. The V4Quoter, UniversalRouter,
+///      and Morpho Blue entries are used by the liquidator periphery; the BTC/USD and
+///      USDC/USD feeds remain intentionally omitted because they are not protocol dependencies.
 library RobinhoodChain {
     uint256 internal constant CHAIN_ID = 4663;
 
@@ -23,6 +20,13 @@ library RobinhoodChain {
     address internal constant POOL_MANAGER = 0x8366a39CC670B4001A1121B8F6A443A643e40951;
     address internal constant POSITION_MANAGER = 0x58daec3116aae6D93017bAAea7749052E8a04fA7;
     address internal constant STATE_VIEW = 0xF3334192D15450CdD385c8B70e03f9A6bD9E673b;
+
+    /// @notice Uniswap v4 quoter used by the off-chain liquidator route builder.
+    address internal constant V4_QUOTER = 0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94;
+    /// @notice Uniswap's primary UniversalRouter deployment on Robinhood Chain.
+    address internal constant UNIVERSAL_ROUTER = 0x8876789976dEcBfCbBbe364623C63652db8C0904;
+    /// @notice Morpho Blue deployment used as the USDG flash-loan source.
+    address internal constant MORPHO_BLUE = 0x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010;
 
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
 
