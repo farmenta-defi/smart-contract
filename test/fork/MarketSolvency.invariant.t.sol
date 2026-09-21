@@ -11,7 +11,7 @@ import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 
-/// @notice Restricts invariant fuzzing to valid lender and borrower actions.
+/// @notice Restricts invariant fuzzing to bounded lender and borrower actions.
 contract MarketHandler is Test {
     FarmentaMarket internal immutable market;
     MarketLens internal immutable lens;
@@ -24,8 +24,11 @@ contract MarketHandler is Test {
     address internal immutable borrower;
     address internal immutable lender;
     address internal immutable owner;
-    /// @dev Ghost state is asserted by an invariant function; handler reverts are discarded.
+    /// @dev Ghost state is asserted by invariant functions because with `fail_on_revert = false`,
+    ///      an assert in a handler only reverts a discarded call and cannot fail the suite.
     bool public sawFloorBreach;
+    bool public sawUnhealthyBorrow;
+    bool public sawSharePriceDecrease;
     /// @dev Set when a fee claim went through and left the position unhealthy (§7 post-condition).
     bool public sawUnhealthyClaim;
     /// @dev Set when a liquidity removal went through and left the debt over the borrow limit, or what
@@ -62,7 +65,19 @@ contract MarketHandler is Test {
         amount = bound(amount, 10e6, maximum);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
-        assertGe(lens.healthFactor(tokenId), 1e18, "borrow accepted an unhealthy position");
+        if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyBorrow = true;
+    }
+
+    /// @dev Only amounts the market must refuse. On the intact market every call reverts and is
+    ///      discarded; kept apart from `borrow` so that action's successes are not diluted.
+    function borrowPastTheLimit(
+        uint256 amount
+    ) external {
+        uint256 maximum = lens.maxBorrow(tokenId);
+        amount = bound(amount, Math.max(maximum + 1, 10e6), Math.max(maximum, 10e6) * 2);
+        vm.prank(borrower);
+        market.borrow(tokenId, amount, borrower);
+        if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyBorrow = true;
     }
 
     function repay(
@@ -166,7 +181,7 @@ contract MarketHandler is Test {
         uint256 assetsBefore = market.convertToAssets(oneShare);
         vm.warp(block.timestamp + bound(uint256(elapsed), 1 hours, 30 days));
         market.accrue();
-        assertGe(market.convertToAssets(oneShare), assetsBefore, "accrual reduced the vault share price");
+        if (market.convertToAssets(oneShare) < assetsBefore) sawSharePriceDecrease = true;
     }
 }
 
@@ -217,6 +232,14 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
 
     function invariant_withdrawableNeverExceedsCash() public view {
         assertLe(lens.withdrawableReserves(), IERC20(market.asset()).balanceOf(address(market)));
+    }
+
+    function invariant_borrowNeverLeavesAnUnhealthyPosition() public view {
+        assertFalse(handler.sawUnhealthyBorrow(), "borrow accepted an unhealthy position");
+    }
+
+    function invariant_accrualNeverReducesTheVaultSharePrice() public view {
+        assertFalse(handler.sawSharePriceDecrease(), "accrual reduced the vault share price");
     }
 
     function invariant_aClaimNeverLeavesThePositionUnhealthy() public view {
