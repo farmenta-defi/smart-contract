@@ -39,7 +39,7 @@ import {console} from "forge-std/console.sol";
 ///      fresh. What separates the first two states below is the recorder alone: fresh, the gate
 ///      prices ETH at the TWAP; 901 seconds without an observation, at `spot × 0,8`. The third
 ///      moves the pool with a real swap, 30% down, which is past `crashThreshold`.
-contract MarketMemeLiquidateForkTest is MarketForkTest {
+abstract contract FlashDumpForkTestBase is MarketForkTest {
     uint256 internal constant STALE_AFTER = 900;
 
     address internal lender = address(0x1E4DE2);
@@ -63,6 +63,12 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
     uint256 private attackEthAfterDump;
     uint256 private attackUsdgBefore;
     uint256 private attackAcquired;
+    int256 private baselinePnl;
+    uint256 private reportRepaid;
+    uint256 private reportOutEth;
+    uint256 private reportOutUsdg;
+    uint256 private reportBadDebt;
+    uint256 private reportLiquidationGas;
 
     /// @dev Leaves the fixture borrowed against and aged to a health factor just above 1 on a
     ///      fresh TWAP: healthy where the recorder is fresh, and close enough to the line that
@@ -115,8 +121,10 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
         vm.prank(liquidator);
         usdg.approve(address(memeMarket), type(uint256).max);
 
-        _ageUntilHealthFactorBelow(1.02e18);
+        _ageUntilHealthFactorBelow(_ageTarget());
     }
+
+    function _ageTarget() internal pure virtual returns (uint256);
 
     /* ------------------------------- fresh recorder --------------------------- */
 
@@ -225,8 +233,22 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
         deal(address(usdg), attacker, 10_000_000e6);
 
         for (uint256 i; i < dumpBps.length; ++i) {
+            baselinePnl = _controlRoundTrip(attacker, dumpBps[i], ethPrice);
             _runFlashDump(attacker, dumpBps[i], ethPrice, debt);
         }
+    }
+
+    function _controlRoundTrip(
+        address attacker,
+        uint256 dumpBps,
+        uint256 ethPrice
+    ) private returns (int256 pnlUsd) {
+        uint256 snapshot = vm.snapshotState();
+        PoolSwapTest router = new PoolSwapTest(poolManager);
+        _dumpAttack(router, attacker, dumpBps);
+        _restoreAttack(router, attacker, attackAcquired);
+        pnlUsd = _signedPnl(attacker, attackEthBefore, attackUsdgBefore, ethPrice);
+        vm.revertToState(snapshot);
     }
 
     function _runFlashDump(
@@ -238,23 +260,10 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
         uint256 snapshot = vm.snapshotState();
         PoolSwapTest router = new PoolSwapTest(poolManager);
         _dumpAttack(router, attacker, dumpBps);
-        (uint256 repaid, uint256 outEth, uint256 outUsdg, uint256 badDebt, uint256 liquidationGas) =
-            _liquidateAttack(attacker);
+        (reportRepaid, reportOutEth, reportOutUsdg, reportBadDebt, reportLiquidationGas) = _liquidateAttack(attacker);
         _restoreAttack(router, attacker, attackAcquired);
         int256 pnlUsd = _signedPnl(attacker, attackEthBefore, attackUsdgBefore, ethPrice);
-        _reportAttack(
-            dumpBps,
-            debt,
-            ethPrice,
-            attackEthBefore - attackEthAfterDump,
-            attackAcquired,
-            repaid,
-            outEth,
-            outUsdg,
-            badDebt,
-            liquidationGas,
-            pnlUsd
-        );
+        _reportAttack(dumpBps, debt, ethPrice, attackEthBefore - attackEthAfterDump, attackAcquired, pnlUsd);
         vm.revertToState(snapshot);
     }
 
@@ -274,28 +283,30 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
         uint256 ethPrice,
         uint256 ethSold,
         uint256 acquired,
-        uint256 repaid,
-        uint256 outEth,
-        uint256 outUsdg,
-        uint256 badDebt,
-        uint256 liquidationGas,
         int256 pnlUsd
     ) private view {
         console.log("flash dump depth bps", dumpBps);
         console.log("flash dump ETH sold", ethSold);
         console.log("flash dump USDG acquired", acquired);
-        console.log("flash dump repaid USDG", repaid);
-        console.log("flash dump liquidation gas", liquidationGas);
-        console.log("flash dump bad debt", badDebt);
-        console.logInt(pnlUsd);
+        console.log("flash dump repaid USDG", reportRepaid);
+        console.log("flash dump liquidation gas", reportLiquidationGas);
+        console.log("flash dump bad debt", reportBadDebt);
         console.log(
             "flash dump liquidation proceeds net of repay (1e18)",
-            int256(outEth) * int256(ethPrice) / 1e18 + int256(outUsdg) * 1e12 - int256(repaid) * 1e12
+            int256(reportOutEth) * int256(ethPrice) / 1e18 + int256(reportOutUsdg) * 1e12 - int256(reportRepaid) * 1e12
         );
         console.log("flash dump signed attack PnL (1e18)", pnlUsd);
-        assertGt(repaid, 0, "the crash must reach the real liquidation path");
-        assertLe(repaid, debt, "liquidation cannot repay more than outstanding debt");
-        assertEq(outUsdg, 4_801_264, "liquidation output is the pinned fixture result");
+        console.log("flash dump control PnL (1e18)", baselinePnl);
+        console.log("flash dump liquidation profit (1e18)", pnlUsd - baselinePnl);
+        console.log(
+            "flash dump break-even debt (1e6)",
+            baselinePnl < 0 && pnlUsd > baselinePnl && reportRepaid > 0
+                ? uint256(-baselinePnl) * reportRepaid / uint256(pnlUsd - baselinePnl)
+                : 0
+        );
+        assertGt(reportRepaid, 0, "the crash must reach the real liquidation path");
+        assertLe(reportRepaid, debt, "liquidation cannot repay more than outstanding debt");
+        assertEq(reportOutUsdg, 4_801_264, "liquidation output is the pinned fixture result");
     }
 
     function _dumpAttack(
@@ -458,5 +469,17 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
                     )
                 ))
         );
+    }
+}
+
+contract MarketMemeLiquidateForkTest is FlashDumpForkTestBase {
+    function _ageTarget() internal pure override returns (uint256) {
+        return 1.02e18;
+    }
+}
+
+contract FlashDumpAtMaxLtvForkTest is FlashDumpForkTestBase {
+    function _ageTarget() internal pure override returns (uint256) {
+        return type(uint256).max;
     }
 }
