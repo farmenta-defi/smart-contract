@@ -114,6 +114,11 @@ contract MarketHandler is Test {
         market.withdraw(amount, lender, lender);
     }
 
+    /// @dev Never reaches the market in this suite. The blue-chip floor is 1% of `totalAssets`, 3 USDG
+    ///      from the lender's deposit alone, and the interest one position's debt earns in a run stays
+    ///      under it, so the lens answers zero. Measured on `main` `2af1217`: no successful withdrawal in
+    ///      16 runs. The floor ghost is fed by `withdrawReservesPastTheFloor`; a legitimate withdrawal is
+    ///      covered by the unit lane only.
     function withdrawReserves(
         uint256 amount
     ) external {
@@ -125,9 +130,33 @@ contract MarketHandler is Test {
         if (market.reserves() < lens.reserveFloor()) sawFloorBreach = true;
     }
 
+    /// @dev Only amounts the market must refuse: past what the floor leaves, up to every reserve the
+    ///      cash can pay. `withdrawReserves` alone cannot reach them, since its bound comes from the
+    ///      lens, which computes the floor apart from the market's gate: a gate that dropped the floor
+    ///      would never be asked for more. Accrues first so the lens and the gate see the same reserves.
+    function withdrawReservesPastTheFloor(
+        uint256 amount
+    ) external {
+        market.accrue();
+        uint256 minimum = lens.withdrawableReserves() + 1;
+        uint256 maximum = Math.min(market.reserves(), usdg.balanceOf(address(market)));
+        if (maximum < minimum) return;
+        amount = bound(amount, minimum, maximum);
+        vm.prank(owner);
+        market.withdrawReserves(amount, owner);
+        if (market.reserves() < lens.reserveFloor()) sawFloorBreach = true;
+    }
+
     /// @dev The fork holds no swaps between calls, so after the first claim the fees are zero. What
     ///      this exercises is the post-condition on every claim the fuzzer reaches, at whatever debt and
     ///      index the other actions left.
+    ///
+    ///      That also means the market never has a claim to refuse here: with nothing to release, a
+    ///      claim cannot lower the health factor, and no action brings the position under 1 first.
+    ///      Removing `requireHealthy` from `collectFees` leaves
+    ///      `invariant_aClaimNeverLeavesThePositionUnhealthy` green (FAR-59). `MarketCollectFees.t.sol`
+    ///      guards that check; this ghost needs either fees that lower the health factor (a swap
+    ///      between claims) or a claim on a position already under 1 before it can fire (FAR-62).
     function collectFees() external {
         vm.prank(borrower);
         market.collectFees(tokenId, FEE_RECIPIENT);
