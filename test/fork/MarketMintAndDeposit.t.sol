@@ -157,30 +157,54 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         assertEq(afterMint.marketUsdg, before.marketUsdg, "lenders' USDG moved");
     }
 
-    /// @notice Both approval layers are granted the first time a token is minted with, then left
-    ///         standing.
-    /// @dev The pattern §4.1 specifies and `test/base/PositionMinter.sol` proves: the token
-    ///      approves Permit2, and Permit2 approves PositionManager for the maximum with the
-    ///      longest expiry. The allowance is read at the §18 Permit2 address, which also shows
-    ///      PositionManager pays through that one. A second mint with the same tokens approves
-    ///      nothing.
-    function test_approvesEachLayerOncePerToken() public {
+    /// @notice The market grants no allowance to anyone, on either layer.
+    /// @dev Replaces the test that pinned both approval layers (FAR-45). Mint used to settle from
+    ///      the market, which needed token → Permit2 → PositionManager at the maximum; it now
+    ///      pays PositionManager directly, as `increaseLiquidity` does. An allowance appearing
+    ///      here would mean the market became a payer again, the design that let a hook redeem
+    ///      at a price the borrower's tokens had inflated.
+    function test_grantsNoAllowance() public {
         _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
         FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
-        _mintAndDeposit(p, 0);
-
-        _assertStandingApproval(RobinhoodChain.WETH);
-        _assertStandingApproval(RobinhoodChain.USDG);
-
-        deal(RobinhoodChain.WETH, borrower, WETH_BUDGET);
-        deal(RobinhoodChain.USDG, borrower, USDG_BUDGET);
-        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 1);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 0);
 
         vm.expectCall(RobinhoodChain.PERMIT2, abi.encodeWithSelector(IAllowanceTransfer.approve.selector), 0);
         vm.expectCall(RobinhoodChain.WETH, abi.encodeWithSelector(IERC20.approve.selector), 0);
         vm.expectCall(RobinhoodChain.USDG, abi.encodeWithSelector(IERC20.approve.selector), 0);
         vm.prank(borrower);
         market.mintAndDeposit(p, permit, signature);
+
+        for (uint256 i; i < 2; ++i) {
+            address token = i == 0 ? RobinhoodChain.WETH : RobinhoodChain.USDG;
+            assertEq(IERC20(token).allowance(address(market), RobinhoodChain.PERMIT2), 0, "token -> Permit2 allowance");
+            (uint160 allowed,,) = IAllowanceTransfer(RobinhoodChain.PERMIT2)
+                .allowance(address(market), token, RobinhoodChain.POSITION_MANAGER);
+            assertEq(allowed, 0, "Permit2 -> PositionManager allowance");
+        }
+    }
+
+    /// @notice Even with both approval layers standing, the market never pays for a mint.
+    /// @dev A proxy upgraded from the implementation before FAR-45 keeps the allowances its old
+    ///      mints granted: `token → Permit2 → PositionManager` at the maximum. `SETTLE` with
+    ///      `payerIsUser = true` would then draw a leg from lenders' cash through Permit2.
+    ///      Nothing here is a payer, so the market's balances do not move.
+    function test_aStandingAllowanceStillDoesNotLetTheMarketPay() public {
+        _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
+        vm.startPrank(address(market));
+        IERC20(RobinhoodChain.WETH).approve(RobinhoodChain.PERMIT2, type(uint256).max);
+        IERC20(RobinhoodChain.USDG).approve(RobinhoodChain.PERMIT2, type(uint256).max);
+        IAllowanceTransfer(RobinhoodChain.PERMIT2)
+            .approve(RobinhoodChain.WETH, RobinhoodChain.POSITION_MANAGER, type(uint160).max, type(uint48).max);
+        IAllowanceTransfer(RobinhoodChain.PERMIT2)
+            .approve(RobinhoodChain.USDG, RobinhoodChain.POSITION_MANAGER, type(uint160).max, type(uint48).max);
+        vm.stopPrank();
+
+        Balances memory before = _balances();
+        _mintAndDeposit(_inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET), 0);
+        Balances memory afterMint = _balances();
+
+        assertEq(afterMint.marketUsdg, before.marketUsdg, "lenders' USDG paid for the mint");
+        assertEq(afterMint.marketWeth, before.marketWeth, "the market's WETH paid for the mint");
     }
 
     /// @notice Minting in ends in the same state as depositing an equivalent position.
@@ -507,24 +531,6 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         assertEq(now_.marketUsdg, before.marketUsdg, "the market's USDG moved");
         assertEq(now_.poolManagerWeth, before.poolManagerWeth, "WETH reached the pool");
         assertEq(now_.poolManagerUsdg, before.poolManagerUsdg, "USDG reached the pool");
-    }
-
-    /// @dev Both layers of the settle approval stand at the maximum, and the inner one never
-    ///      expires. The token layer is allowed to have been drawn down by the mint that set it:
-    ///      this chain's USDG decrements even an unlimited allowance (WETH does not), while
-    ///      Permit2 never does.
-    function _assertStandingApproval(
-        address token
-    ) internal view {
-        assertGe(
-            IERC20(token).allowance(address(market), RobinhoodChain.PERMIT2),
-            type(uint256).max - type(uint128).max,
-            "token -> Permit2 is not standing at the maximum"
-        );
-        (uint160 amount, uint48 expiration,) = IAllowanceTransfer(RobinhoodChain.PERMIT2)
-            .allowance(address(market), token, RobinhoodChain.POSITION_MANAGER);
-        assertEq(amount, type(uint160).max, "Permit2 -> PositionManager is not the maximum");
-        assertEq(expiration, type(uint48).max, "Permit2 -> PositionManager expires");
     }
 
     /// @dev A range ten spacings either side of the oracle price, with the given maxima.
