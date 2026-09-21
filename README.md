@@ -52,8 +52,9 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    tetapi tidak menunda perubahan bagi pinjaman yang sudah ada atau likuidasinya. Karena
    itu kenaikan dapat langsung menurunkan nilai jaminan yang diakui dan membuat posisi
    yang sebelumnya sehat menjadi likuidatable; likuidator dapat menerima lebih dari bonus
-   normal jika hook benar-benar memotong nilai saat removal. Risiko ini diterima untuk
-   respons operasional MVP dan harus diungkapkan di frontend sebelum TVL nyata. Sumber:
+   normal jika haircut yang dicatat melebihi potongan nyata hook saat removal (terukur
+   118,12% dari `repay`, batas atas 131,25%; §6.5). Risiko ini diterima untuk respons
+   operasional MVP dan harus diungkapkan di frontend sebelum TVL nyata. Sumber:
    `ARCHITECTURE.md` §6.5, **§15 no. 19**.
 
 4. **Lantai reserve tidak mengikat pemegang kunci upgrade.** Aturan §7 membatasi
