@@ -3,13 +3,18 @@ pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {PoolDonateTest} from "@uniswap/v4-core/src/test/PoolDonateTest.sol";
+import {PoolSwapTest} from "@uniswap/v4-core/src/test/PoolSwapTest.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
+import {MarketLiquidation} from "../../src/libraries/MarketLiquidation.sol";
 import {IFlashLoanMorpho, ILiquidationMarket, LiquidatorHelper} from "../../src/periphery/LiquidatorHelper.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
@@ -62,6 +67,7 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         vm.prank(keeper);
         helper.execute(tokenId, repayAmount, _route(plain, 0));
 
+        assertGt(usdg.balanceOf(keeper), 0, "profit did not reach keeper");
         _assertEmpty();
         assertEq(IERC721(RobinhoodChain.POSITION_MANAGER).ownerOf(tokenId), address(market));
     }
@@ -75,6 +81,7 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         vm.prank(keeper);
         helper.execute(tokenId, budget, _route(plain, 0));
 
+        assertGt(usdg.balanceOf(keeper), 0, "profit did not reach keeper");
         _assertEmpty();
         vm.expectRevert();
         IERC721(RobinhoodChain.POSITION_MANAGER).ownerOf(tokenId);
@@ -100,7 +107,7 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         deal(address(usdg), probe, 1_000_000e6);
         vm.startPrank(probe);
         usdg.approve(address(market), type(uint256).max);
-        vm.expectRevert();
+        vm.expectPartialRevert(MarketLiquidation.FeePurchaseUnderfunded.selector);
         market.liquidate(tokenId, debt / 2, 0, 0, probe);
         vm.stopPrank();
     }
@@ -145,7 +152,7 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         _ageUntilUnhealthy();
         uint256 debt = market.debtOf(tokenId);
         vm.prank(keeper);
-        vm.expectRevert();
+        vm.expectPartialRevert(LiquidatorHelper.SwapFailed.selector);
         helper.execute(tokenId, debt, _route(Fixtures.liveRecorderPoolKeys()[1], type(uint128).max));
     }
 
@@ -153,9 +160,11 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         _open();
         _ageUntilUnhealthy();
         uint256 debt = market.debtOf(tokenId);
+        PoolKey memory plain = Fixtures.liveRecorderPoolKeys()[1];
+        _sellPlainUntilSpotIs(plain, 6000);
         vm.prank(keeper);
         vm.expectRevert();
-        helper.execute(tokenId, debt, _route(Fixtures.liveRecorderPoolKeys()[1], type(uint128).max));
+        helper.execute(tokenId, debt, _route(plain, 0));
         assertEq(market.debtOf(tokenId), debt, "failed sale changed debt");
         _assertEmpty();
     }
@@ -164,7 +173,7 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         _open();
         uint256 debt = market.debtOf(tokenId);
         vm.prank(keeper);
-        vm.expectRevert();
+        vm.expectPartialRevert(MarketLiquidation.PositionIsHealthy.selector);
         helper.execute(tokenId, debt, _route(Fixtures.liveRecorderPoolKeys()[1], 0));
     }
 
@@ -185,7 +194,23 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         bytes memory route = _routeWithSweep(Fixtures.liveRecorderPoolKeys()[1], seizedEth * 95 / 100);
 
         vm.prank(keeper);
-        vm.expectRevert();
+        vm.expectPartialRevert(LiquidatorHelper.ResidualBalance.selector);
+        helper.execute(tokenId, debt, route);
+        assertEq(market.debtOf(tokenId), debt, "failed liquidation changed debt");
+        _assertEmpty();
+    }
+
+    function test_routeReturningUnspentWethToHelperReverts() public {
+        tokenId = Fixtures.POS_WETH_USDG_WIDE_IN_RANGE;
+        borrower = IERC721(RobinhoodChain.POSITION_MANAGER).ownerOf(tokenId);
+        _openWith(10_000e6);
+        _ageUntilUnhealthy();
+        uint256 debt = market.debtOf(tokenId);
+        uint256 seizedWeth = _previewOut0(debt);
+        bytes memory route = _routeWithWethSweep(Fixtures.liveRecorderPoolKeys()[2], seizedWeth * 95 / 100);
+
+        vm.prank(keeper);
+        vm.expectPartialRevert(LiquidatorHelper.ResidualBalance.selector);
         helper.execute(tokenId, debt, route);
         assertEq(market.debtOf(tokenId), debt, "failed liquidation changed debt");
         _assertEmpty();
@@ -283,6 +308,45 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         inputs[1] = abi.encode(address(0), address(helper), uint256(0));
         return abi.encodeCall(
             IUniversalRouter.execute, (abi.encodePacked(uint8(0x10), uint8(0x04)), inputs, block.timestamp + 1 hours)
+        );
+    }
+
+    function _routeWithWethSweep(
+        PoolKey memory key,
+        uint256 amountIn
+    ) private view returns (bytes memory) {
+        bytes memory actions = abi.encodePacked(uint8(0x0b), uint8(0x06), uint8(0x0f));
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(key.currency0, amountIn, false);
+        params[1] = abi.encode(
+            ExactInputSingleParams({
+                poolKey: key, zeroForOne: true, amountIn: 0, amountOutMinimum: 0, minHopPriceX36: 0, hookData: ""
+            })
+        );
+        params[2] = abi.encode(key.currency1, uint256(0));
+        bytes[] memory inputs = new bytes[](2);
+        inputs[0] = abi.encode(actions, params);
+        inputs[1] = abi.encode(RobinhoodChain.WETH, address(helper), uint256(0));
+        return abi.encodeCall(
+            IUniversalRouter.execute, (abi.encodePacked(uint8(0x10), uint8(0x04)), inputs, block.timestamp + 1 hours)
+        );
+    }
+
+    function _sellPlainUntilSpotIs(
+        PoolKey memory key,
+        uint256 bps
+    ) private {
+        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(key.toId());
+        uint160 limit = uint160(FullMath.mulDiv(sqrtPriceX96, Math.sqrt(bps * 1e14), 1e9));
+        PoolSwapTest router = new PoolSwapTest(poolManager);
+        vm.deal(address(this), 1_000_000 ether);
+        router.swap{value: 1_000_000 ether}(
+            key,
+            IPoolManager.SwapParams({
+                zeroForOne: true, amountSpecified: -int256(1_000_000 ether), sqrtPriceLimitX96: limit
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
         );
     }
 
