@@ -137,9 +137,17 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
     ///      is the independent witness: what it gained is the true cost, so the borrower must be
     ///      down by exactly that. The market's USDG is lenders' money and must not move at all —
     ///      a mint that settled out of it, or paid change out of it, shows up here.
+    ///
+    ///      `SWEEP` hands over PositionManager's whole balance of each currency, so tokens already
+    ///      stranded there reach the borrower too. Some are planted, and the borrower's side is
+    ///      measured net of them: a mint that returned change by any other route would miss them.
     function test_returnsWhatTheMintDidNotSpend() public {
         _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
         FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        uint256 strayWeth = 1e15;
+        uint256 strayUsdg = 7e6;
+        deal(RobinhoodChain.WETH, RobinhoodChain.POSITION_MANAGER, strayWeth);
+        deal(RobinhoodChain.USDG, RobinhoodChain.POSITION_MANAGER, strayUsdg);
 
         Balances memory before = _balances();
         _mintAndDeposit(p, 0);
@@ -152,10 +160,24 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         assertLt(wethSpent, WETH_BUDGET, "the WETH maximum should leave change");
         assertLt(usdgSpent, USDG_BUDGET, "the USDG maximum should leave change");
 
-        assertEq(before.borrowerWeth - afterMint.borrowerWeth, wethSpent, "borrower paid other than the WETH cost");
-        assertEq(before.borrowerUsdg - afterMint.borrowerUsdg, usdgSpent, "borrower paid other than the USDG cost");
+        assertEq(
+            before.borrowerWeth - afterMint.borrowerWeth,
+            wethSpent - strayWeth,
+            "borrower paid other than the WETH cost"
+        );
+        assertEq(
+            before.borrowerUsdg - afterMint.borrowerUsdg,
+            usdgSpent - strayUsdg,
+            "borrower paid other than the USDG cost"
+        );
         assertEq(afterMint.marketWeth, before.marketWeth, "WETH was left in the market");
         assertEq(afterMint.marketUsdg, before.marketUsdg, "lenders' USDG moved");
+        assertEq(
+            IERC20(RobinhoodChain.WETH).balanceOf(RobinhoodChain.POSITION_MANAGER), 0, "WETH left in PositionManager"
+        );
+        assertEq(
+            IERC20(RobinhoodChain.USDG).balanceOf(RobinhoodChain.POSITION_MANAGER), 0, "USDG left in PositionManager"
+        );
     }
 
     /// @notice The market grants no allowance to anyone, on either layer.
@@ -251,7 +273,7 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
 
     /// @notice A native-ETH pool spends from `msg.value` and sends the rest back.
     /// @dev ETH is currency0 and never touches Permit2. The market forwards `msg.value` to
-    ///      PositionManager, `SETTLE_PAIR` pays the pool out of it, and `SWEEP` returns what is
+    ///      PositionManager, `SETTLE` pays the pool out of it, and `SWEEP` returns what is
     ///      left straight to the borrower. PoolManager's balance is again the witness. The
     ///      market must hold no more ETH afterwards than before, because ETH left there has no
     ///      way out (§15 no. 12).
