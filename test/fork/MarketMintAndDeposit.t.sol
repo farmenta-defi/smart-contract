@@ -399,15 +399,15 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         _assertNothingMoved(before, nextId);
     }
 
-    /// @notice A vault deposit made from inside the mint is refused, so it cannot be paid out as
-    ///         change.
-    /// @dev ERC-20 change is whatever the market holds above its balance from before the caller
-    ///      paid in, so anything else landing mid-mint would be counted with it. A vault deposit
-    ///      is the one inflow that hands its sender something back: a pool hook that deposits
-    ///      while liquidity is added would end up holding shares, and the minter holding the
-    ///      deposit. The hook passes the §6.1 bit check — that check is about removing liquidity,
-    ///      not adding it — so listing alone would not stop it. `_deposit` refuses re-entry, the
-    ///      hook's call fails, and the whole mint unwinds.
+    /// @notice A vault deposit made from inside the mint is refused.
+    /// @dev The guard dates from when ERC-20 change was whatever the market held above its
+    ///      balance from before the caller paid in: a pool hook depositing while liquidity was
+    ///      added would have kept the shares while the minter was paid the deposit as change.
+    ///      Since FAR-45 the change leaves PositionManager through `SWEEP` and the market's
+    ///      balance plays no part, so that theft is gone either way. `_deposit` still refuses
+    ///      re-entry, because nothing legitimate deposits from inside another market call, and
+    ///      this pins it. The hook passes the §6.1 bit check (that check is about removing
+    ///      liquidity, not adding it); its call fails and the whole mint unwinds.
     function test_aVaultDepositFromInsideTheMintIsRefused() public {
         address hook = address((uint160(0xDEF0) << 144) | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
         deployCodeTo("MarketMintAndDeposit.t.sol:VaultDepositingHook", abi.encode(market), hook);
