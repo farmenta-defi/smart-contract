@@ -156,8 +156,19 @@ contract FarmentaMarket is
     ///      burn. A contract `to` can distort that — redeem vault shares when the ETH lands, or
     ///      pass the ETH straight on. Only its own figure moves and the ledger never reads it,
     ///      but indexers and keepers (§13) must not treat `out0`/`out1` as the amount seized.
+    ///
+    ///      `fullSeizure` is true exactly when the position was burned and its `Loan` deleted
+    ///      (§8 step 4), bad debt or not. Indexers read the branch from it, never from a
+    ///      PositionManager burn in the same transaction, which a later upgrade could add on
+    ///      another path (FAR-51).
     event Liquidate(
-        uint256 indexed tokenId, address indexed liquidator, uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt
+        uint256 indexed tokenId,
+        address indexed liquidator,
+        uint256 repaid,
+        uint256 out0,
+        uint256 out1,
+        uint256 badDebt,
+        bool fullSeizure
     );
     event BadDebtSocialized(uint256 amount);
     event ReservesUpdated(uint256 reserves);
@@ -659,7 +670,7 @@ contract FarmentaMarket is
         (repaid, out0, out1, badDebt) = (outcome.repaid, outcome.out0, outcome.out1, outcome.badDebt);
         emit ReservesUpdated(_marketStorage().reserves);
         if (outcome.socialized != 0) emit BadDebtSocialized(outcome.socialized);
-        emit Liquidate(tokenId, msg.sender, repaid, out0, out1, badDebt);
+        emit Liquidate(tokenId, msg.sender, repaid, out0, out1, badDebt, outcome.fullSeizure);
     }
 
     function debtOf(
