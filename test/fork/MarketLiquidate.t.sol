@@ -1285,8 +1285,9 @@ contract MarketLiquidateForkTest is MarketForkTest {
     }
 
     /// @dev Expects the exact `Liquidate` the next `liquidate(tokenId, max, 0, 0, liquidator)`
-    ///      emits, every topic and field included. The payout is measured, not computed (see the event), so the
-    ///      figures come from a dry run of the same call against the same state.
+    ///      emits, every topic and field included. The payout is measured, not computed (see
+    ///      the event), so the figures come from a dry run of the same call against the same
+    ///      state.
     function _expectLiquidate(
         bool fullSeizure
     ) private {
