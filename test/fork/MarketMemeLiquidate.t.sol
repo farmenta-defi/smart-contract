@@ -39,7 +39,7 @@ import {console} from "forge-std/console.sol";
 ///      fresh. What separates the first two states below is the recorder alone: fresh, the gate
 ///      prices ETH at the TWAP; 901 seconds without an observation, at `spot × 0,8`. The third
 ///      moves the pool with a real swap, 30% down, which is past `crashThreshold`.
-abstract contract FlashDumpForkTestBase is MarketForkTest {
+contract MarketMemeLiquidateForkTest is MarketForkTest {
     uint256 internal constant STALE_AFTER = 900;
 
     address internal lender = address(0x1E4DE2);
@@ -63,6 +63,7 @@ abstract contract FlashDumpForkTestBase is MarketForkTest {
     uint256 private attackEthAfterDump;
     uint256 private attackUsdgBefore;
     uint256 private attackAcquired;
+    uint256 private maxLtvSnapshot;
     int256 private baselinePnl;
     uint256 private reportRepaid;
     uint256 private reportOutEth;
@@ -121,10 +122,9 @@ abstract contract FlashDumpForkTestBase is MarketForkTest {
         vm.prank(liquidator);
         usdg.approve(address(memeMarket), type(uint256).max);
 
-        _ageUntilHealthFactorBelow(_ageTarget());
+        maxLtvSnapshot = vm.snapshotState();
+        _ageUntilHealthFactorBelow(1.02e18);
     }
-
-    function _ageTarget() internal pure virtual returns (uint256);
 
     /* ------------------------------- fresh recorder --------------------------- */
 
@@ -232,6 +232,20 @@ abstract contract FlashDumpForkTestBase is MarketForkTest {
         vm.deal(attacker, 1_000_000 ether);
         deal(address(usdg), attacker, 10_000_000e6);
 
+        for (uint256 i; i < dumpBps.length; ++i) {
+            baselinePnl = _controlRoundTrip(attacker, dumpBps[i], ethPrice);
+            _runFlashDump(attacker, dumpBps[i], ethPrice, debt);
+        }
+    }
+
+    function test_flashDumpReportsMaxLtvEconomics() public {
+        vm.revertToState(maxLtvSnapshot);
+        address attacker = address(0xA77AC);
+        uint256[4] memory dumpBps = [uint256(7400), 6500, 5500, 3500];
+        uint256 ethPrice = memeOracle.price(ETH, key);
+        uint256 debt = memeMarket.debtOf(tokenId);
+        vm.deal(attacker, 1_000_000 ether);
+        deal(address(usdg), attacker, 10_000_000e6);
         for (uint256 i; i < dumpBps.length; ++i) {
             baselinePnl = _controlRoundTrip(attacker, dumpBps[i], ethPrice);
             _runFlashDump(attacker, dumpBps[i], ethPrice, debt);
@@ -469,17 +483,5 @@ abstract contract FlashDumpForkTestBase is MarketForkTest {
                     )
                 ))
         );
-    }
-}
-
-contract MarketMemeLiquidateForkTest is FlashDumpForkTestBase {
-    function _ageTarget() internal pure override returns (uint256) {
-        return 1.02e18;
-    }
-}
-
-contract FlashDumpAtMaxLtvForkTest is FlashDumpForkTestBase {
-    function _ageTarget() internal pure override returns (uint256) {
-        return type(uint256).max;
     }
 }
