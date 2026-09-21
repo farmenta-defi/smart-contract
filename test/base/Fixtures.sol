@@ -47,6 +47,22 @@ library Fixtures {
     PoolId internal constant POOL_MEME_DOPPLER =
         PoolId.wrap(0xc6451046bf06c20295032cf6e05e85bb1ca35fd7aebaf30c59c33350fe3c776e);
 
+    /// @notice Most-liquid initialized meme/USDG pool at ForkTest.FORK_BLOCK.
+    /// @dev The key and id are from the FAR-58 census. Its hook does not set any
+    ///      remove-liquidity permission bits, so it passes the mechanical §6.1 check.
+    PoolId internal constant POOL_MEME_USDG =
+        PoolId.wrap(0x06f331749fa471df6306f9412d7af9727b2877b352070253b834feadf4682a97);
+
+    function memeUsdgKey() internal pure returns (PoolKey memory) {
+        return PoolKey({
+            currency0: Currency.wrap(RobinhoodChain.USDG),
+            currency1: Currency.wrap(0xE5471f395745779D486F7b3f6DEe38542E9Da7Ec),
+            fee: 0x800000,
+            tickSpacing: 200,
+            hooks: IHooks(0xCB4D62A616729d1f27e31F341a1527B77a37F0c4)
+        });
+    }
+
     function memeDopplerKey() internal pure returns (PoolKey memory) {
         return PoolKey({
             currency0: Currency.wrap(0x41F4267525a8AFf329540eF24fD83d9044758B33),
