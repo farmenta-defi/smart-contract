@@ -366,11 +366,11 @@ contract FarmentaMarket is
     ///      maximum reverts inside PositionManager, which is handed the permit's deadline — the
     ///      one the caller signed.
     ///
-    ///      **§4.1 says the change comes back through `SWEEP`; for an ERC-20 leg it cannot.**
-    ///      `SWEEP` sends PositionManager's own balance, while `SETTLE_PAIR` pays an ERC-20 leg
-    ///      straight from this market through Permit2, so that change never leaves the market.
-    ///      Both sweeps are still encoded and return the unspent ETH; ERC-20 change is sent back
-    ///      by `_returnChange`.
+    ///      **The caller's tokens never pass through the market** (FAR-45), as in
+    ///      `increaseLiquidity`. The permit delivers them to PositionManager, which settles each
+    ///      leg out of its own balance and sweeps the rest back. Were they held here while the
+    ///      pool's hook ran, they would count toward `totalAssets`, and a hook redeeming vault
+    ///      shares would be paid at a price the caller's money had inflated.
     function mintAndDeposit(
         MintParams calldata p,
         ISignatureTransfer.PermitBatchTransferFrom calldata permit,
@@ -415,7 +415,7 @@ contract FarmentaMarket is
     ///      market transaction touching a meme pool but `liquidate` does (§5.3). It runs inside
     ///      the library, after the checks above, so a refusal names its own reason.
     ///
-    ///      **The tokens never touch this market, departing from §4.1's `SETTLE_PAIR`.** Permit2
+    ///      **The tokens never touch this market**, as in `mintAndDeposit` (FAR-45). Permit2
     ///      delivers the caller's maxima straight to PositionManager, which settles out of its
     ///      own balance and sweeps the rest back to the caller. Pulled here instead, they would
     ///      sit in `totalAssets` while the pool's hook runs, and a hook holding vault shares
@@ -863,10 +863,10 @@ contract FarmentaMarket is
     ///      makes pausing the only sequencer-downtime lever this chain offers, and continuing
     ///      to accept deposits during one would be the wrong half to leave running.
     ///
-    ///      It also refuses re-entry. `mintAndDeposit` measures its change by balance, so a vault
-    ///      deposit made from inside a mint — a pool hook calling back — would be paid out as the
-    ///      minter's change while the hook kept the shares. Nothing legitimate deposits from
-    ///      inside another market call.
+    ///      It also refuses re-entry: nothing legitimate deposits from inside another market
+    ///      call. The guard was added when `mintAndDeposit` measured its change by balance, and
+    ///      a deposit from a pool hook mid-mint would have been paid out as the minter's change.
+    ///      Mint no longer holds the caller's tokens (FAR-45), but the guard stays.
     function _deposit(
         address caller,
         address receiver,

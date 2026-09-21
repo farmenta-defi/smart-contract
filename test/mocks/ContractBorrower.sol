@@ -64,6 +64,13 @@ contract ContractBorrower is IERC1271 {
         market.increaseLiquidity{value: msg.value}(tokenId, liquidity, amount0Max, amount1Max, permit, "");
     }
 
+    function mint(
+        FarmentaMarket.MintParams calldata p,
+        ISignatureTransfer.PermitBatchTransferFrom calldata permit
+    ) external payable returns (uint256) {
+        return market.mintAndDeposit{value: msg.value}(p, permit, "");
+    }
+
     /// @notice Set by `armReentry`: the position a re-entrant call names when ETH arrives.
     uint256 public reentrantTokenId;
     bool internal reenter;

@@ -24,12 +24,15 @@ import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {Permit2Signer} from "../base/Permit2Signer.sol";
+import {ContractBorrower} from "../mocks/ContractBorrower.sol";
+import {VaultRedeemingHook} from "../mocks/VaultRedeemingHook.sol";
 
 /// @notice Mints positions straight into the market, through the deployed PositionManager
 ///         and Permit2.
 /// @dev What this path gets wrong, it gets wrong quietly: a tokenId read one call too late,
-///      an approval layer left out, change stranded in the market. None of that shows against
-///      a mock, so every test here runs through the real contracts at the pinned block.
+///      change stranded in PositionManager, a pool hook paid out of the borrower's change.
+///      None of that shows against a mock, so every test here runs through the real contracts
+///      at the pinned block.
 contract MarketMintAndDepositForkTest is Permit2Signer {
     uint256 internal constant BORROWER_PK = 0xB0B5EED;
 
@@ -136,9 +139,17 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
     ///      is the independent witness: what it gained is the true cost, so the borrower must be
     ///      down by exactly that. The market's USDG is lenders' money and must not move at all —
     ///      a mint that settled out of it, or paid change out of it, shows up here.
+    ///
+    ///      `SWEEP` hands over PositionManager's whole balance of each currency, so tokens already
+    ///      stranded there reach the borrower too. Some are planted, and the borrower's side is
+    ///      measured net of them: a mint that returned change by any other route would miss them.
     function test_returnsWhatTheMintDidNotSpend() public {
         _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
         FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        uint256 strayWeth = 1e15;
+        uint256 strayUsdg = 7e6;
+        deal(RobinhoodChain.WETH, RobinhoodChain.POSITION_MANAGER, strayWeth);
+        deal(RobinhoodChain.USDG, RobinhoodChain.POSITION_MANAGER, strayUsdg);
 
         Balances memory before = _balances();
         _mintAndDeposit(p, 0);
@@ -151,36 +162,74 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         assertLt(wethSpent, WETH_BUDGET, "the WETH maximum should leave change");
         assertLt(usdgSpent, USDG_BUDGET, "the USDG maximum should leave change");
 
-        assertEq(before.borrowerWeth - afterMint.borrowerWeth, wethSpent, "borrower paid other than the WETH cost");
-        assertEq(before.borrowerUsdg - afterMint.borrowerUsdg, usdgSpent, "borrower paid other than the USDG cost");
+        assertEq(
+            before.borrowerWeth - afterMint.borrowerWeth,
+            wethSpent - strayWeth,
+            "borrower paid other than the WETH cost"
+        );
+        assertEq(
+            before.borrowerUsdg - afterMint.borrowerUsdg,
+            usdgSpent - strayUsdg,
+            "borrower paid other than the USDG cost"
+        );
         assertEq(afterMint.marketWeth, before.marketWeth, "WETH was left in the market");
         assertEq(afterMint.marketUsdg, before.marketUsdg, "lenders' USDG moved");
+        assertEq(
+            IERC20(RobinhoodChain.WETH).balanceOf(RobinhoodChain.POSITION_MANAGER), 0, "WETH left in PositionManager"
+        );
+        assertEq(
+            IERC20(RobinhoodChain.USDG).balanceOf(RobinhoodChain.POSITION_MANAGER), 0, "USDG left in PositionManager"
+        );
     }
 
-    /// @notice Both approval layers are granted the first time a token is minted with, then left
-    ///         standing.
-    /// @dev The pattern §4.1 specifies and `test/base/PositionMinter.sol` proves: the token
-    ///      approves Permit2, and Permit2 approves PositionManager for the maximum with the
-    ///      longest expiry. The allowance is read at the §18 Permit2 address, which also shows
-    ///      PositionManager pays through that one. A second mint with the same tokens approves
-    ///      nothing.
-    function test_approvesEachLayerOncePerToken() public {
+    /// @notice The market grants no allowance to anyone, on either layer.
+    /// @dev Replaces the test that pinned both approval layers (FAR-45). Mint used to settle from
+    ///      the market, which needed token → Permit2 → PositionManager at the maximum; it now
+    ///      pays PositionManager directly, as `increaseLiquidity` does. An allowance appearing
+    ///      here would mean the market became a payer again, the design that let a hook redeem
+    ///      at a price the borrower's tokens had inflated.
+    function test_grantsNoAllowance() public {
         _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
         FarmentaMarket.MintParams memory p = _inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
-        _mintAndDeposit(p, 0);
-
-        _assertStandingApproval(RobinhoodChain.WETH);
-        _assertStandingApproval(RobinhoodChain.USDG);
-
-        deal(RobinhoodChain.WETH, borrower, WETH_BUDGET);
-        deal(RobinhoodChain.USDG, borrower, USDG_BUDGET);
-        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 1);
+        (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) = _signedPermit(p, 0);
 
         vm.expectCall(RobinhoodChain.PERMIT2, abi.encodeWithSelector(IAllowanceTransfer.approve.selector), 0);
         vm.expectCall(RobinhoodChain.WETH, abi.encodeWithSelector(IERC20.approve.selector), 0);
         vm.expectCall(RobinhoodChain.USDG, abi.encodeWithSelector(IERC20.approve.selector), 0);
         vm.prank(borrower);
         market.mintAndDeposit(p, permit, signature);
+
+        for (uint256 i; i < 2; ++i) {
+            address token = i == 0 ? RobinhoodChain.WETH : RobinhoodChain.USDG;
+            assertEq(IERC20(token).allowance(address(market), RobinhoodChain.PERMIT2), 0, "token -> Permit2 allowance");
+            (uint160 allowed,,) = IAllowanceTransfer(RobinhoodChain.PERMIT2)
+                .allowance(address(market), token, RobinhoodChain.POSITION_MANAGER);
+            assertEq(allowed, 0, "Permit2 -> PositionManager allowance");
+        }
+    }
+
+    /// @notice Even with both approval layers standing, the market never pays for a mint.
+    /// @dev A proxy upgraded from the implementation before FAR-45 keeps the allowances its old
+    ///      mints granted: `token → Permit2 → PositionManager` at the maximum. `SETTLE` with
+    ///      `payerIsUser = true` would then draw a leg from lenders' cash through Permit2.
+    ///      Nothing here is a payer, so the market's balances do not move.
+    function test_aStandingAllowanceStillDoesNotLetTheMarketPay() public {
+        _listPool(wethKey, TierPresets.blueChip().minPositionUsd, 0);
+        vm.startPrank(address(market));
+        IERC20(RobinhoodChain.WETH).approve(RobinhoodChain.PERMIT2, type(uint256).max);
+        IERC20(RobinhoodChain.USDG).approve(RobinhoodChain.PERMIT2, type(uint256).max);
+        IAllowanceTransfer(RobinhoodChain.PERMIT2)
+            .approve(RobinhoodChain.WETH, RobinhoodChain.POSITION_MANAGER, type(uint160).max, type(uint48).max);
+        IAllowanceTransfer(RobinhoodChain.PERMIT2)
+            .approve(RobinhoodChain.USDG, RobinhoodChain.POSITION_MANAGER, type(uint160).max, type(uint48).max);
+        vm.stopPrank();
+
+        Balances memory before = _balances();
+        _mintAndDeposit(_inRange(wethKey, LIQUIDITY, WETH_BUDGET, USDG_BUDGET), 0);
+        Balances memory afterMint = _balances();
+
+        assertEq(afterMint.marketUsdg, before.marketUsdg, "lenders' USDG paid for the mint");
+        assertEq(afterMint.marketWeth, before.marketWeth, "the market's WETH paid for the mint");
     }
 
     /// @notice Minting in ends in the same state as depositing an equivalent position.
@@ -226,7 +275,7 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
 
     /// @notice A native-ETH pool spends from `msg.value` and sends the rest back.
     /// @dev ETH is currency0 and never touches Permit2. The market forwards `msg.value` to
-    ///      PositionManager, `SETTLE_PAIR` pays the pool out of it, and `SWEEP` returns what is
+    ///      PositionManager, `SETTLE` pays the pool out of it, and `SWEEP` returns what is
     ///      left straight to the borrower. PoolManager's balance is again the witness. The
     ///      market must hold no more ETH afterwards than before, because ETH left there has no
     ///      way out (§15 no. 12).
@@ -265,6 +314,28 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
 
         assertEq(nft.ownerOf(tokenId), address(market), "market does not own the position");
         assertEq(market.loanOf(tokenId).owner, borrower, "caller not recorded");
+    }
+
+    /// @notice §4.1 v0.26: the borrow asset leaves first, so a borrower that is a contract already
+    ///         holds its USDG change when the ETH change first runs its code.
+    /// @dev Swept in pool order, the ETH (`currency0`) would go first, and the contract would see
+    ///      none of its USDG change: the whole USDG maximum was sent to PositionManager.
+    function test_theUsdgChangeLeavesBeforeTheEth() public {
+        PoolKey memory ethKey = _keyOf(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        _listPool(ethKey, TierPresets.blueChip().minPositionUsd, 0);
+        ContractBorrower caller = new ContractBorrower(market);
+        caller.approve(RobinhoodChain.USDG, RobinhoodChain.PERMIT2);
+        deal(RobinhoodChain.USDG, address(caller), USDG_BUDGET);
+        uint256 ethBudget = 10 ether;
+        vm.deal(address(this), ethBudget);
+
+        FarmentaMarket.MintParams memory p = _inRange(ethKey, 10 * LIQUIDITY, ethBudget, USDG_BUDGET);
+        caller.mint{value: ethBudget}(p, _permitFor(p, 0, block.timestamp + 1 hours));
+
+        uint256 usdgChange = IERC20(RobinhoodChain.USDG).balanceOf(address(caller));
+        assertEq(caller.ethArrivals(), 1, "the ETH change should arrive once");
+        assertGt(usdgChange, 0, "the USDG maximum should leave change");
+        assertEq(caller.usdgOnEthArrival(), usdgChange, "the USDG change had not arrived when the ETH did");
     }
 
     /// @notice An ETH leg that would cost more than `amount0Max` reverts, and the ETH comes back.
@@ -352,15 +423,15 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         _assertNothingMoved(before, nextId);
     }
 
-    /// @notice A vault deposit made from inside the mint is refused, so it cannot be paid out as
-    ///         change.
-    /// @dev ERC-20 change is whatever the market holds above its balance from before the caller
-    ///      paid in, so anything else landing mid-mint would be counted with it. A vault deposit
-    ///      is the one inflow that hands its sender something back: a pool hook that deposits
-    ///      while liquidity is added would end up holding shares, and the minter holding the
-    ///      deposit. The hook passes the §6.1 bit check — that check is about removing liquidity,
-    ///      not adding it — so listing alone would not stop it. `_deposit` refuses re-entry, the
-    ///      hook's call fails, and the whole mint unwinds.
+    /// @notice A vault deposit made from inside the mint is refused.
+    /// @dev The guard dates from when ERC-20 change was whatever the market held above its
+    ///      balance from before the caller paid in: a pool hook depositing while liquidity was
+    ///      added would have kept the shares while the minter was paid the deposit as change.
+    ///      Since FAR-45 the change leaves PositionManager through `SWEEP` and the market's
+    ///      balance plays no part, so that theft is gone either way. `_deposit` still refuses
+    ///      re-entry, because nothing legitimate deposits from inside another market call, and
+    ///      this pins it. The hook passes the §6.1 bit check (that check is about removing
+    ///      liquidity, not adding it); its call fails and the whole mint unwinds.
     function test_aVaultDepositFromInsideTheMintIsRefused() public {
         address hook = address((uint160(0xDEF0) << 144) | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
         deployCodeTo("MarketMintAndDeposit.t.sol:VaultDepositingHook", abi.encode(market), hook);
@@ -387,6 +458,45 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         market.mintAndDeposit(p, permit, signature);
 
         _assertNothingMoved(before, nextId);
+    }
+
+    /// @notice A hook that redeems its vault shares from inside the mint gets exactly what they
+    ///         were worth, and the borrower pays nothing for it.
+    /// @dev §4.1 v0.26: every market function that calls out must survive a vault exit from
+    ///      inside the call. The hook passes the §6.1 bit check, which is about removing
+    ///      liquidity, not adding it. When the borrower's tokens were pulled into the market
+    ///      they counted toward `totalAssets` while the hook ran: shares worth 20,000 USDG
+    ///      redeemed for 48,571, and the borrower's change paid the difference (FAR-45). The
+    ///      tokens now go straight to PositionManager, so the share price the hook sees is the
+    ///      one everyone else sees.
+    ///
+    ///      The pool is listed with the hook allowlisted, then the hook deposits: a hook with no
+    ///      shares does nothing, so the order only decides when the redeem arms.
+    function test_aRedeemFromInsideTheHookGainsNothing() public {
+        address hook = address((uint160(0xDEF1) << 144) | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
+        deployCodeTo("VaultRedeemingHook.sol:VaultRedeemingHook", abi.encode(market), hook);
+        PoolKey memory key = _initPool(hook);
+        _listPool(key, TierPresets.blueChip().minPositionUsd, 0);
+
+        deal(RobinhoodChain.USDG, hook, 20_000e6);
+        VaultRedeemingHook(hook).deposit(20_000e6);
+        uint256 fair = market.previewRedeem(market.balanceOf(hook));
+
+        FarmentaMarket.MintParams memory p = _inRange(key, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        uint256 strayUsdg = IERC20(RobinhoodChain.USDG).balanceOf(RobinhoodChain.POSITION_MANAGER);
+        Balances memory before = _balances();
+        _mintAndDeposit(p, 0);
+        Balances memory afterMint = _balances();
+
+        uint256 redeemed = VaultRedeemingHook(hook).redeemed();
+        assertGt(redeemed, 0, "the redeem must actually run inside the mint");
+        assertLe(redeemed, fair, "a share redeemed mid-mint is worth more than before it");
+
+        uint256 usdgSpent = afterMint.poolManagerUsdg - before.poolManagerUsdg;
+        assertEq(
+            before.borrowerUsdg - afterMint.borrowerUsdg, usdgSpent - strayUsdg, "the borrower paid for the redemption"
+        );
+        assertEq(afterMint.marketUsdg, before.marketUsdg - redeemed, "the market paid out more than the redeem");
     }
 
     /// @notice A position worth less than the floor is refused, however it was made.
@@ -507,24 +617,6 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         assertEq(now_.marketUsdg, before.marketUsdg, "the market's USDG moved");
         assertEq(now_.poolManagerWeth, before.poolManagerWeth, "WETH reached the pool");
         assertEq(now_.poolManagerUsdg, before.poolManagerUsdg, "USDG reached the pool");
-    }
-
-    /// @dev Both layers of the settle approval stand at the maximum, and the inner one never
-    ///      expires. The token layer is allowed to have been drawn down by the mint that set it:
-    ///      this chain's USDG decrements even an unlimited allowance (WETH does not), while
-    ///      Permit2 never does.
-    function _assertStandingApproval(
-        address token
-    ) internal view {
-        assertGe(
-            IERC20(token).allowance(address(market), RobinhoodChain.PERMIT2),
-            type(uint256).max - type(uint128).max,
-            "token -> Permit2 is not standing at the maximum"
-        );
-        (uint160 amount, uint48 expiration,) = IAllowanceTransfer(RobinhoodChain.PERMIT2)
-            .allowance(address(market), token, RobinhoodChain.POSITION_MANAGER);
-        assertEq(amount, type(uint160).max, "Permit2 -> PositionManager is not the maximum");
-        assertEq(expiration, type(uint48).max, "Permit2 -> PositionManager expires");
     }
 
     /// @dev A range ten spacings either side of the oracle price, with the given maxima.

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -23,8 +21,6 @@ import {MarketLedger} from "./MarketLedger.sol";
 /// @notice Linked mint-and-custody execution for `FarmentaMarket`.
 /// @dev Runs by delegatecall and records collateral in the calling market's ERC-7201 layout.
 library MarketMint {
-    using SafeERC20 for IERC20;
-
     event CollateralDeposited(uint256 indexed tokenId, address indexed owner, PoolId indexed poolId);
     event LiquidityChanged(uint256 indexed tokenId, PoolId indexed poolId, int256 liqDelta);
 
@@ -70,35 +66,26 @@ library MarketMint {
     ) external returns (uint256 tokenId) {
         MarketDebt.accrue(env.debt);
 
-        uint256 firstLeg = _firstLeg(p.poolKey, p.amount0Max);
-        ISignatureTransfer.SignatureTransferDetails[] memory transfers =
-            _transfersFor(p.poolKey, p.amount0Max, p.amount1Max, permit, firstLeg, address(this));
-        // Read Permit2 from PositionManager rather than configuration: the allowance must sit
-        // on the instance it uses, so the two addresses cannot drift apart.
+        ISignatureTransfer.SignatureTransferDetails[] memory transfers = _transfersFor(
+            p.poolKey,
+            p.amount0Max,
+            p.amount1Max,
+            permit,
+            _firstLeg(p.poolKey, p.amount0Max),
+            address(env.positionManager)
+        );
+        // Read Permit2 from PositionManager rather than configuration, so the two addresses
+        // cannot drift apart.
         IPermit2 permit2 = IPermit2(address(Permit2Forwarder(address(env.positionManager)).permit2()));
-
-        uint256[2] memory held;
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency,) = _leg(p, i);
-            held[i] = IERC20(Currency.unwrap(currency)).balanceOf(address(this));
-        }
-
         permit2.permitTransferFrom(permit, transfers, msg.sender, signature);
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency, uint128 amountMax) = _leg(p, i);
-            _allowPositionManager(env.positionManager, permit2, currency, amountMax);
-        }
 
         // `modifyLiquidities` returns no id. PositionManager assigns `nextTokenId`, then
         // increments it while locked, so reading before minting identifies this position.
         tokenId = env.positionManager.nextTokenId();
-        env.positionManager.modifyLiquidities{value: msg.value}(_mintActions(p), permit.deadline);
+        env.positionManager.modifyLiquidities{value: msg.value}(
+            _mintActions(p, address(env.debt.asset)), permit.deadline
+        );
         _acceptCollateral(env, msg.sender, tokenId);
-
-        for (uint256 i = firstLeg; i < 2; ++i) {
-            (Currency currency,) = _leg(p, i);
-            _returnChange(currency, held[i]);
-        }
     }
 
     /// @dev Adds liquidity to a recorded position, having first claimed the fees it holds. The
@@ -197,14 +184,6 @@ library MarketMint {
         emit CollateralDeposited(tokenId, depositor, poolId);
     }
 
-    function _leg(
-        Params calldata p,
-        uint256 i
-    ) private pure returns (Currency currency, uint128 amountMax) {
-        if (i == 0) return (p.poolKey.currency0, p.amount0Max);
-        return (p.poolKey.currency1, p.amount1Max);
-    }
-
     /// @dev ETH can only be currency0 because `address(0)` sorts first. It arrives as
     ///      `msg.value`, so a native pool has one ERC-20 leg and an ERC-20 pair has two, and the
     ///      value sent must be the ETH maximum for a native pool and nothing otherwise.
@@ -239,37 +218,34 @@ library MarketMint {
         }
     }
 
-    function _allowPositionManager(
-        IPositionManager positionManager,
-        IPermit2 permit2,
-        Currency currency,
-        uint256 amount
-    ) private {
-        IERC20 token = IERC20(Currency.unwrap(currency));
-        if (token.allowance(address(this), address(permit2)) < amount) {
-            token.forceApprove(address(permit2), type(uint256).max);
-        }
-
-        (uint160 allowed, uint48 expiration,) =
-            permit2.allowance(address(this), address(token), address(positionManager));
-        if (allowed != type(uint160).max || expiration != type(uint48).max) {
-            permit2.approve(address(token), address(positionManager), type(uint160).max, type(uint48).max);
-        }
-    }
-
+    /// @dev PositionManager pays each leg's debt out of its own balance (`payerIsUser = false`),
+    ///      which is what Permit2 just delivered plus `msg.value`, then sweeps whatever is left of
+    ///      each currency back to the caller. The market is never a payer and holds none of the
+    ///      caller's tokens while the pool's hook runs, so the share price a hook can redeem at
+    ///      is the one everyone else sees (FAR-45). The borrow asset is swept first (§4.1 v0.26),
+    ///      as in `_increaseActions`.
     function _mintActions(
-        Params calldata p
+        Params calldata p,
+        address asset
     ) private view returns (bytes memory) {
         bytes memory actions = abi.encodePacked(
-            uint8(Actions.MINT_POSITION), uint8(Actions.SETTLE_PAIR), uint8(Actions.SWEEP), uint8(Actions.SWEEP)
+            uint8(Actions.MINT_POSITION),
+            uint8(Actions.SETTLE),
+            uint8(Actions.SETTLE),
+            uint8(Actions.SWEEP),
+            uint8(Actions.SWEEP)
         );
-        bytes[] memory params = new bytes[](4);
+        (Currency first, Currency second) = Currency.unwrap(p.poolKey.currency1) == asset
+            ? (p.poolKey.currency1, p.poolKey.currency0)
+            : (p.poolKey.currency0, p.poolKey.currency1);
+        bytes[] memory params = new bytes[](5);
         params[0] = abi.encode(
             p.poolKey, p.tickLower, p.tickUpper, p.liquidity, p.amount0Max, p.amount1Max, address(this), p.hookData
         );
-        params[1] = abi.encode(p.poolKey.currency0, p.poolKey.currency1);
-        params[2] = abi.encode(p.poolKey.currency0, msg.sender);
-        params[3] = abi.encode(p.poolKey.currency1, msg.sender);
+        params[1] = abi.encode(p.poolKey.currency0, ActionConstants.OPEN_DELTA, false);
+        params[2] = abi.encode(p.poolKey.currency1, ActionConstants.OPEN_DELTA, false);
+        params[3] = abi.encode(first, msg.sender);
+        params[4] = abi.encode(second, msg.sender);
         return abi.encode(actions, params);
     }
 
@@ -318,14 +294,5 @@ library MarketMint {
         params[6] = abi.encode(first, msg.sender);
         params[7] = abi.encode(second, msg.sender);
         return abi.encode(actions, params);
-    }
-
-    function _returnChange(
-        Currency currency,
-        uint256 held
-    ) private {
-        IERC20 token = IERC20(Currency.unwrap(currency));
-        uint256 change = token.balanceOf(address(this)) - held;
-        if (change != 0) token.safeTransfer(msg.sender, change);
     }
 }
