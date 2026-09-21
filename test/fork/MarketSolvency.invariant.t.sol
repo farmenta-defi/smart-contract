@@ -150,6 +150,11 @@ contract MarketHandler is Test {
     /// @dev The fork holds no swaps between calls, so after the first claim the fees are zero. What
     ///      this exercises is the post-condition on every claim the fuzzer reaches, at whatever debt and
     ///      index the other actions left.
+    ///
+    ///      That also means no claim here can be one the market must refuse: with nothing to release,
+    ///      a claim cannot lower the health factor. Removing `requireHealthy` from `collectFees` leaves
+    ///      `invariant_aClaimNeverLeavesThePositionUnhealthy` green (FAR-59). `MarketCollectFees.t.sol`
+    ///      guards that check; this ghost needs a swap between claims before it can fire.
     function collectFees() external {
         vm.prank(borrower);
         market.collectFees(tokenId, FEE_RECIPIENT);
