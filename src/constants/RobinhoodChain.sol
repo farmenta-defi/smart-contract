@@ -9,9 +9,9 @@ pragma solidity 0.8.26;
 ///      whose truncation matched. `test/fork/Addresses.t.sol` asks each address on-chain
 ///      what it is; `make addresses` runs it.
 ///
-///      Only addresses something actually uses live here. The V4Quoter, UniversalRouter,
-///      and Morpho Blue entries are used by the liquidator periphery; the BTC/USD and
-///      USDC/USD feeds remain intentionally omitted because they are not protocol dependencies.
+///      The V4Quoter is used by off-chain route construction. UniversalRouter and Morpho Blue
+///      are the default deployments for FAR-56 wiring; the BTC/USD and USDC/USD feeds remain
+///      intentionally omitted because they are not protocol dependencies.
 library RobinhoodChain {
     uint256 internal constant CHAIN_ID = 4663;
 

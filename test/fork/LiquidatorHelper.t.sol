@@ -24,8 +24,6 @@ interface IUniversalRouter {
 
 contract LiquidatorHelperForkTest is MarketForkTest {
     uint256 internal constant CONTRACT_BALANCE = 1 << 255;
-    uint256 internal constant OPEN_DELTA = 1 << 255;
-
     address internal lender = address(0x1E4DE2);
     address internal keeper = address(0xBEEF17);
     uint256 internal tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
@@ -64,7 +62,6 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         vm.prank(keeper);
         helper.execute(tokenId, repayAmount, _route(plain, 0));
 
-        assertGt(usdg.balanceOf(keeper), 0, "profit did not reach keeper");
         _assertEmpty();
         assertEq(IERC721(RobinhoodChain.POSITION_MANAGER).ownerOf(tokenId), address(market));
     }
@@ -93,23 +90,124 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         _assertEmpty();
     }
 
+    function test_donatedFeesAtCloseFactorAreRejectedAsUnderfunded() public {
+        _open();
+        _donate(0.1 ether);
+        _ageUntilUnhealthy();
+
+        uint256 debt = market.debtOf(tokenId);
+        address probe = address(0xCAFE17);
+        deal(address(usdg), probe, 1_000_000e6);
+        vm.startPrank(probe);
+        usdg.approve(address(market), type(uint256).max);
+        vm.expectRevert();
+        market.liquidate(tokenId, debt / 2, 0, 0, probe);
+        vm.stopPrank();
+    }
+
     function test_zeroRepaymentBudgetRevertsBeforeFlashLoan() public {
         vm.prank(keeper);
         vm.expectRevert(LiquidatorHelper.ZeroRepayAmount.selector);
         helper.execute(tokenId, 0, "");
     }
 
+    function test_repayBelowCloseFactorStillCoversProtocolFee() public {
+        _open();
+        _ageUntilUnhealthy();
+        uint256 repayAmount = market.debtOf(tokenId) / 4;
+        vm.prank(keeper);
+        helper.execute(tokenId, repayAmount, _route(Fixtures.liveRecorderPoolKeys()[1], 0));
+        assertGt(usdg.balanceOf(keeper), 0, "profit did not reach keeper");
+        _assertEmpty();
+    }
+
+    function test_onlyMorphoCanInvokeTheCallback() public {
+        vm.expectRevert(abi.encodeWithSelector(LiquidatorHelper.UnauthorizedMorpho.selector, address(this)));
+        helper.onMorphoFlashLoan(1, "");
+    }
+
+    function test_erc20CollateralIsPushedToTheRouter() public {
+        tokenId = Fixtures.POS_WETH_USDG_WIDE_IN_RANGE;
+        borrower = IERC721(RobinhoodChain.POSITION_MANAGER).ownerOf(tokenId);
+        _openWith(10_000e6);
+        _ageUntilUnhealthy();
+
+        uint256 repayAmount = market.debtOf(tokenId);
+        vm.prank(keeper);
+        helper.execute(tokenId, repayAmount, _route(_keyOf(tokenId), 0));
+
+        _assertEmpty();
+        assertEq(IERC20(RobinhoodChain.WETH).balanceOf(RobinhoodChain.UNIVERSAL_ROUTER), 0);
+    }
+
+    function test_unreachableMinOutReverts() public {
+        _open();
+        _ageUntilUnhealthy();
+        uint256 debt = market.debtOf(tokenId);
+        vm.prank(keeper);
+        vm.expectRevert();
+        helper.execute(tokenId, debt, _route(Fixtures.liveRecorderPoolKeys()[1], type(uint128).max));
+    }
+
+    function test_saleThatCannotRepayTheFlashLoanRevertsAtomically() public {
+        _open();
+        _ageUntilUnhealthy();
+        uint256 debt = market.debtOf(tokenId);
+        vm.prank(keeper);
+        vm.expectRevert();
+        helper.execute(tokenId, debt, _route(Fixtures.liveRecorderPoolKeys()[1], type(uint128).max));
+        assertEq(market.debtOf(tokenId), debt, "failed sale changed debt");
+        _assertEmpty();
+    }
+
+    function test_healthyPositionRevertsThroughMarket() public {
+        _open();
+        uint256 debt = market.debtOf(tokenId);
+        vm.prank(keeper);
+        vm.expectRevert();
+        helper.execute(tokenId, debt, _route(Fixtures.liveRecorderPoolKeys()[1], 0));
+    }
+
+    function test_marketAllowanceIsClearedAfterExecution() public {
+        _open();
+        _ageUntilUnhealthy();
+        uint256 debt = market.debtOf(tokenId);
+        vm.prank(keeper);
+        helper.execute(tokenId, debt, _route(Fixtures.liveRecorderPoolKeys()[1], 0));
+        assertEq(usdg.allowance(address(helper), address(market)), 0);
+    }
+
+    function test_routeReturningUnspentEthToHelperReverts() public {
+        _open();
+        _ageUntilUnhealthy();
+        uint256 debt = market.debtOf(tokenId);
+        uint256 seizedEth = _previewOut0(debt);
+        bytes memory route = _routeWithSweep(Fixtures.liveRecorderPoolKeys()[1], seizedEth * 95 / 100);
+
+        vm.prank(keeper);
+        vm.expectRevert();
+        helper.execute(tokenId, debt, route);
+        assertEq(market.debtOf(tokenId), debt, "failed liquidation changed debt");
+        _assertEmpty();
+    }
+
     function _open() private {
+        _openWith(300e6);
+    }
+
+    function _openWith(
+        uint256 lenderCash
+    ) private {
         _listPoolOf(tokenId, 50e18);
         vm.startPrank(borrower);
         IERC721(RobinhoodChain.POSITION_MANAGER).approve(address(market), tokenId);
         market.depositCollateral(tokenId);
         vm.stopPrank();
 
-        deal(address(usdg), lender, 300e6);
+        deal(address(usdg), lender, lenderCash);
         vm.startPrank(lender);
         usdg.approve(address(market), type(uint256).max);
-        market.deposit(300e6, lender);
+        market.deposit(lenderCash, lender);
         vm.stopPrank();
 
         uint256 amount = lens.maxBorrow(tokenId);
@@ -164,6 +262,41 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         inputs[0] = abi.encode(actions, params);
         return
             abi.encodeCall(IUniversalRouter.execute, (abi.encodePacked(uint8(0x10)), inputs, block.timestamp + 1 hours));
+    }
+
+    function _routeWithSweep(
+        PoolKey memory key,
+        uint256 amountIn
+    ) private view returns (bytes memory) {
+        bytes memory actions = abi.encodePacked(uint8(0x0b), uint8(0x06), uint8(0x0f));
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(key.currency0, amountIn, false);
+        params[1] = abi.encode(
+            ExactInputSingleParams({
+                poolKey: key, zeroForOne: true, amountIn: 0, amountOutMinimum: 0, minHopPriceX36: 0, hookData: ""
+            })
+        );
+        params[2] = abi.encode(key.currency1, uint256(0));
+
+        bytes[] memory inputs = new bytes[](2);
+        inputs[0] = abi.encode(actions, params);
+        inputs[1] = abi.encode(address(0), address(helper), uint256(0));
+        return abi.encodeCall(
+            IUniversalRouter.execute, (abi.encodePacked(uint8(0x10), uint8(0x04)), inputs, block.timestamp + 1 hours)
+        );
+    }
+
+    function _previewOut0(
+        uint256 repayAmount
+    ) private returns (uint256 out0) {
+        uint256 snap = vm.snapshotState();
+        address probe = address(0x9807BE);
+        deal(address(usdg), probe, 1_000_000e6);
+        vm.startPrank(probe);
+        usdg.approve(address(market), type(uint256).max);
+        (, out0,,) = market.liquidate(tokenId, repayAmount, 0, 0, probe);
+        vm.stopPrank();
+        vm.revertToState(snap);
     }
 
     function _assertEmpty() private view {

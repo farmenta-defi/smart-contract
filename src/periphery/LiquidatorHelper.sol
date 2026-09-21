@@ -39,7 +39,9 @@ interface ILiquidationMarket {
 /// @dev `swapCalldata` is assembled off-chain and carries its own minimum output. The helper
 ///      pushes the complete seized balance to UniversalRouter; the route must use
 ///      `SETTLE(..., CONTRACT_BALANCE, false)` and `OPEN_DELTA` so small price movements do not
-///      turn a valid liquidation into a residual-balance revert.
+///      turn a valid liquidation into a residual-balance revert. Any collateral the route does
+///      not consume remains in UniversalRouter, where it can be swept by anyone, so keeper routes
+///      must consume or explicitly sweep their complete input balance.
 contract LiquidatorHelper {
     using SafeERC20 for IERC20;
 
