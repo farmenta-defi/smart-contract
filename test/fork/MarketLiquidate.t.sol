@@ -235,7 +235,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
         uint256 debt = market.debtOf(tokenId);
         vm.expectEmit(true, true, true, false, address(market));
-        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0);
+        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0, false);
         vm.prank(liquidator);
         (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
 
@@ -251,7 +251,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertGt(lens.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
 
         vm.expectEmit(true, true, true, false, address(market));
-        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0);
+        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0, false);
         vm.prank(liquidator);
         market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
     }
