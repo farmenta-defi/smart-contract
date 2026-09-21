@@ -750,6 +750,21 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertEq(market.loanOf(tokenId).owner, borrower, "and the loan must survive it");
     }
 
+    /// @notice FAR-51: the full branch says so, and the flag is the only thing in the event
+    ///         that does. `badDebt` is not a stand-in for it: see the next test.
+    function test_aFullSeizureWithBadDebtEmitsTheFlagTrue() public {
+        _open(0);
+        _fundLiquidator(2000e6);
+        _dropEthPrice(1200e18);
+
+        _expectLiquidate(true);
+        vm.prank(liquidator);
+        (,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(badDebt, 0, "this test needs the full branch with a shortfall");
+        assertEq(market.loanOf(tokenId).owner, address(0), "and the loan must be gone");
+    }
+
     /* -------------------------------- reentrancy ------------------------------ */
 
     /// @notice A lender that liquidates into its own address and redeems from inside the ETH
