@@ -24,6 +24,7 @@ import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {Permit2Signer} from "../base/Permit2Signer.sol";
+import {ContractBorrower} from "../mocks/ContractBorrower.sol";
 import {VaultRedeemingHook} from "../mocks/VaultRedeemingHook.sol";
 
 /// @notice Mints positions straight into the market, through the deployed PositionManager
@@ -312,6 +313,28 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
 
         assertEq(nft.ownerOf(tokenId), address(market), "market does not own the position");
         assertEq(market.loanOf(tokenId).owner, borrower, "caller not recorded");
+    }
+
+    /// @notice §4.1 v0.26: the borrow asset leaves first, so a borrower that is a contract already
+    ///         holds its USDG change when the ETH change first runs its code.
+    /// @dev Swept in pool order, the ETH (`currency0`) would go first, and the contract would see
+    ///      none of its USDG change: the whole USDG maximum was sent to PositionManager.
+    function test_theUsdgChangeLeavesBeforeTheEth() public {
+        PoolKey memory ethKey = _keyOf(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        _listPool(ethKey, TierPresets.blueChip().minPositionUsd, 0);
+        ContractBorrower caller = new ContractBorrower(market);
+        caller.approve(RobinhoodChain.USDG, RobinhoodChain.PERMIT2);
+        deal(RobinhoodChain.USDG, address(caller), USDG_BUDGET);
+        uint256 ethBudget = 10 ether;
+        vm.deal(address(this), ethBudget);
+
+        FarmentaMarket.MintParams memory p = _inRange(ethKey, 10 * LIQUIDITY, ethBudget, USDG_BUDGET);
+        caller.mint{value: ethBudget}(p, _permitFor(p, 0, block.timestamp + 1 hours));
+
+        uint256 usdgChange = IERC20(RobinhoodChain.USDG).balanceOf(address(caller));
+        assertEq(caller.ethArrivals(), 1, "the ETH change should arrive once");
+        assertGt(usdgChange, 0, "the USDG maximum should leave change");
+        assertEq(caller.usdgOnEthArrival(), usdgChange, "the USDG change had not arrived when the ETH did");
     }
 
     /// @notice An ETH leg that would cost more than `amount0Max` reverts, and the ETH comes back.
