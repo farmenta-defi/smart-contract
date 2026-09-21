@@ -678,6 +678,23 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertFalse(_emitted(keccak256("BadDebtSocialized(uint256)")), "and nothing is socialized");
     }
 
+    /* --------------------------------- the event ------------------------------ */
+
+    /// @notice FAR-51: a partial seizure says so. The position stays in custody, so an indexer
+    ///         reading the flag keeps the loan open.
+    function test_aPartialSeizureEmitsTheFlagFalse() public {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        _expectLiquidate(false);
+        vm.prank(liquidator);
+        (,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertEq(badDebt, 0, "this test needs the partial branch");
+        assertEq(market.loanOf(tokenId).owner, borrower, "and the loan must survive it");
+    }
+
     /* -------------------------------- reentrancy ------------------------------ */
 
     /// @notice A lender that liquidates into its own address and redeems from inside the ETH
@@ -1219,6 +1236,24 @@ contract MarketLiquidateForkTest is MarketForkTest {
         vm.prank(liquidator);
         (, out0, out1,) = market.liquidate(tokenId, repayAmount, 0, 0, liquidator);
         vm.revertToState(snapshot);
+    }
+
+    /// @dev Expects the exact `Liquidate` the next `liquidate(tokenId, max, 0, 0, liquidator)`
+    ///      emits, every topic and field included. The payout is measured, not computed (see the event), so the
+    ///      figures come from a dry run of the same call against the same state.
+    function _expectLiquidate(
+        bool fullSeizure
+    ) private {
+        uint256 snapshot = vm.snapshotState();
+        vm.prank(liquidator);
+        (uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt) =
+            market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+        vm.revertToState(snapshot);
+
+        vm.expectEmit(true, true, true, true, address(market));
+        emit FarmentaMarket.Liquidate(
+            tokenId, liquidator, _keyOf(tokenId).toId(), repaid, out0, out1, badDebt, fullSeizure
+        );
     }
 
     function _socializedAmount() private returns (uint256 amount) {
