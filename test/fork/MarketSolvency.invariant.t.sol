@@ -62,9 +62,19 @@ contract MarketHandler is Test {
     ) external {
         uint256 maximum = lens.maxBorrow(tokenId);
         if (maximum < 10e6) return;
-        // Include amounts above max LTV so removing the market gate is observable. Those calls
-        // legitimately revert on the intact market and are discarded by fail_on_revert = false.
-        amount = bound(amount, 10e6, maximum * 2);
+        amount = bound(amount, 10e6, maximum);
+        vm.prank(borrower);
+        market.borrow(tokenId, amount, borrower);
+        if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyBorrow = true;
+    }
+
+    /// @dev Only amounts the market must refuse. On the intact market every call reverts and is
+    ///      discarded; kept apart from `borrow` so that action's successes are not diluted.
+    function borrowPastTheLimit(
+        uint256 amount
+    ) external {
+        uint256 maximum = lens.maxBorrow(tokenId);
+        amount = bound(amount, Math.max(maximum + 1, 10e6), Math.max(maximum, 10e6) * 2);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
         if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyBorrow = true;
