@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {Test} from "forge-std/Test.sol";
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -128,6 +129,37 @@ contract TwapRecorderTest is Test {
         assertEq(recorder.consult(poolId, 1800), -51);
     }
 
+    function test_consultSurvivesAThirtyDayGapAtTheTickBounds() public {
+        _assertConsultAfterGap(TickMath.MAX_TICK, 30 days);
+        _assertConsultAfterGap(TickMath.MIN_TICK, 30 days);
+    }
+
+    function test_consultSurvivesTheGapsThatOverflowedInt56() public {
+        // FAR-48's measured thresholds: each of these panicked 0x11 while the interpolation
+        // multiplied before it divided.
+        _assertConsultAfterGap(-200_000, 5 days);
+        _assertConsultAfterGap(TickMath.MAX_TICK, 3 days);
+        _assertConsultAfterGap(50_000, 10 days);
+    }
+
+    function test_RevertWhenALongGapIsNotClosedByAFreshRecord() public {
+        // Callers that match on the selector (keeper, indexer) must see `TwapUnavailable` on
+        // both sides of the record that closes a gap, never a panic.
+        _record(-200_000);
+        _recordAfter(1800, -200_000);
+        vm.warp(block.timestamp + 30 days);
+
+        vm.expectRevert(TwapRecorder.TwapUnavailable.selector);
+        recorder.consult(poolId, 1800);
+
+        recorder.record(key);
+        assertEq(recorder.consult(poolId, 1800), -200_000);
+
+        vm.warp(block.timestamp + 901);
+        vm.expectRevert(TwapRecorder.TwapUnavailable.selector);
+        recorder.consult(poolId, 1800);
+    }
+
     function test_observationCapacityIs2048() public {
         assertEq(recorder.OBSERVATION_CAPACITY(), 2048);
     }
@@ -213,6 +245,48 @@ contract TwapRecorderTest is Test {
         int256 expected = weightedTicks / 1800;
         if (weightedTicks < 0 && weightedTicks % 1800 != 0) --expected;
         assertEq(recorder.consult(poolId, 1800), int24(expected));
+    }
+
+    function testFuzz_consultIsExactWhenTheWindowStartsInsideAGap(
+        int24 tickBefore,
+        int24 tickAfter,
+        uint32 gap,
+        uint32 elapsed
+    ) public {
+        tickBefore = int24(bound(tickBefore, TickMath.MIN_TICK, TickMath.MAX_TICK));
+        tickAfter = int24(bound(tickAfter, TickMath.MIN_TICK, TickMath.MAX_TICK));
+        gap = uint32(bound(gap, 1801, 365 days));
+        elapsed = uint32(bound(elapsed, 0, 900));
+
+        _record(tickBefore);
+        _recordAfter(1800, tickBefore);
+        _recordAfter(gap, tickAfter);
+        vm.warp(block.timestamp + elapsed);
+
+        // The window starts `1800 - elapsed` seconds before the last record, strictly inside
+        // the gap, where `tickBefore` held. The reference is the same average in int256.
+        int256 weightedTicks =
+            int256(tickBefore) * int256(uint256(1800 - elapsed)) + int256(tickAfter) * int256(uint256(elapsed));
+        int256 expected = weightedTicks / 1800;
+        if (weightedTicks < 0 && weightedTicks % 1800 != 0) --expected;
+        assertEq(recorder.consult(poolId, 1800), int24(expected));
+    }
+
+    /// @dev Thirty minutes of history, `gap` seconds of silence, then one record: the window's
+    ///      start now falls inside the gap, which is the interpolation FAR-48 is about. Each call
+    ///      uses a pool of its own, so one test can walk several gaps.
+    function _assertConsultAfterGap(
+        int24 tick,
+        uint256 gap
+    ) internal {
+        key.fee += 1;
+        poolId = key.toId();
+
+        _record(tick);
+        _recordAfter(1800, tick);
+        _recordAfter(gap, tick);
+
+        assertEq(recorder.consult(poolId, 1800), tick);
     }
 
     function _record(

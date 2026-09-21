@@ -337,37 +337,27 @@ contract MarketCustodyForkTest is MarketForkTest {
         market.depositCollateral(tokenId);
     }
 
-    /// @notice A hook that skims on withdrawal shrinks the value the floor is measured against.
-    /// @dev §6.3 records `removeHaircutBps` at listing and deducts it from the value. What
-    ///      backs a loan is what the protocol could actually pull back out, not what the
-    ///      position reads as on paper. Same position and same floor as the test below, which
-    ///      passes; only the haircut differs.
-    function test_removeHaircutIsDeductedBeforeTheMinimum() public {
-        uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
-        _listPoolOf(tokenId, 300e18, 5000);
-
-        uint256 principal = valuer.value(tokenId).principalUsd;
-        assertGt(principal, 300e18, "the fixture must clear the floor before any haircut");
-
-        address holder = nft.ownerOf(tokenId);
-        vm.startPrank(holder);
-        nft.approve(address(market), tokenId);
-        vm.expectRevert(
-            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, principal / 2, uint256(300e18))
-        );
-        market.depositCollateral(tokenId);
-        vm.stopPrank();
-    }
-
-    /// @dev The control for the test above: without the haircut the same position clears the
-    ///      same floor, so the refusal there is the deduction and nothing else.
-    function test_theSameFloorPassesWithoutAHaircut() public {
+    function test_theFixturePassesItsMinimumWithoutARemovalHaircut() public {
         uint256 tokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
         _listPoolOf(tokenId, 300e18, 0);
         address holder = nft.ownerOf(tokenId);
 
         _deposit(tokenId, holder);
         assertEq(nft.ownerOf(tokenId), address(market), "the position should have been accepted");
+    }
+
+    /// @notice The intake floor is measured after the valid hook's actual removal haircut.
+    function test_removeHaircutIsDeductedBeforeTheMinimum() public {
+        uint256 tokenId = _mintRemovalHaircutPosition(1000, 1e14);
+        uint256 principal = valuer.value(tokenId).principalUsd;
+        uint128 minimum = uint128(principal * 95 / 100);
+        _listPoolOf(tokenId, minimum, 1000);
+
+        nft.approve(address(market), tokenId);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, principal * 90 / 100, uint256(minimum))
+        );
+        market.depositCollateral(tokenId);
     }
 
     /* ---------------------------------- rescue -------------------------------- */

@@ -13,7 +13,7 @@ import {ICollateralPolicy} from "../interfaces/ICollateralPolicy.sol";
 ///      "Stricter" has a direction per parameter, and they do not all point the same way:
 ///      LTV and liquidation threshold may only go **down**, the liquidator bonus only **up**
 ///      (a larger bonus gets bad debt cleared faster), caps only down, minimum position size
-///      only up.
+///      only up, and removal haircuts only down.
 library TierPresets {
     /// @param maxLtvBps Ceiling on a listing's max LTV.
     /// @param ltBps Ceiling on a listing's liquidation threshold.
@@ -24,6 +24,9 @@ library TierPresets {
     ///        price. The owner chooses each listing's cap within this tier-specific ceiling.
     /// @param marketDebtCapUsdg Market-wide debt cap, in USDG (6 decimals).
     /// @param minPositionUsd Floor on a listing's minimum position value, USD 1e18.
+    /// @param maxRemoveHaircutBps Ceiling on a listing's removal haircut. A hook that takes
+    ///        more than this at removal is unsuitable collateral rather than a reason to
+    ///        discount liquidation value further.
     struct Preset {
         uint16 maxLtvBps;
         uint16 ltBps;
@@ -31,6 +34,7 @@ library TierPresets {
         uint128 maxDebtCapUsdg;
         uint128 marketDebtCapUsdg;
         uint128 minPositionUsd;
+        uint16 maxRemoveHaircutBps;
     }
 
     uint16 internal constant BPS = 10_000;
@@ -45,7 +49,8 @@ library TierPresets {
             minLiquidatorBonusBps: 500,
             maxDebtCapUsdg: 500_000e6,
             marketDebtCapUsdg: 500_000e6,
-            minPositionUsd: 50e18
+            minPositionUsd: 50e18,
+            maxRemoveHaircutBps: 2000
         });
     }
 
@@ -57,7 +62,8 @@ library TierPresets {
             minLiquidatorBonusBps: 1000,
             maxDebtCapUsdg: 20_000e6,
             marketDebtCapUsdg: 50_000e6,
-            minPositionUsd: 50e18
+            minPositionUsd: 50e18,
+            maxRemoveHaircutBps: 2000
         });
     }
 

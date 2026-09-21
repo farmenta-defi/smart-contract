@@ -27,6 +27,7 @@ contract PriceOracleMemeTest is Test {
     PriceOracle internal oracle;
     TwapRecorder internal recorder;
     MockStateView internal stateView;
+    MockAggregatorV3 internal usdgUsd;
     PoolKey internal key;
     PoolId internal poolId;
 
@@ -36,7 +37,7 @@ contract PriceOracleMemeTest is Test {
         poolId = key.toId();
 
         policy = new CollateralPolicy(USDG, OWNER);
-        MockAggregatorV3 usdgUsd = new MockAggregatorV3(8);
+        usdgUsd = new MockAggregatorV3(8);
         usdgUsd.setAnswer(1e8, block.timestamp);
         vm.startPrank(OWNER);
         policy.setTokenConfig(USDG, true, ICollateralPolicy.Tier.BLUE_CHIP, 6, address(usdgUsd));
@@ -79,6 +80,21 @@ contract PriceOracleMemeTest is Test {
         vm.expectRevert(abi.encodeWithSelector(PriceOracle.MemeTwapUnavailable.selector, poolId));
         oracle.price(MEME, key);
         assertApproxEqRel(oracle.priceForLiquidation(MEME, key), 0.8e18, 1e14);
+    }
+
+    function test_recordAfterATenDayGapRestoresTheTwap() public {
+        // FAR-48: the consult behind this used to panic 0x11 for 30 minutes after such a
+        // record, and the oracle read that as a stale TWAP.
+        _recordTwap(1.1e18);
+        vm.warp(block.timestamp + 10 days);
+        usdgUsd.setAnswer(1e8, block.timestamp);
+        _setSpot(1e18);
+        assertApproxEqRel(oracle.priceForLiquidation(MEME, key), 0.8e18, 1e14);
+
+        recorder.record(key);
+
+        assertApproxEqRel(oracle.priceForLiquidation(MEME, key), 1.1e18, 1e14);
+        assertApproxEqRel(oracle.price(MEME, key), 1e18, 1e14);
     }
 
     function test_recordStoresMemeObservations() public {

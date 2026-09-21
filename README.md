@@ -4,7 +4,7 @@ Solidity contracts for Farmenta — borrow USDG against Uniswap v4 LP position N
 Robinhood Chain (chain id 4663).
 
 Specification: [`farmenta-defi/docs`](https://github.com/farmenta-defi/docs) →
-`ARCHITECTURE.md` v0.72. **The spec is the source of truth.** Where this repo and the spec
+`ARCHITECTURE.md` v0.78. **The spec is the source of truth.** Where this repo and the spec
 disagree, the spec wins and the code is wrong — except for addresses, which live in exactly
 two places: spec §18 and `src/constants/RobinhoodChain.sol`, kept in sync by a test.
 
@@ -46,7 +46,18 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    menetapkan pembatasan laju atau lantai untuk mencabutnya. Sumber: `ARCHITECTURE.md`
    §6.5, **§15 no. 11**; syarat simulasi: §15 no. 3.
 
-3. **Lantai reserve tidak mengikat pemegang kunci upgrade.** Aturan §7 membatasi
+3. **Owner dapat menaikkan removal haircut pada pool yang dibekukan.** Haircut dapat
+   dinaikkan hingga 2.000 bps melalui `updateTerms` hanya saat pool `frozen`; penurunan
+   tetap dapat terjadi seketika. Pembekuan menghentikan collateral dan pinjaman baru,
+   tetapi tidak menunda perubahan bagi pinjaman yang sudah ada atau likuidasinya. Karena
+   itu kenaikan dapat langsung menurunkan nilai jaminan yang diakui dan membuat posisi
+   yang sebelumnya sehat menjadi likuidatable; likuidator dapat menerima lebih dari bonus
+   normal jika haircut yang dicatat melebihi potongan nyata hook saat removal (terukur
+   118,12% dari `repay`, batas atas 131,25%; §6.5). Risiko ini diterima untuk respons
+   operasional MVP dan harus diungkapkan di frontend sebelum TVL nyata. Sumber:
+   `ARCHITECTURE.md` §6.5, **§15 no. 19**.
+
+4. **Lantai reserve tidak mengikat pemegang kunci upgrade.** Aturan §7 membatasi
    penarikan rutin oleh owner lewat `withdrawReserves`: lantai dihitung dari
    `totalAssets × reserveFloorBps / 10_000` (1% blue-chip, 2,5% meme), dan hanya reserve
    di atas lantai yang boleh ditarik, sebatas kas tersedia. `reserveFloor()` dan
