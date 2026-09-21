@@ -30,8 +30,9 @@ import {VaultRedeemingHook} from "../mocks/VaultRedeemingHook.sol";
 /// @notice Mints positions straight into the market, through the deployed PositionManager
 ///         and Permit2.
 /// @dev What this path gets wrong, it gets wrong quietly: a tokenId read one call too late,
-///      an approval layer left out, change stranded in the market. None of that shows against
-///      a mock, so every test here runs through the real contracts at the pinned block.
+///      change stranded in PositionManager, a pool hook paid out of the borrower's change.
+///      None of that shows against a mock, so every test here runs through the real contracts
+///      at the pinned block.
 contract MarketMintAndDepositForkTest is Permit2Signer {
     uint256 internal constant BORROWER_PK = 0xB0B5EED;
 
