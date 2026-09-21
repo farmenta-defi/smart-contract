@@ -403,7 +403,7 @@ contract FarmentaMarket is
     ///      market transaction touching a meme pool but `liquidate` does (§5.3). It runs inside
     ///      the library, after the checks above, so a refusal names its own reason.
     ///
-    ///      **The tokens never touch this market, departing from §4.1's `SETTLE_PAIR`.** Permit2
+    ///      **The tokens never touch this market**, as in `mintAndDeposit` (FAR-45). Permit2
     ///      delivers the caller's maxima straight to PositionManager, which settles out of its
     ///      own balance and sweeps the rest back to the caller. Pulled here instead, they would
     ///      sit in `totalAssets` while the pool's hook runs, and a hook holding vault shares
