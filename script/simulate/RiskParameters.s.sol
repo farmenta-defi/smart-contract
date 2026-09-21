@@ -34,6 +34,8 @@ contract RiskParameters is Script {
     uint256 internal constant LIQUIDATION_GAS = 750_000;
     uint256 internal constant ROUTING_SLIPPAGE_BPS = 100;
     address internal constant SIMULATOR = address(0xFA422);
+    uint80 internal constant FIRST_ETH_ROUND = 1 << 64;
+    uint80 internal constant LAST_ETH_ROUND = FIRST_ETH_ROUND + 1991;
 
     IStateView private stateView;
     IERC20 private usdg;
@@ -47,6 +49,7 @@ contract RiskParameters is Script {
 
         _printForkInputs();
         _simulateLtvBuffers();
+        _simulateChainlinkHistory();
         _simulateTwapPump();
         _simulateLiquidatorFloor();
         _simulateFlashDump();
@@ -68,9 +71,18 @@ contract RiskParameters is Script {
     function _simulateLtvBuffers() private pure {
         TierPresets.Preset memory blue = TierPresets.blueChip();
         TierPresets.Preset memory meme = TierPresets.meme();
-        console.log("ltv blue drop-to-LT bps", (blue.ltBps - blue.maxLtvBps) * BPS / blue.maxLtvBps);
-        console.log("ltv meme drop-to-LT bps", (meme.ltBps - meme.maxLtvBps) * BPS / meme.maxLtvBps);
+        console.log("ltv blue collateral drop-to-LT bps", BPS - uint256(blue.maxLtvBps) * BPS / blue.ltBps);
+        console.log("ltv meme collateral drop-to-LT bps", BPS - uint256(meme.maxLtvBps) * BPS / meme.ltBps);
         console.log("ltv measurement cadence seconds", OBSERVATION_SECONDS);
+    }
+
+    function _simulateChainlinkHistory() private view {
+        (, int256 first,, uint256 firstAt,) = ethUsd.getRoundData(FIRST_ETH_ROUND);
+        (, int256 last,, uint256 lastAt,) = ethUsd.getRoundData(LAST_ETH_ROUND);
+        console.log("chainlink history rounds", uint256(LAST_ETH_ROUND - FIRST_ETH_ROUND + 1));
+        console.log("chainlink history seconds", lastAt - firstAt);
+        console.log("chainlink first price (8 decimals)", uint256(first));
+        console.log("chainlink last price (8 decimals)", uint256(last));
     }
 
     function _simulateTwapPump() private pure {
@@ -135,18 +147,24 @@ contract RiskParameters is Script {
         console.log("flash dump achieved price drop bps", PriceMath.spotDeviationBps(dumpedSqrt, beforeSqrt));
         console.log("flash dump pool tick after restore", int256(restoredTick));
         console.log("flash dump round-trip loss usd (1e18)", roundTripLossUsd);
-        console.log("meme cap bonus usd (1e18)", uint256(2000e18));
+        TierPresets.Preset memory meme = TierPresets.meme();
+        uint256 cap = uint256(meme.maxDebtCapUsdg) * 1e12;
+        uint256 attackProfitAtCap = cap * (BPS + meme.minLiquidatorBonusBps) / BPS * BPS / TARGET_DUMP_BPS - cap - cap
+            * (meme.minLiquidatorBonusBps / 10) / BPS;
+        console.log("flash dump attack profit at meme cap usd (1e18)", attackProfitAtCap);
     }
 
     function _simulateBadDebt() private pure {
-        uint256 debtUsd = 20_000e18;
-        uint256 collateralAtLt = debtUsd * BPS / 4000;
-        uint256 postRugCollateral = collateralAtLt * 2500 / BPS;
-        uint256 repayable = postRugCollateral * BPS / 11_000;
-        uint256 badDebt = debtUsd - repayable;
-        console.log("meme rug collateral after 75pct loss usd (1e18)", postRugCollateral);
-        console.log("meme rug bad debt usd (1e18)", badDebt);
-        console.log("meme reserve floor at 50k total-assets usd (1e18)", uint256(1250e18));
+        TierPresets.Preset memory meme = TierPresets.meme();
+        uint256 debtUsd = uint256(meme.maxDebtCapUsdg) * 1e12;
+        uint256 collateralAtLt = debtUsd * BPS / meme.ltBps;
+        for (uint256 rugBps = 5000; rugBps <= 9900; rugBps += 2500) {
+            uint256 collateral = collateralAtLt * (BPS - rugBps) / BPS;
+            uint256 repayable = collateral * BPS / (BPS + meme.minLiquidatorBonusBps);
+            console.log("rug depth bps", rugBps);
+            console.log("rug bad debt usd (1e18)", debtUsd - repayable);
+        }
+        console.log("meme reserve floor at market cap usd (1e18)", uint256(meme.marketDebtCapUsdg) * 1e12 * 250 / BPS);
     }
 
     function _minimumPosition(
