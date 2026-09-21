@@ -184,25 +184,24 @@ deadline-then-nonce while the signed struct hashes them the other way round. A t
 signs over the four-field domain and asserts the rejection, so the trap is pinned
 rather than remembered.
 
-### Minting into custody settles through Permit2
+### Minting into custody settles through PositionManager
 
 `mintAndDeposit` takes a borrower who holds tokens rather than a position to recorded
 collateral in one transaction. The position gets no leniency for being minted by the market:
-it passes the same §6.1 admission as any deposit, and a refusal reverts everything. Three
+it passes the same §6.1 admission as any deposit, and a refusal reverts everything. Two
 mechanics are easy to get wrong, and `test/fork/MarketMintAndDeposit.t.sol` pins each:
 
 - **The tokenId is read before minting.** `modifyLiquidities` returns nothing, so the id comes
   from `PositionManager.nextTokenId()`. Read afterwards, it names the next position, which
   does not exist yet.
-- **Two approval layers, granted once per token.** PositionManager pays the market's debt with
-  `permit2.transferFrom`, so the token approves Permit2 and Permit2 approves PositionManager,
-  both for the maximum (§4.1). The standing allowance can only be drawn by the market's own
-  calls, because PositionManager charges whoever called it.
-- **Change comes back two ways.** `SWEEP` only moves what PositionManager holds, which is
-  unspent ETH. ERC-20 change never leaves the market, so the market returns whatever it holds
-  above its balance from before the mint. This is the one departure from §4.1, which credits
-  `SWEEP` with both legs. The subtraction reverts if a mint ever spent lenders' USDG, and the
-  vault refuses deposits that re-enter mid-mint, so none can be counted as change.
+- **The borrower's tokens never pass through the market** (FAR-45). The permit delivers each
+  ERC-20 leg to PositionManager, which settles out of its own balance (`SETTLE` with
+  `payerIsUser = false`) and sweeps the change back, borrow asset first. The market grants no
+  approval and computes no change. Earlier implementations pulled the tokens into the market,
+  where they counted toward `totalAssets` while the pool's hook ran: a hook redeeming vault
+  shares mid-mint was paid 48,571 USDG for shares worth 20,000, out of the borrower's change.
+  `SWEEP` hands over PositionManager's whole balance of each currency, so tokens stranded
+  there go to the borrower.
 
 The signature is a Permit2 `PermitBatchTransferFrom` with the market as spender. It lists the
 pool's ERC-20 currencies in pool order: both for an ERC-20 pair, or only currency1 beside
