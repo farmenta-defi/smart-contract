@@ -710,6 +710,32 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertEq(market.loanOf(tokenId).owner, address(0), "and the loan must be gone");
     }
 
+    /// @notice FAR-51: the full branch with nothing left over is still the full branch. The
+    ///         position is burned and the loan deleted with `badDebt == 0`, so an indexer that
+    ///         read "full" off a non-zero `badDebt` would leave this loan open forever.
+    /// @dev The window is one value wide: the full branch needs `debt × (1 + bonus) ≥ value`,
+    ///      and no shortfall needs the capped repay `value ÷ (1 + bonus)` to reach the whole
+    ///      debt. No oracle price lands the fork position on it exactly, so the valuation is
+    ///      pinned there instead; USDG at exactly $1 makes both conversions lossless.
+    function test_aFullSeizureWithoutBadDebtEmitsTheFlagTrue() public {
+        _open(0);
+        _fundLiquidator(2000e6);
+
+        uint256 debt = market.debtOf(tokenId);
+        uint256 bonusBps = policy.termsOf(market.loanOf(tokenId).poolKeyId).liquidatorBonusBps;
+        IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
+        (v.principalUsd, v.feesUsd) = (debt * 1e12 * (10_000 + bonusBps) / 10_000, 0);
+        vm.mockCall(address(valuer), abi.encodeCall(valuer.valueForLiquidation, (tokenId)), abi.encode(v));
+
+        _expectLiquidate(true);
+        vm.prank(liquidator);
+        (uint256 repaid,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertEq(repaid, debt, "the capped repay must reach the whole debt");
+        assertEq(badDebt, 0, "so this full seizure leaves no shortfall");
+        assertEq(market.loanOf(tokenId).owner, address(0), "and the loan is still gone");
+    }
+
     /* -------------------------------- reentrancy ------------------------------ */
 
     /// @notice A lender that liquidates into its own address and redeems from inside the ETH
