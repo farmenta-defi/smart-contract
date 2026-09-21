@@ -21,7 +21,7 @@ import {MarketLedger} from "./MarketLedger.sol";
 /// @notice Linked mint-and-custody execution for `FarmentaMarket`.
 /// @dev Runs by delegatecall and records collateral in the calling market's ERC-7201 layout.
 library MarketMint {
-    event CollateralDeposited(uint256 indexed tokenId, address indexed owner);
+    event CollateralDeposited(uint256 indexed tokenId, address indexed owner, PoolId indexed poolId);
     event LiquidityChanged(uint256 indexed tokenId, PoolId indexed poolId, int256 liqDelta);
 
     error NotTheDepositor(uint256 tokenId, address depositor);
@@ -179,8 +179,9 @@ library MarketMint {
             revert PositionBelowMinimum(recoverableUsd, terms.minPositionUsd);
         }
 
-        $.loans[tokenId] = MarketLedger.Loan({owner: depositor, debtShares: 0, poolKeyId: key.toId(), tier: $.tier});
-        emit CollateralDeposited(tokenId, depositor);
+        PoolId poolId = key.toId();
+        $.loans[tokenId] = MarketLedger.Loan({owner: depositor, debtShares: 0, poolKeyId: poolId, tier: $.tier});
+        emit CollateralDeposited(tokenId, depositor, poolId);
     }
 
     /// @dev ETH can only be currency0 because `address(0)` sorts first. It arrives as
