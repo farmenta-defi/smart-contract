@@ -172,11 +172,11 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
     }
 
     /// @notice The market grants no allowance to anyone, on either layer.
-    /// @dev This replaces the ticket's approval-order regression test. `mintAndDeposit` settles
-    ///      from the market and so needs token → Permit2 → PositionManager approvals; this path
-    ///      pays PositionManager directly and needs none. An allowance appearing here would mean
-    ///      the market became a payer again — the design that let a hook redeem at a price the
-    ///      borrower's tokens had inflated.
+    /// @dev This replaces the ticket's approval-order regression test. Before FAR-45
+    ///      `mintAndDeposit` settled from the market and so needed token → Permit2 →
+    ///      PositionManager approvals; this path pays PositionManager directly and needs none.
+    ///      An allowance appearing here would mean the market became a payer again — the design
+    ///      that let a hook redeem at a price the borrower's tokens had inflated.
     function test_grantsNoAllowance() public {
         uint256 tokenId = _depositFresh(wethKey);
         (ISignatureTransfer.PermitBatchTransferFrom memory permit, bytes memory signature) =
@@ -606,9 +606,9 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
     ///      inside the call. The hook here passes the §6.1 bit check, which is about removing
     ///      liquidity, not adding it. Had the borrower's tokens been pulled into the market,
     ///      they would count toward `totalAssets` while the hook ran: measured on
-    ///      `mintAndDeposit`, shares worth 20,000 USDG redeemed for 48,571 and the borrower's
-    ///      change paid the difference. Here the tokens never reach the market, so the share
-    ///      price the hook sees is the one everyone else sees.
+    ///      `mintAndDeposit` before FAR-45, shares worth 20,000 USDG redeemed for 48,571 and
+    ///      the borrower's change paid the difference. Here the tokens never reach the market,
+    ///      so the share price the hook sees is the one everyone else sees.
     function test_aRedeemFromInsideTheHookGainsNothing() public {
         address hook = address((uint160(0xDEF1) << 144) | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
         deployCodeTo("VaultRedeemingHook.sol:VaultRedeemingHook", abi.encode(market), hook);
@@ -671,9 +671,10 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
     }
 
     /// @notice Even with both approval layers standing, the market never pays for an addition.
-    /// @dev A market that has ever run `mintAndDeposit` leaves `token → Permit2 → PositionManager`
-    ///      at the maximum. `SETTLE` with `payerIsUser = true` would then draw the USDG leg from
-    ///      lenders' cash through Permit2. Nothing here is a payer, so the balances do not move.
+    /// @dev A market that ran `mintAndDeposit` before FAR-45 keeps `token → Permit2 →
+    ///      PositionManager` at the maximum. `SETTLE` with `payerIsUser = true` would then draw
+    ///      the USDG leg from lenders' cash through Permit2. Nothing here is a payer, so the
+    ///      balances do not move.
     function test_aStandingAllowanceStillDoesNotLetTheMarketPay() public {
         uint256 tokenId = _depositFresh(wethKey);
         vm.startPrank(address(market));
@@ -717,8 +718,8 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
 
     /// @dev A fresh WETH/USDG-pair position ten spacings either side of the oracle price, minted
     ///      outside the market, handed to the borrower and deposited by them. The pool is listed
-    ///      first. Deposited rather than minted in, so no earlier `mintAndDeposit` has left
-    ///      approvals standing on the market.
+    ///      first. Deposited rather than minted in, so the fixture does not lean on
+    ///      `mintAndDeposit`.
     function _depositFresh(
         PoolKey memory key
     ) internal returns (uint256 tokenId) {
