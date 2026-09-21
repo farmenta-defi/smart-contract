@@ -91,6 +91,7 @@ contract MarketCustodyForkTest is MarketForkTest {
         uint256 poolATokenId = Fixtures.POS_ETH_USDG_DYN_IN_RANGE;
         uint256 poolBTokenId = Fixtures.POS_WETH_USDG_WIDE_IN_RANGE;
         PoolId poolA = _keyOf(poolATokenId).toId();
+        PoolId poolB = _keyOf(poolBTokenId).toId();
         _listPoolOf(poolATokenId, TierPresets.blueChip().minPositionUsd);
         _listPoolOf(poolBTokenId, TierPresets.blueChip().minPositionUsd);
 
@@ -107,7 +108,8 @@ contract MarketCustodyForkTest is MarketForkTest {
                 continue;
             }
             if (logs[i].topics[3] == bytes32(PoolId.unwrap(poolA))) ++poolAEvents;
-            else ++poolBEvents;
+            else if (logs[i].topics[3] == bytes32(PoolId.unwrap(poolB))) ++poolBEvents;
+            else fail("unexpected pool topic");
         }
 
         assertEq(poolAEvents, 1, "pool A topic must return only pool A's position event");

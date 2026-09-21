@@ -149,6 +149,30 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertGt(badDebt, 0, "this test needs the full-seizure branch");
     }
 
+    function test_fullSeizureEmitsTheLoanPoolId() public {
+        _open(0);
+        _fundLiquidator(2000e6);
+        _dropEthPrice(1200e18);
+        PoolId poolId = _keyOf(tokenId).toId();
+
+        vm.recordLogs();
+        vm.prank(liquidator);
+        (,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+        assertGt(badDebt, 0, "this test needs the full-seizure branch");
+        assertEq(market.loanOf(tokenId).owner, address(0), "the full branch clears the loan record");
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool found;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != address(market) || logs[i].topics[0] != FarmentaMarket.Liquidate.selector) continue;
+            (,,,, bool fullSeizure) = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, bool));
+            assertTrue(fullSeizure, "full liquidation event must carry the full-seizure flag");
+            assertEq(logs[i].topics[3], bytes32(PoolId.unwrap(poolId)), "wrong loan pool topic");
+            found = true;
+        }
+        assertTrue(found, "full liquidation event not emitted");
+    }
+
     /// @dev The refusal, and that it left nothing behind: no ETH or USDG in the market or in
     ///      PositionManager, the liquidator's USDG unspent, and the debt where it was.
     function _assertTheRecipientIsRefused(
@@ -235,7 +259,7 @@ contract MarketLiquidateForkTest is MarketForkTest {
 
         uint256 debt = market.debtOf(tokenId);
         vm.expectEmit(true, true, true, false, address(market));
-        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0);
+        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0, false);
         vm.prank(liquidator);
         (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
 
@@ -251,9 +275,20 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertGt(lens.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
 
         vm.expectEmit(true, true, true, false, address(market));
-        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0);
+        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0, false);
+        vm.recordLogs();
         vm.prank(liquidator);
         market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool found;
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter != address(market) || logs[i].topics[0] != FarmentaMarket.Liquidate.selector) continue;
+            (,,,, bool fullSeizure) = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, bool));
+            assertFalse(fullSeizure, "partial liquidation event must clear the full-seizure flag");
+            found = true;
+        }
+        assertTrue(found, "partial liquidation event not emitted");
     }
 
     /* ----------------------------- what it costs ------------------------------ */

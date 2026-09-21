@@ -192,8 +192,9 @@ library MarketMint {
             revert PositionBelowMinimum(recoverableUsd, terms.minPositionUsd);
         }
 
-        $.loans[tokenId] = MarketLedger.Loan({owner: depositor, debtShares: 0, poolKeyId: key.toId(), tier: $.tier});
-        emit CollateralDeposited(tokenId, depositor, $.loans[tokenId].poolKeyId);
+        PoolId poolId = key.toId();
+        $.loans[tokenId] = MarketLedger.Loan({owner: depositor, debtShares: 0, poolKeyId: poolId, tier: $.tier});
+        emit CollateralDeposited(tokenId, depositor, poolId);
     }
 
     function _leg(
