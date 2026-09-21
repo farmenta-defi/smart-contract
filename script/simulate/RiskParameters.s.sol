@@ -30,12 +30,12 @@ contract RiskParameters is Script {
     uint256 internal constant OBSERVATION_SECONDS = 300;
     uint256 internal constant TARGET_DUMP_BPS = 7500;
     uint256 internal constant MAX_SWAP_INPUT = 1_000_000 ether;
-    uint256 internal constant GAS_PRICE_WEI = 0.02 gwei;
-    uint256 internal constant LIQUIDATION_GAS = 750_000;
+    // Measured by the fork PoC in MarketMemeLiquidateForkTest at block 54_200_000.
+    uint256 internal constant LIQUIDATION_GAS = 262_444;
     uint256 internal constant ROUTING_SLIPPAGE_BPS = 100;
     address internal constant SIMULATOR = address(0xFA422);
-    uint80 internal constant FIRST_ETH_ROUND = 1 << 64;
-    uint80 internal constant LAST_ETH_ROUND = FIRST_ETH_ROUND + 1991;
+    uint80 internal constant FIRST_ETH_ROUND = (1 << 64) + 1;
+    uint80 internal constant LAST_ETH_ROUND = (1 << 64) + 1992;
 
     IStateView private stateView;
     IERC20 private usdg;
@@ -77,12 +77,53 @@ contract RiskParameters is Script {
     }
 
     function _simulateChainlinkHistory() private view {
+        uint256 count = uint256(LAST_ETH_ROUND - FIRST_ETH_ROUND + 1);
+        uint256[] memory timestamps = new uint256[](count);
+        uint256[] memory prices = new uint256[](count);
+        uint256 crossedOne;
+        uint256 worstDrop;
         (, int256 first,, uint256 firstAt,) = ethUsd.getRoundData(FIRST_ETH_ROUND);
+        for (uint256 i; i < count; ++i) {
+            (, int256 answer,, uint256 updatedAt,) = ethUsd.getRoundData(FIRST_ETH_ROUND + uint80(i));
+            timestamps[i] = updatedAt;
+            prices[i] = uint256(answer);
+            if (uint256(answer) * BPS < uint256(first) * uint256(TierPresets.blueChip().ltBps)) crossedOne++;
+            uint256 relative = uint256(answer) * BPS / uint256(first);
+            uint256 drop = relative < BPS ? BPS - relative : 0;
+            if (drop > worstDrop) worstDrop = drop;
+        }
+        uint256 lastIndex = count - 1;
         (, int256 last,, uint256 lastAt,) = ethUsd.getRoundData(LAST_ETH_ROUND);
         console.log("chainlink history rounds", uint256(LAST_ETH_ROUND - FIRST_ETH_ROUND + 1));
         console.log("chainlink history seconds", lastAt - firstAt);
         console.log("chainlink first price (8 decimals)", uint256(first));
         console.log("chainlink last price (8 decimals)", uint256(last));
+        console.log("chainlink maxLTV position HF crossings", crossedOne);
+        console.log("chainlink worst drawdown bps", worstDrop);
+        console.log(
+            "chainlink maxLTV-to-LT crossing percent",
+            BPS - uint256(TierPresets.blueChip().maxLtvBps) * BPS / uint256(TierPresets.blueChip().ltBps)
+        );
+        console.log("chainlink worst 1h drawdown bps", _worstWindowDrop(prices, timestamps, lastIndex, 1 hours));
+        console.log("chainlink worst 24h drawdown bps", _worstWindowDrop(prices, timestamps, lastIndex, 24 hours));
+    }
+
+    function _worstWindowDrop(
+        uint256[] memory prices,
+        uint256[] memory timestamps,
+        uint256 lastIndex,
+        uint256 window
+    ) private pure returns (uint256 worst) {
+        for (uint256 i; i <= lastIndex; ++i) {
+            uint256 oldest = prices[i];
+            for (uint256 j = i + 1; j <= lastIndex; ++j) {
+                if (timestamps[j] < timestamps[i] || timestamps[j] - timestamps[i] > window) continue;
+                if (prices[j] < oldest) oldest = prices[j];
+            }
+            uint256 relative = oldest * BPS / prices[i];
+            uint256 drop = relative < BPS ? BPS - relative : 0;
+            if (drop > worst) worst = drop;
+        }
     }
 
     function _simulateTwapPump() private pure {
@@ -100,8 +141,17 @@ contract RiskParameters is Script {
         TierPresets.Preset memory blue = TierPresets.blueChip();
         TierPresets.Preset memory meme = TierPresets.meme();
         console.log("liquidator gas usd (1e18)", gasUsd);
-        console.log("blue profitable position floor usd (1e18)", _minimumPosition(gasUsd, blue.minLiquidatorBonusBps));
-        console.log("meme profitable position floor usd (1e18)", _minimumPosition(gasUsd, meme.minLiquidatorBonusBps));
+        console.log("basefee wei", block.basefee);
+        console.log("blue profitable debt floor usd (1e18)", _minimumDebt(gasUsd, blue.minLiquidatorBonusBps));
+        console.log("meme profitable debt floor usd (1e18)", _minimumDebt(gasUsd, meme.minLiquidatorBonusBps));
+        console.log(
+            "blue profitable position floor usd (1e18)",
+            _minimumPosition(gasUsd, blue.minLiquidatorBonusBps, blue.maxLtvBps)
+        );
+        console.log(
+            "meme profitable position floor usd (1e18)",
+            _minimumPosition(gasUsd, meme.minLiquidatorBonusBps, meme.maxLtvBps)
+        );
         console.log("spec minimum position usd (1e18)", blue.minPositionUsd);
     }
 
@@ -158,16 +208,21 @@ contract RiskParameters is Script {
         TierPresets.Preset memory meme = TierPresets.meme();
         uint256 debtUsd = uint256(meme.maxDebtCapUsdg) * 1e12;
         uint256 collateralAtLt = debtUsd * BPS / meme.ltBps;
-        for (uint256 rugBps = 5000; rugBps <= 9900; rugBps += 2500) {
+        uint256 reserveFloor = uint256(meme.marketDebtCapUsdg) * 250 * 1e12 / BPS;
+        uint256[4] memory depths = [uint256(5000), 7500, 9000, 9900];
+        for (uint256 i; i < depths.length; ++i) {
+            uint256 rugBps = depths[i];
             uint256 collateral = collateralAtLt * (BPS - rugBps) / BPS;
             uint256 repayable = collateral * BPS / (BPS + meme.minLiquidatorBonusBps);
+            uint256 badDebt = debtUsd - repayable;
             console.log("rug depth bps", rugBps);
-            console.log("rug bad debt usd (1e18)", debtUsd - repayable);
+            console.log("rug bad debt usd (1e18)", badDebt);
+            console.log("lender loss after reserve usd (1e18)", badDebt > reserveFloor ? badDebt - reserveFloor : 0);
         }
-        console.log("meme reserve floor at market cap usd (1e18)", uint256(meme.marketDebtCapUsdg) * 1e12 * 250 / BPS);
+        console.log("meme reserve floor at market cap usd (1e18)", reserveFloor);
     }
 
-    function _minimumPosition(
+    function _minimumDebt(
         uint256 gasUsd,
         uint16 grossBonusBps
     ) private pure returns (uint256) {
@@ -175,11 +230,19 @@ contract RiskParameters is Script {
         return FullMath.mulDiv(gasUsd, BPS, netBonusBps - ROUTING_SLIPPAGE_BPS);
     }
 
+    function _minimumPosition(
+        uint256 gasUsd,
+        uint16 grossBonusBps,
+        uint16 maxLtvBps
+    ) private pure returns (uint256) {
+        return FullMath.mulDiv(_minimumDebt(gasUsd, grossBonusBps), BPS, maxLtvBps);
+    }
+
     function _gasUsd(
         uint256 gasUnits
     ) private view returns (uint256) {
         (, int256 ethAnswer,,,) = ethUsd.latestRoundData();
-        return FullMath.mulDiv(gasUnits * GAS_PRICE_WEI, uint256(ethAnswer) * 1e10, 1e18);
+        return FullMath.mulDiv(gasUnits * block.basefee, uint256(ethAnswer) * 1e10, 1e18);
     }
 
     function _ethToUsd(
