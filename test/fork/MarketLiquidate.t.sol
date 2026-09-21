@@ -228,20 +228,25 @@ contract MarketLiquidateForkTest is MarketForkTest {
     }
 
     /// @notice §6.2: under a health factor of 0,9 the whole debt may go at once.
+    /// @dev The one test on the partial branch with a 100% close factor: the debt is paid off
+    ///      but the position is neither burned nor released, so `fullSeizure` must stay false.
+    ///      A flag that meant "no debt left" instead of "burned" passes every other test
+    ///      (review of PR #37).
     function test_blueChipClosesInFullOnceWellUnderWater() public {
         _open(0);
         _fundLiquidator(2000e6);
         _ageUntilHealthFactorBelow(0.9e18);
 
         uint256 debt = market.debtOf(tokenId);
-        vm.expectEmit(true, true, true, false, address(market));
-        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0, false);
+        _expectLiquidate(false);
         vm.prank(liquidator);
         (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
 
         assertEq(repaid, debt, "the close factor no longer holds anything back");
         assertEq(market.debtOf(tokenId), 0, "the debt is gone");
         assertEq(market.loanOf(tokenId).debtShares, 0, "and so are its shares");
+        assertEq(market.loanOf(tokenId).owner, borrower, "but the position is not seized");
+        assertEq(IERC721(RobinhoodChain.POSITION_MANAGER).ownerOf(tokenId), address(market), "and stays in custody");
     }
 
     function test_partialLiquidationEmitsTheLoanPoolId() public {
