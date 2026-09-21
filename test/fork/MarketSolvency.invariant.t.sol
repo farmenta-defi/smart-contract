@@ -125,6 +125,23 @@ contract MarketHandler is Test {
         if (market.reserves() < lens.reserveFloor()) sawFloorBreach = true;
     }
 
+    /// @dev Only amounts the market must refuse: past what the floor leaves, up to every reserve the
+    ///      cash can pay. `withdrawReserves` alone cannot reach them, since its bound comes from the
+    ///      lens, which computes the floor apart from the market's gate: a gate that dropped the floor
+    ///      would never be asked for more. Accrues first so the lens and the gate see the same reserves.
+    function withdrawReservesPastTheFloor(
+        uint256 amount
+    ) external {
+        market.accrue();
+        uint256 minimum = lens.withdrawableReserves() + 1;
+        uint256 maximum = Math.min(market.reserves(), usdg.balanceOf(address(market)));
+        if (maximum < minimum) return;
+        amount = bound(amount, minimum, maximum);
+        vm.prank(owner);
+        market.withdrawReserves(amount, owner);
+        if (market.reserves() < lens.reserveFloor()) sawFloorBreach = true;
+    }
+
     /// @dev The fork holds no swaps between calls, so after the first claim the fees are zero. What
     ///      this exercises is the post-condition on every claim the fuzzer reaches, at whatever debt and
     ///      index the other actions left.
