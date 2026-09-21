@@ -63,7 +63,6 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
     uint256 private attackEthAfterDump;
     uint256 private attackUsdgBefore;
     uint256 private attackAcquired;
-    int256 private controlPnl;
 
     /// @dev Leaves the fixture borrowed against and aged to a health factor just above 1 on a
     ///      fresh TWAP: healthy where the recorder is fresh, and close enough to the line that
@@ -226,25 +225,8 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
         deal(address(usdg), attacker, 10_000_000e6);
 
         for (uint256 i; i < dumpBps.length; ++i) {
-            controlPnl = _controlRoundTrip(attacker, dumpBps[i], ethPrice);
             _runFlashDump(attacker, dumpBps[i], ethPrice, debt);
         }
-    }
-
-    function _controlRoundTrip(
-        address attacker,
-        uint256 dumpBps,
-        uint256 ethPrice
-    ) private returns (int256 pnlUsd) {
-        uint256 snapshot = vm.snapshotState();
-        uint256 ethBefore = attacker.balance;
-        uint256 usdgBefore = usdg.balanceOf(attacker);
-        PoolSwapTest router = new PoolSwapTest(poolManager);
-        _dumpAttack(router, attacker, dumpBps);
-        _restoreAttack(router, attacker, attackAcquired);
-        pnlUsd = (int256(attacker.balance) - int256(ethBefore)) * int256(ethPrice) / 1e18
-            + (int256(usdg.balanceOf(attacker)) - int256(usdgBefore)) * 1e12;
-        vm.revertToState(snapshot);
     }
 
     function _runFlashDump(
@@ -256,16 +238,18 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
         uint256 snapshot = vm.snapshotState();
         PoolSwapTest router = new PoolSwapTest(poolManager);
         _dumpAttack(router, attacker, dumpBps);
-        (uint256 repaid, uint256 outUsdg, uint256 badDebt, uint256 liquidationGas) = _liquidateAttack(attacker);
+        (uint256 repaid, uint256 outEth, uint256 outUsdg, uint256 badDebt, uint256 liquidationGas) =
+            _liquidateAttack(attacker);
         _restoreAttack(router, attacker, attackAcquired);
         int256 pnlUsd = _signedPnl(attacker, attackEthBefore, attackUsdgBefore, ethPrice);
         _reportAttack(
             dumpBps,
             debt,
-            controlPnl,
+            ethPrice,
             attackEthBefore - attackEthAfterDump,
             attackAcquired,
             repaid,
+            outEth,
             outUsdg,
             badDebt,
             liquidationGas,
@@ -287,10 +271,11 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
     function _reportAttack(
         uint256 dumpBps,
         uint256 debt,
-        int256 baselinePnl,
+        uint256 ethPrice,
         uint256 ethSold,
         uint256 acquired,
         uint256 repaid,
+        uint256 outEth,
         uint256 outUsdg,
         uint256 badDebt,
         uint256 liquidationGas,
@@ -303,7 +288,11 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
         console.log("flash dump liquidation gas", liquidationGas);
         console.log("flash dump bad debt", badDebt);
         console.logInt(pnlUsd);
-        console.log("flash dump attack profit versus control (1e18)", pnlUsd - baselinePnl);
+        console.log(
+            "flash dump liquidation proceeds net of repay (1e18)",
+            int256(outEth) * int256(ethPrice) / 1e18 + int256(outUsdg) * 1e12 - int256(repaid) * 1e12
+        );
+        console.log("flash dump signed attack PnL (1e18)", pnlUsd);
         assertGt(repaid, 0, "the crash must reach the real liquidation path");
         assertLe(repaid, debt, "liquidation cannot repay more than outstanding debt");
         assertEq(outUsdg, 4_801_264, "liquidation output is the pinned fixture result");
@@ -351,11 +340,11 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
 
     function _liquidateAttack(
         address attacker
-    ) private returns (uint256 repaid, uint256 outUsdg, uint256 badDebt, uint256 liquidationGas) {
+    ) private returns (uint256 repaid, uint256 outEth, uint256 outUsdg, uint256 badDebt, uint256 liquidationGas) {
         uint256 gasStart = gasleft();
         vm.startPrank(attacker);
         usdg.approve(address(memeMarket), type(uint256).max);
-        (repaid,, outUsdg, badDebt) = memeMarket.liquidate(tokenId, type(uint256).max, 0, 0, attacker);
+        (repaid, outEth, outUsdg, badDebt) = memeMarket.liquidate(tokenId, type(uint256).max, 0, 0, attacker);
         liquidationGas = gasStart - gasleft();
         vm.stopPrank();
     }
