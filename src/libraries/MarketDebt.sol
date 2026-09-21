@@ -27,8 +27,8 @@ library MarketDebt {
     uint256 private constant USDG_MIN_PRICE = 0.97e18;
     uint256 private constant USDG_MAX_PRICE = 1.03e18;
 
-    event Borrow(uint256 indexed tokenId, uint256 amount);
-    event Repay(uint256 indexed tokenId, uint256 amount);
+    event Borrow(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
+    event Repay(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
     event ReservesUpdated(uint256 reserves);
 
     error BorrowerNotAuthorized(uint256 tokenId, address borrower);
@@ -99,7 +99,7 @@ library MarketDebt {
         $.poolDebtShares[loan.poolKeyId] += shares;
         $.totalBorrows = DebtMath.debtOf($.totalBorrowShares, $.borrowIndex);
         env.asset.safeTransfer(to, amount);
-        emit Borrow(tokenId, amount);
+        emit Borrow(tokenId, loan.poolKeyId, amount);
     }
 
     function repay(
@@ -121,7 +121,7 @@ library MarketDebt {
         $.poolDebtShares[loan.poolKeyId] -= shares;
         $.totalBorrows = DebtMath.debtOf($.totalBorrowShares, $.borrowIndex);
         env.asset.safeTransferFrom(msg.sender, address(this), repaid);
-        emit Repay(tokenId, repaid);
+        emit Repay(tokenId, loan.poolKeyId, repaid);
     }
 
     /// @notice Refuses to leave `tokenId` under water once an action has taken value out of it:

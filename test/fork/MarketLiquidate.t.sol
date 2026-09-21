@@ -231,18 +231,37 @@ contract MarketLiquidateForkTest is MarketForkTest {
     }
 
     /// @notice §6.2: under a health factor of 0,9 the whole debt may go at once.
+    /// @dev The one test on the partial branch with a 100% close factor: the debt is paid off
+    ///      but the position is neither burned nor released, so `fullSeizure` must stay false.
+    ///      A flag that meant "no debt left" instead of "burned" passes every other test
+    ///      (review of PR #37).
     function test_blueChipClosesInFullOnceWellUnderWater() public {
         _open(0);
         _fundLiquidator(2000e6);
         _ageUntilHealthFactorBelow(0.9e18);
 
         uint256 debt = market.debtOf(tokenId);
+        _expectLiquidate(false);
         vm.prank(liquidator);
         (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
 
         assertEq(repaid, debt, "the close factor no longer holds anything back");
         assertEq(market.debtOf(tokenId), 0, "the debt is gone");
         assertEq(market.loanOf(tokenId).debtShares, 0, "and so are its shares");
+        assertEq(market.loanOf(tokenId).owner, borrower, "but the position is not seized");
+        assertEq(IERC721(RobinhoodChain.POSITION_MANAGER).ownerOf(tokenId), address(market), "and stays in custody");
+    }
+
+    function test_partialLiquidationEmitsTheLoanPoolId() public {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+        assertGt(lens.healthFactor(tokenId), 0.9e18, "this test needs the partial close factor");
+
+        vm.expectEmit(true, true, true, false, address(market));
+        emit FarmentaMarket.Liquidate(tokenId, liquidator, _keyOf(tokenId).toId(), 0, 0, 0, 0, false);
+        vm.prank(liquidator);
+        market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
     }
 
     /* ----------------------------- what it costs ------------------------------ */
@@ -731,6 +750,64 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertEq(market.reserves(), reservesBefore + fee - badDebt, "the reserve pays the shortfall, and only that");
         assertEq(market.totalAssets(), totalAssetsBefore, "depositors lose nothing");
         assertFalse(_emitted(keccak256("BadDebtSocialized(uint256)")), "and nothing is socialized");
+    }
+
+    /* --------------------------------- the event ------------------------------ */
+
+    /// @notice FAR-51: a partial seizure says so. The position stays in custody, so an indexer
+    ///         reading the flag keeps the loan open.
+    function test_aPartialSeizureEmitsTheFlagFalse() public {
+        _open(0);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        _expectLiquidate(false);
+        vm.prank(liquidator);
+        (,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertEq(badDebt, 0, "this test needs the partial branch");
+        assertEq(market.loanOf(tokenId).owner, borrower, "and the loan must survive it");
+    }
+
+    /// @notice FAR-51: the full branch says so, and the flag is the only thing in the event
+    ///         that does. `badDebt` is not a stand-in for it: see the next test.
+    function test_aFullSeizureWithBadDebtEmitsTheFlagTrue() public {
+        _open(0);
+        _fundLiquidator(2000e6);
+        _dropEthPrice(1200e18);
+
+        _expectLiquidate(true);
+        vm.prank(liquidator);
+        (,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(badDebt, 0, "this test needs the full branch with a shortfall");
+        assertEq(market.loanOf(tokenId).owner, address(0), "and the loan must be gone");
+    }
+
+    /// @notice FAR-51: the full branch with nothing left over is still the full branch. The
+    ///         position is burned and the loan deleted with `badDebt == 0`, so an indexer that
+    ///         read "full" off a non-zero `badDebt` would leave this loan open forever.
+    /// @dev The window is one value wide: the full branch needs `debt × (1 + bonus) ≥ value`,
+    ///      and no shortfall needs the capped repay `value ÷ (1 + bonus)` to reach the whole
+    ///      debt. No oracle price lands the fork position on it exactly, so the valuation is
+    ///      pinned there instead; USDG at exactly $1 makes both conversions lossless.
+    function test_aFullSeizureWithoutBadDebtEmitsTheFlagTrue() public {
+        _open(0);
+        _fundLiquidator(2000e6);
+
+        uint256 debt = market.debtOf(tokenId);
+        uint256 bonusBps = policy.termsOf(market.loanOf(tokenId).poolKeyId).liquidatorBonusBps;
+        IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
+        (v.principalUsd, v.feesUsd) = (debt * 1e12 * (10_000 + bonusBps) / 10_000, 0);
+        vm.mockCall(address(valuer), abi.encodeCall(valuer.valueForLiquidation, (tokenId)), abi.encode(v));
+
+        _expectLiquidate(true);
+        vm.prank(liquidator);
+        (uint256 repaid,,, uint256 badDebt) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertEq(repaid, debt, "the capped repay must reach the whole debt");
+        assertEq(badDebt, 0, "so this full seizure leaves no shortfall");
+        assertEq(market.loanOf(tokenId).owner, address(0), "and the loan is still gone");
     }
 
     /* -------------------------------- reentrancy ------------------------------ */
@@ -1246,6 +1323,25 @@ contract MarketLiquidateForkTest is MarketForkTest {
         vm.prank(liquidator);
         (, out0, out1,) = market.liquidate(tokenId, repayAmount, 0, 0, liquidator);
         vm.revertToState(snapshot);
+    }
+
+    /// @dev Expects the exact `Liquidate` the next `liquidate(tokenId, max, 0, 0, liquidator)`
+    ///      emits, every topic and field included. The payout is measured, not computed (see
+    ///      the event), so the figures come from a dry run of the same call against the same
+    ///      state.
+    function _expectLiquidate(
+        bool fullSeizure
+    ) private {
+        uint256 snapshot = vm.snapshotState();
+        vm.prank(liquidator);
+        (uint256 repaid, uint256 out0, uint256 out1, uint256 badDebt) =
+            market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+        vm.revertToState(snapshot);
+
+        vm.expectEmit(true, true, true, true, address(market));
+        emit FarmentaMarket.Liquidate(
+            tokenId, liquidator, _keyOf(tokenId).toId(), repaid, out0, out1, badDebt, fullSeizure
+        );
     }
 
     function _socializedAmount() private returns (uint256 amount) {
