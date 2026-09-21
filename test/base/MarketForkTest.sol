@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -18,6 +19,8 @@ import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {PriceMath} from "../../src/libraries/PriceMath.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {MockPriceOracle} from "../mocks/MockPriceOracle.sol";
+import {RemovalHaircutHook} from "../mocks/RemovalHaircutHook.sol";
+import {Fixtures} from "./Fixtures.sol";
 import {PositionMinter} from "./PositionMinter.sol";
 
 /// @title MarketForkTest
@@ -31,6 +34,7 @@ abstract contract MarketForkTest is PositionMinter {
     ///      oracle and pool agree and the valuation is the one the chain would give.
     uint256 internal constant ETH_AT_POOL_SPOT = 2520.1324440246868e18;
     uint256 internal constant ONE_USD = 1e18;
+    address internal constant REMOVAL_HAIRCUT_HOOK = address(0x101);
 
     address internal owner = address(0xA11CE);
 
@@ -145,5 +149,40 @@ abstract contract MarketForkTest is PositionMinter {
                     )
                 ))
         );
+    }
+
+    /// @dev Mints a WETH/USDG position behind the bit-valid removal-delta hook used by every
+    ///      fork test that models a configured removal haircut. The hook code is installed at
+    ///      0x101 because v4 derives its permissions from the address bits.
+    function _mintRemovalHaircutPosition(
+        uint16 haircutBps,
+        uint256 liquidity
+    ) internal returns (uint256 tokenId) {
+        PoolKey memory key = _initRemovalHaircutPool(haircutBps);
+        _fundAndApprove(key, 10 ether, 100_000e6);
+
+        int24 mid = _alignedOracleTick(key.tickSpacing);
+        tokenId = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, liquidity);
+
+        vm.prank(owner);
+        policy.setHookAllowlist(REMOVAL_HAIRCUT_HOOK, true);
+    }
+
+    function _initRemovalHaircutPool(
+        uint16 haircutBps
+    ) private returns (PoolKey memory key) {
+        RemovalHaircutHook hook = new RemovalHaircutHook(poolManager, haircutBps);
+        vm.etch(REMOVAL_HAIRCUT_HOOK, address(hook).code);
+
+        PoolKey memory referenceKey = _keyOf(Fixtures.POS_WETH_USDG_WIDE_IN_RANGE);
+        key = PoolKey({
+            currency0: referenceKey.currency0,
+            currency1: referenceKey.currency1,
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(REMOVAL_HAIRCUT_HOOK)
+        });
+        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(referenceKey.toId());
+        poolManager.initialize(key, sqrtPriceX96);
     }
 }

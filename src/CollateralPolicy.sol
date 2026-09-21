@@ -63,8 +63,6 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         uint128 minPositionUsd;
     }
 
-    uint16 internal constant BPS = 10_000;
-
     /// @notice The only borrow asset in the MVP; every accepted pair must quote in it (§1).
     Currency public immutable quote;
 
@@ -72,6 +70,10 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
 
     /// @notice Hooks cleared by review despite touching remove-liquidity (§6.1 manual path).
     mapping(address hooks => bool) public hookAllowlist;
+
+    /// @dev A `PoolId` cannot recover its hook address. Capture the immutable address-bit
+    ///      permission at listing so `updateTerms` can reject a later nonzero haircut too.
+    mapping(PoolId poolId => bool) internal _removeLiquidityReturnsDelta;
 
     mapping(PoolId poolId => Listing) internal _listings;
 
@@ -93,6 +95,8 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     error LooserThanPreset(string parameter);
     error NoBorrowingRoom(uint16 maxLtvBps, uint16 ltBps);
     error HaircutTooLarge(uint16 removeHaircutBps);
+    error HaircutRequiresRemoveDeltaHook();
+    error HaircutIncreaseRequiresFreeze();
     error RampStartInThePast();
     error RampDurationIsZero();
     error RampBelowMaxLtvRequiresFreeze(uint16 maxLtvBps, uint16 ltTargetBps);
@@ -146,7 +150,10 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
 
         Tier tier = _poolTier(key);
         _requireHookPermitted(address(key.hooks));
-        _validate(tier, params, true); // a pool is never listed already frozen
+        bool returnsRemoveDelta = HookPermissions.returnsRemoveLiquidityDelta(key.hooks);
+        _validate(tier, params, true, returnsRemoveDelta); // a pool is never listed already frozen
+
+        _removeLiquidityReturnsDelta[poolId] = returnsRemoveDelta;
 
         _listings[poolId] = Listing({
             listed: true,
@@ -184,7 +191,10 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         Listing storage listing = _listings[poolId];
         if (!listing.listed) revert PoolNotListed(poolId);
 
-        _validate(listing.tier, params, !listing.frozen);
+        _validate(listing.tier, params, !listing.frozen, _removeLiquidityReturnsDelta[poolId]);
+        if (params.removeHaircutBps > listing.removeHaircutBps && !listing.frozen) {
+            revert HaircutIncreaseRequiresFreeze();
+        }
 
         listing.maxLtvBps = params.maxLtvBps;
         listing.ltStartBps = params.ltBps;
@@ -407,7 +417,8 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     function _validate(
         Tier tier,
         ListingParams calldata params,
-        bool requireBorrowingRoom
+        bool requireBorrowingRoom,
+        bool returnsRemoveDelta
     ) internal pure {
         TierPresets.Preset memory preset = TierPresets.forTier(tier);
 
@@ -420,6 +431,9 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         if (requireBorrowingRoom && (params.maxLtvBps == 0 || params.maxLtvBps >= params.ltBps)) {
             revert NoBorrowingRoom(params.maxLtvBps, params.ltBps);
         }
-        if (params.removeHaircutBps > BPS) revert HaircutTooLarge(params.removeHaircutBps);
+        if (params.removeHaircutBps > preset.maxRemoveHaircutBps) revert HaircutTooLarge(params.removeHaircutBps);
+        if (params.removeHaircutBps > 0 && !returnsRemoveDelta) {
+            revert HaircutRequiresRemoveDeltaHook();
+        }
     }
 }

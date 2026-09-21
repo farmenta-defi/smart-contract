@@ -311,30 +311,48 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         market.decreaseLiquidity(tokenId, liquidity, 0, 0, recipient);
     }
 
-    /// @notice The minimum is held against principal after the pool's removal haircut (§6.3), as at
-    ///         intake.
-    /// @dev The same removal on the same position: it leaves about $51 of principal, which clears $50
-    ///      on a pool with no haircut and falls to about $48.45 on one that takes 5%.
+    /// @notice The minimum remaining position is measured after the permitted hook's haircut.
     function test_theMinimumIsMeasuredAfterTheRemovalHaircut() public {
-        uint256 principalUsd = valuer.value(tokenId).principalUsd;
-        uint128 amount = liquidity - uint128(uint256(liquidity) * 51e18 / principalUsd);
-        uint256 snapshot = vm.snapshotState();
+        _useRemovalHaircutFixture(1000);
+        uint256 principal = valuer.value(tokenId).principalUsd;
+        uint128 amount = liquidity - uint128(uint256(liquidity) * 51e18 / principal);
+        _depositListed(tokenId, 50e18, 1000);
+        uint256 rawLeft = _probe(tokenId, amount).principalUsdLeft;
+        assertLt(rawLeft * 90 / 100, 50e18, "the hook haircut must put the remainder below the floor");
 
-        _deposit(tokenId);
-        vm.prank(borrower);
-        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
-        vm.revertToState(snapshot);
-
-        _depositWithHaircut(tokenId, 500);
-        uint256 left = _probe(tokenId, amount).principalUsdLeft;
         vm.prank(borrower);
         vm.expectRevert(
-            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, left * 9500 / 10_000, 50e18)
+            abi.encodeWithSelector(FarmentaMarket.PositionBelowMinimum.selector, rawLeft * 90 / 100, uint256(50e18))
         );
         market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
     }
 
     /* -------------------------------- borrow limit ---------------------------- */
+
+    /// @notice The borrow limit after a removal uses the hook-reduced collateral value.
+    function test_theBorrowLimitCountsTheRemovalHaircut() public {
+        _useRemovalHaircutFixture(1000);
+        uint128 amount = liquidity / 4;
+        uint256 snapshot = vm.snapshotState();
+        _deposit(tokenId);
+        uint256 rawLimit = _limit(_probe(tokenId, amount), MAX_LTV_BPS);
+        vm.revertToState(snapshot);
+
+        _depositListed(tokenId, 50e18, 1000);
+        uint256 haircutLimit = _limit(_probe(tokenId, amount), MAX_LTV_BPS);
+        assertEq(haircutLimit, rawLimit * 90 / 100, "the haircut must reduce the removal limit");
+        uint256 debt = (rawLimit + haircutLimit) / 2 / 1e12;
+
+        _lend(300e6);
+        vm.prank(borrower);
+        market.borrow(tokenId, debt, borrower);
+
+        vm.prank(borrower);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.RemovalExceedsBorrowLimit.selector, tokenId, _usd(debt), haircutLimit)
+        );
+        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
+    }
 
     /// @notice An indebted removal that leaves the debt within the borrow limit goes through, and the
     ///         debt is untouched.
@@ -463,41 +481,6 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         vm.prank(borrower);
         market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
         assertEq(positionManager.getPositionLiquidity(tokenId), liquidity - amount, "under both limits it goes through");
-    }
-
-    /// @notice §6.3: the borrow limit is taken on what remains after the pool's removal haircut.
-    /// @dev The same debt and the same removal on the same position. The debt sits between the limit
-    ///      the removal leaves with no haircut and the one it leaves with 5% taken off.
-    function test_theBorrowLimitCountsTheRemovalHaircut() public {
-        uint128 amount = liquidity / 4;
-        uint256 snapshot = vm.snapshotState();
-
-        _deposit(tokenId);
-        uint256 limitPlain = _limit(_probe(tokenId, amount), MAX_LTV_BPS);
-        vm.revertToState(snapshot);
-        _depositWithHaircut(tokenId, 500);
-        uint256 limitCut = _limit(_probe(tokenId, amount), MAX_LTV_BPS);
-        vm.revertToState(snapshot);
-        assertEq(limitCut, limitPlain * 9500 / 10_000, "the haircut comes off the limit");
-        uint256 debt = (limitPlain + limitCut) / 2 / 1e12;
-
-        _deposit(tokenId);
-        _lend(300e6);
-        vm.prank(borrower);
-        market.borrow(tokenId, debt, borrower);
-        vm.prank(borrower);
-        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
-        vm.revertToState(snapshot);
-
-        _depositWithHaircut(tokenId, 500);
-        _lend(300e6);
-        vm.prank(borrower);
-        market.borrow(tokenId, debt, borrower);
-        vm.prank(borrower);
-        vm.expectRevert(
-            abi.encodeWithSelector(FarmentaMarket.RemovalExceedsBorrowLimit.selector, tokenId, _usd(debt), limitCut)
-        );
-        market.decreaseLiquidity(tokenId, amount, 0, 0, recipient);
     }
 
     /// @notice §7: the removal accrues before it checks the limit, so interest nobody has accrued yet
@@ -733,14 +716,15 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
     function _deposit(
         uint256 id
     ) private returns (address holder) {
-        return _depositWithHaircut(id, 0);
+        return _depositListed(id, 50e18, 0);
     }
 
-    function _depositWithHaircut(
-        uint256 id,
-        uint16 removeHaircutBps
-    ) private returns (address holder) {
-        return _depositListed(id, 50e18, removeHaircutBps);
+    function _useRemovalHaircutFixture(
+        uint16 haircutBps
+    ) private {
+        tokenId = _mintRemovalHaircutPosition(haircutBps, 1e14);
+        borrower = address(this);
+        liquidity = positionManager.getPositionLiquidity(tokenId);
     }
 
     function _depositListed(

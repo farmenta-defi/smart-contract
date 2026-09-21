@@ -19,6 +19,7 @@ contract TierPresetsTest is Test {
         assertEq(p.maxDebtCapUsdg, 500_000e6, "pool cap ceiling");
         assertEq(p.marketDebtCapUsdg, 500_000e6, "market debt cap");
         assertEq(p.minPositionUsd, 50e18, "minimum position");
+        assertEq(p.maxRemoveHaircutBps, 2000, "removal haircut ceiling");
     }
 
     function test_memeMatchesTheSpec() public pure {
@@ -29,6 +30,7 @@ contract TierPresetsTest is Test {
         assertEq(p.maxDebtCapUsdg, 20_000e6, "pool cap ceiling");
         assertEq(p.marketDebtCapUsdg, 50_000e6, "market debt cap");
         assertEq(p.minPositionUsd, 50e18, "minimum position");
+        assertEq(p.maxRemoveHaircutBps, 2000, "removal haircut ceiling");
         assertEq(TierPresets.MEME_STALE_HAIRCUT_BPS, 2000, "stale haircut");
         assertEq(TierPresets.MEME_CRASH_THRESHOLD_BPS, 2500, "crash threshold");
     }

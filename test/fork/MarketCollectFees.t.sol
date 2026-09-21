@@ -221,13 +221,13 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(usdg.balanceOf(recipient), 0, "and nothing reached the recipient");
     }
 
-    /// @notice §6.2 by hand: fees above the cap count as a tenth of principal, the removal haircut
-    ///         comes off the total, and the lens health factor follows from that and nothing else.
+    /// @notice §6.2 by hand: fees above the cap count as a tenth of principal, and the lens health
+    ///         factor follows from that and nothing else.
     /// @dev The expected figures are written out here rather than read from `DebtMath`: the market,
     ///      the lens and the liquidation path all call `DebtMath.collateralValue`, so comparing them with
     ///      each other cannot catch a change to it (review of PR #18).
-    function test_theLensAppliesTheFeeCapAndTheHaircutByHand() public {
-        _listPoolOf(tokenId, 50e18, 500);
+    function test_theLensAppliesTheFeeCapByHand() public {
+        _listPoolOf(tokenId, 50e18, 0);
         vm.startPrank(borrower);
         nft.approve(address(market), tokenId);
         market.depositCollateral(tokenId);
@@ -240,10 +240,10 @@ contract MarketCollectFeesForkTest is MarketForkTest {
 
         IPositionValuer.Valuation memory v = valuer.value(tokenId);
         assertGt(v.feesUsd, v.principalUsd / 10, "the fees must sit above the cap");
-        uint256 collateral = (v.principalUsd + v.principalUsd / 10) * 9500 / 10_000;
+        uint256 collateral = v.principalUsd + v.principalUsd / 10;
         uint256 debtUsd = market.debtOf(tokenId) * 1e18 / 1e6;
 
-        assertEq(lens.positionValue(tokenId), collateral, "principal plus a tenth, less 5%");
+        assertEq(lens.positionValue(tokenId), collateral, "principal plus a tenth");
         assertEq(lens.healthFactor(tokenId), collateral * 7500 * 1e18 / (debtUsd * 10_000), "at LT 75%");
     }
 

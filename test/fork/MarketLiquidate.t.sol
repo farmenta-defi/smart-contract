@@ -41,6 +41,9 @@ import {RedeemingLiquidator} from "../mocks/RedeemingLiquidator.sol";
 ///      large enough for the full-seizure branch. Tests using it assert *which* branch ran and
 ///      what happened to the debt, never the exact payout.
 contract MarketLiquidateForkTest is MarketForkTest {
+    uint16 internal constant REMOVAL_HAIRCUT_BPS = 1000;
+    uint256 internal constant PAYOUT_TOLERANCE_USD = 1e16;
+
     address internal lender = address(0x1E4DE2);
     address internal liquidator = address(0x11D);
 
@@ -285,6 +288,72 @@ contract MarketLiquidateForkTest is MarketForkTest {
             usdgBefore - repaid - repaid * 50 / 10_000 + out1,
             "the USDG leg nets off against what was paid in"
         );
+    }
+
+    /// @notice A permitted delta hook can really keep the listed haircut, while the real
+    ///         PositionManager and Market still leave the liquidator below its bonus ceiling.
+    /// @dev The hook code is installed at 0x101 only because v4 reads hook permissions from the
+    ///      address. The pool, position, oracle and liquidation are otherwise the pinned fork's.
+    function test_aDeltaHookHaircutKeepsLiquidatorAtBonusCeiling() public {
+        _openRemovalHaircutPosition(REMOVAL_HAIRCUT_BPS);
+        _fundLiquidator(1000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        uint256 hookWethBefore = IERC20(RobinhoodChain.WETH).balanceOf(REMOVAL_HAIRCUT_HOOK);
+        uint256 hookUsdgBefore = usdg.balanceOf(REMOVAL_HAIRCUT_HOOK);
+
+        vm.prank(liquidator);
+        (uint256 repaid, uint256 out0, uint256 out1,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(repaid, 0, "the hook pool must liquidate");
+        assertGt(
+            IERC20(RobinhoodChain.WETH).balanceOf(REMOVAL_HAIRCUT_HOOK) - hookWethBefore
+                + usdg.balanceOf(REMOVAL_HAIRCUT_HOOK) - hookUsdgBefore,
+            0,
+            "the delta hook must keep its configured haircut"
+        );
+        uint256 payoutUsd = _wethUsdgValue(out0, out1);
+        uint256 bonusPayoutUsd = repaid * 1e12 * 10_500 / 10_000;
+        assertGe(
+            payoutUsd + PAYOUT_TOLERANCE_USD,
+            bonusPayoutUsd,
+            "the hook haircut must not leave the liquidator below the bonus payout"
+        );
+        assertLe(
+            payoutUsd,
+            bonusPayoutUsd + PAYOUT_TOLERANCE_USD,
+            "the independently valued payout exceeded repay x (1 + bonus)"
+        );
+    }
+
+    /// @notice The removal haircut also decides the liquidation gate, not only the payout.
+    function test_theLiquidationGateCountsTheRemovalHaircut() public {
+        _openRemovalHaircutPosition(REMOVAL_HAIRCUT_BPS);
+        _fundLiquidator(2000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        uint256 health = lens.healthFactor(tokenId);
+        assertGe(health * 10_000 / (10_000 - REMOVAL_HAIRCUT_BPS), 1e18, "without the haircut the loan is healthy");
+        uint256 debt = market.debtOf(tokenId);
+
+        vm.prank(liquidator);
+        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
+
+        assertGt(repaid, 0, "the haircut-only liquidation must proceed");
+        assertLt(market.debtOf(tokenId), debt, "the liquidation must reduce debt");
+    }
+
+    /// @notice Even at the accepted 2,000 bps ceiling, liquidation cannot seize for zero repay.
+    function test_theHaircutCeilingCannotEnableAZeroRepaySeizure() public {
+        _openRemovalHaircutPosition(2000);
+        _fundLiquidator(2000e6);
+        _ageUntilHealthFactorBelow(1e18);
+
+        vm.prank(liquidator);
+        (uint256 repaid, uint256 out0, uint256 out1,) = market.liquidate(tokenId, 1, 0, 0, liquidator);
+
+        assertGt(repaid, 0, "a ceiling haircut must still require repayment");
+        assertGt(out0 + out1, 0, "the liquidator must receive the seized position output");
     }
 
     /// @notice A partial seizure pays out what it charged for: the slice of liquidity plus the fee
@@ -716,53 +785,6 @@ contract MarketLiquidateForkTest is MarketForkTest {
         assertLe(attacker.redeemed(), fair, "a share redeemed mid-liquidation is worth no more than after it");
     }
 
-    /* --------------------------------- haircut -------------------------------- */
-
-    /// @notice §6.3: a hook that skims on withdrawal lowers what the position is worth, and
-    ///         §8 pays for it — this is the path where the haircut was still missing.
-    /// @dev Read on the full-seizure branch, where the repay is exactly `value / (1 + bonus)`:
-    ///      a 5% haircut has to show up as 5% less USDG changing hands for the same position.
-    function test_theHaircutLowersWhatTheSeizureIsWorth() public {
-        _open(500);
-        _fundLiquidator(2000e6);
-        _dropEthPrice(1200e18);
-
-        IPositionValuer.Valuation memory v = valuer.valueForLiquidation(tokenId);
-        uint256 realizable = (v.principalUsd + v.feesUsd) * 9500 / 10_000;
-
-        vm.prank(liquidator);
-        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
-
-        assertEq(repaid, realizable * 10_000 / 10_500 / 1e12, "the seizure pays for the haircut value, not the gross");
-        assertApproxEqRel(
-            repaid * 10_000 / 9500,
-            (v.principalUsd + v.feesUsd) * 10_000 / 10_500 / 1e12,
-            0.0001e18,
-            "an unhaircut pool would have cost 5% more"
-        );
-    }
-
-    /// @notice §6.2 and §8 step 1: the health factor that decides liquidation takes the removal
-    ///         haircut off, so a position under water only after it is still liquidatable.
-    /// @dev Aged to just under 1 with a 5% haircut, which puts the unhaircut health factor above 1. A
-    ///      gate that dropped the haircut would refuse with `PositionIsHealthy`. Since `DebtMath`
-    ///      states the formula once, nothing else catches an argument dropped at this call site
-    ///      (review of PR #18, mutant A8).
-    function test_theLiquidationGateCountsTheHaircut() public {
-        _open(500);
-        _fundLiquidator(2000e6);
-        _ageUntilHealthFactorBelow(1e18);
-        uint256 health = lens.healthFactor(tokenId);
-        assertGe(health * 10_000 / 9500, 1e18, "without the haircut the position would still be healthy");
-        uint256 debt = market.debtOf(tokenId);
-
-        vm.prank(liquidator);
-        (uint256 repaid,,,) = market.liquidate(tokenId, type(uint256).max, 0, 0, liquidator);
-
-        assertGt(repaid, 0, "the liquidation went through");
-        assertLt(market.debtOf(tokenId), debt, "and took debt off the position");
-    }
-
     /* ------------------------------ the price gates --------------------------- */
 
     /// @notice §5.2: every condition that blocks a borrow leaves liquidation running. The AC
@@ -817,9 +839,9 @@ contract MarketLiquidateForkTest is MarketForkTest {
     }
 
     function test_liquidationLensMatchesTheGateWithUsdPriceAndHaircut() public {
-        _open(500);
+        _openRemovalHaircutPosition(500);
         _fundLiquidator(2000e6);
-        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * 95 / 100);
+        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.WETH), ETH_AT_POOL_SPOT * 95 / 100);
         oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.USDG), 1.02e18);
 
         assertEq(lens.liquidationHealthFactor(tokenId), _healthyGateHealthFactor(), "lens must match the gate exactly");
@@ -846,16 +868,16 @@ contract MarketLiquidateForkTest is MarketForkTest {
     }
 
     function testFuzz_liquidationLensAgreesWithTheGate(
-        uint16 nativeBps,
+        uint16 wethBps,
         uint16 usdgBps,
         uint40 elapsed
     ) public {
-        _open(500);
+        _openRemovalHaircutPosition(500);
         _fundLiquidator(10_000e6);
-        nativeBps = uint16(bound(nativeBps, 5000, 12_000));
+        wethBps = uint16(bound(wethBps, 5000, 12_000));
         usdgBps = uint16(bound(usdgBps, 9500, 10_500));
         elapsed = uint40(bound(uint256(elapsed), 0, 365 days));
-        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.NATIVE), ETH_AT_POOL_SPOT * nativeBps / 10_000);
+        oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.WETH), ETH_AT_POOL_SPOT * wethBps / 10_000);
         oracle.setLiquidationPrice(Currency.wrap(RobinhoodChain.USDG), ONE_USD * usdgBps / 10_000);
         vm.warp(block.timestamp + elapsed);
 
@@ -993,6 +1015,16 @@ contract MarketLiquidateForkTest is MarketForkTest {
         uint256 amount = lens.maxBorrow(tokenId);
         vm.prank(borrower);
         market.borrow(tokenId, amount, borrower);
+    }
+
+    /// @dev The standard fixture's hook has no removal-delta permission, so tests that model a
+    ///      configured haircut must mint the same WETH/USDG shape behind the valid delta hook.
+    function _openRemovalHaircutPosition(
+        uint16 haircutBps
+    ) private {
+        tokenId = _mintRemovalHaircutPosition(haircutBps, 1e14);
+        borrower = address(this);
+        _open(haircutBps);
     }
 
     /// @dev `_open` on a meme market. Native ETH is re-tiered as meme first, which makes the pool
@@ -1193,6 +1225,15 @@ contract MarketLiquidateForkTest is MarketForkTest {
         uint256 amount1
     ) private view returns (uint256) {
         return amount0 * oracle.priceForLiquidation(Currency.wrap(RobinhoodChain.NATIVE)) / 1e18 + amount1
+            * oracle.priceForLiquidation(Currency.wrap(RobinhoodChain.USDG)) / 1e6;
+    }
+
+    /// @dev USD 1e18 for the fresh WETH/USDG hook pool, using the liquidation oracle directly.
+    function _wethUsdgValue(
+        uint256 wethAmount,
+        uint256 usdgAmount
+    ) private view returns (uint256) {
+        return wethAmount * oracle.priceForLiquidation(Currency.wrap(RobinhoodChain.WETH)) / 1e18 + usdgAmount
             * oracle.priceForLiquidation(Currency.wrap(RobinhoodChain.USDG)) / 1e6;
     }
 
