@@ -24,6 +24,7 @@ import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {Permit2Signer} from "../base/Permit2Signer.sol";
+import {VaultRedeemingHook} from "../mocks/VaultRedeemingHook.sol";
 
 /// @notice Mints positions straight into the market, through the deployed PositionManager
 ///         and Permit2.
@@ -411,6 +412,45 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
         market.mintAndDeposit(p, permit, signature);
 
         _assertNothingMoved(before, nextId);
+    }
+
+    /// @notice A hook that redeems its vault shares from inside the mint gets exactly what they
+    ///         were worth, and the borrower pays nothing for it.
+    /// @dev §4.1 v0.26: every market function that calls out must survive a vault exit from
+    ///      inside the call. The hook passes the §6.1 bit check, which is about removing
+    ///      liquidity, not adding it. When the borrower's tokens were pulled into the market
+    ///      they counted toward `totalAssets` while the hook ran: shares worth 20,000 USDG
+    ///      redeemed for 48,571, and the borrower's change paid the difference (FAR-45). The
+    ///      tokens now go straight to PositionManager, so the share price the hook sees is the
+    ///      one everyone else sees.
+    ///
+    ///      The pool is listed with the hook allowlisted, then the hook deposits: a hook with no
+    ///      shares does nothing, so the order only decides when the redeem arms.
+    function test_aRedeemFromInsideTheHookGainsNothing() public {
+        address hook = address((uint160(0xDEF1) << 144) | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
+        deployCodeTo("VaultRedeemingHook.sol:VaultRedeemingHook", abi.encode(market), hook);
+        PoolKey memory key = _initPool(hook);
+        _listPool(key, TierPresets.blueChip().minPositionUsd, 0);
+
+        deal(RobinhoodChain.USDG, hook, 20_000e6);
+        VaultRedeemingHook(hook).deposit(20_000e6);
+        uint256 fair = market.previewRedeem(market.balanceOf(hook));
+
+        FarmentaMarket.MintParams memory p = _inRange(key, LIQUIDITY, WETH_BUDGET, USDG_BUDGET);
+        uint256 strayUsdg = IERC20(RobinhoodChain.USDG).balanceOf(RobinhoodChain.POSITION_MANAGER);
+        Balances memory before = _balances();
+        _mintAndDeposit(p, 0);
+        Balances memory afterMint = _balances();
+
+        uint256 redeemed = VaultRedeemingHook(hook).redeemed();
+        assertGt(redeemed, 0, "the redeem must actually run inside the mint");
+        assertLe(redeemed, fair, "a share redeemed mid-mint is worth more than before it");
+
+        uint256 usdgSpent = afterMint.poolManagerUsdg - before.poolManagerUsdg;
+        assertEq(
+            before.borrowerUsdg - afterMint.borrowerUsdg, usdgSpent - strayUsdg, "the borrower paid for the redemption"
+        );
+        assertEq(afterMint.marketUsdg, before.marketUsdg - redeemed, "the market paid out more than the redeem");
     }
 
     /// @notice A position worth less than the floor is refused, however it was made.
