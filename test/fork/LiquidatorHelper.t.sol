@@ -67,7 +67,6 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         vm.prank(keeper);
         helper.execute(tokenId, repayAmount, _route(plain, 0));
 
-        assertGt(usdg.balanceOf(keeper), 0, "profit did not reach keeper");
         _assertEmpty();
         assertEq(IERC721(RobinhoodChain.POSITION_MANAGER).ownerOf(tokenId), address(market));
     }
@@ -93,7 +92,7 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         _ageUntilUnhealthy();
 
         vm.prank(keeper);
-        helper.execute(tokenId, market.debtOf(tokenId), _route(_keyOf(tokenId), 0));
+        helper.execute(tokenId, market.debtOf(tokenId), _route(Fixtures.liveRecorderPoolKeys()[1], 0));
         _assertEmpty();
     }
 
@@ -141,8 +140,9 @@ contract LiquidatorHelperForkTest is MarketForkTest {
 
         uint256 repayAmount = market.debtOf(tokenId);
         vm.prank(keeper);
-        helper.execute(tokenId, repayAmount, _route(_keyOf(tokenId), 0));
+        helper.execute(tokenId, repayAmount, _route(Fixtures.liveRecorderPoolKeys()[2], 0));
 
+        assertGt(usdg.balanceOf(keeper), 0, "profit did not reach keeper");
         _assertEmpty();
         assertEq(IERC20(RobinhoodChain.WETH).balanceOf(RobinhoodChain.UNIVERSAL_ROUTER), 0);
     }
