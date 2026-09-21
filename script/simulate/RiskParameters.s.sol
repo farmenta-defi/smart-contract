@@ -80,32 +80,56 @@ contract RiskParameters is Script {
         uint256 count = uint256(LAST_ETH_ROUND - FIRST_ETH_ROUND + 1);
         uint256[] memory timestamps = new uint256[](count);
         uint256[] memory prices = new uint256[](count);
-        uint256 crossedOne;
-        uint256 worstDrop;
         (, int256 first,, uint256 firstAt,) = ethUsd.getRoundData(FIRST_ETH_ROUND);
         for (uint256 i; i < count; ++i) {
-            (, int256 answer,, uint256 updatedAt,) = ethUsd.getRoundData(FIRST_ETH_ROUND + uint80(i));
-            timestamps[i] = updatedAt;
+            (, int256 answer, uint256 startedAt,,) = ethUsd.getRoundData(FIRST_ETH_ROUND + uint80(i));
+            timestamps[i] = startedAt;
             prices[i] = uint256(answer);
-            if (uint256(answer) * BPS < uint256(first) * uint256(TierPresets.blueChip().ltBps)) crossedOne++;
-            uint256 relative = uint256(answer) * BPS / uint256(first);
-            uint256 drop = relative < BPS ? BPS - relative : 0;
-            if (drop > worstDrop) worstDrop = drop;
         }
         uint256 lastIndex = count - 1;
+        (uint256 crossedPositions, uint256 delaySum, uint256 delayMin, uint256 delayMax, uint256 worstDrop) =
+            _historyCrossings(prices, timestamps, lastIndex);
         (, int256 last,, uint256 lastAt,) = ethUsd.getRoundData(LAST_ETH_ROUND);
         console.log("chainlink history rounds", uint256(LAST_ETH_ROUND - FIRST_ETH_ROUND + 1));
         console.log("chainlink history seconds", lastAt - firstAt);
         console.log("chainlink first price (8 decimals)", uint256(first));
         console.log("chainlink last price (8 decimals)", uint256(last));
-        console.log("chainlink maxLTV position HF crossings", crossedOne);
-        console.log("chainlink worst drawdown bps", worstDrop);
-        console.log(
-            "chainlink maxLTV-to-LT crossing percent",
-            BPS - uint256(TierPresets.blueChip().maxLtvBps) * BPS / uint256(TierPresets.blueChip().ltBps)
-        );
+        console.log("chainlink maxLTV positions crossing HF 1", crossedPositions);
+        console.log("chainlink maxLTV crossing percentage bps", crossedPositions * BPS / count);
+        console.log("chainlink crossing delay average seconds", crossedPositions == 0 ? 0 : delaySum / crossedPositions);
+        console.log("chainlink crossing delay minimum seconds", crossedPositions == 0 ? 0 : delayMin);
+        console.log("chainlink crossing delay maximum seconds", delayMax);
+        console.log("chainlink peak-to-trough drawdown bps", worstDrop);
         console.log("chainlink worst 1h drawdown bps", _worstWindowDrop(prices, timestamps, lastIndex, 1 hours));
         console.log("chainlink worst 24h drawdown bps", _worstWindowDrop(prices, timestamps, lastIndex, 24 hours));
+    }
+
+    function _historyCrossings(
+        uint256[] memory prices,
+        uint256[] memory timestamps,
+        uint256 lastIndex
+    ) private pure returns (uint256 crossed, uint256 delaySum, uint256 delayMin, uint256 delayMax, uint256 worstDrop) {
+        delayMin = type(uint256).max;
+        uint256 peak = prices[0];
+        for (uint256 i; i <= lastIndex; ++i) {
+            if (prices[i] > peak) peak = prices[i];
+            uint256 drawdown = prices[i] < peak ? BPS - prices[i] * BPS / peak : 0;
+            if (drawdown > worstDrop) worstDrop = drawdown;
+            uint256 threshold =
+                prices[i] * uint256(TierPresets.blueChip().maxLtvBps) / uint256(TierPresets.blueChip().ltBps);
+            for (uint256 j = i + 1; j <= lastIndex; ++j) {
+                if (timestamps[j] < timestamps[i]) continue;
+                if (timestamps[j] - timestamps[i] > 24 hours) break;
+                if (prices[j] < threshold) {
+                    crossed++;
+                    uint256 delay = timestamps[j] - timestamps[i];
+                    delaySum += delay;
+                    if (delay < delayMin) delayMin = delay;
+                    if (delay > delayMax) delayMax = delay;
+                    break;
+                }
+            }
+        }
     }
 
     function _worstWindowDrop(
@@ -117,7 +141,8 @@ contract RiskParameters is Script {
         for (uint256 i; i <= lastIndex; ++i) {
             uint256 oldest = prices[i];
             for (uint256 j = i + 1; j <= lastIndex; ++j) {
-                if (timestamps[j] < timestamps[i] || timestamps[j] - timestamps[i] > window) continue;
+                if (timestamps[j] < timestamps[i]) continue;
+                if (timestamps[j] - timestamps[i] > window) break;
                 if (prices[j] < oldest) oldest = prices[j];
             }
             uint256 relative = oldest * BPS / prices[i];
@@ -214,12 +239,14 @@ contract RiskParameters is Script {
             uint256 rugBps = depths[i];
             uint256 collateral = collateralAtLt * (BPS - rugBps) / BPS;
             uint256 repayable = collateral * BPS / (BPS + meme.minLiquidatorBonusBps);
-            uint256 badDebt = debtUsd - repayable;
+            uint256 badDebt = repayable >= debtUsd ? 0 : debtUsd - repayable;
             console.log("rug depth bps", rugBps);
             console.log("rug bad debt usd (1e18)", badDebt);
-            console.log("lender loss after reserve usd (1e18)", badDebt > reserveFloor ? badDebt - reserveFloor : 0);
+            console.log(
+                "lender share-price loss bps (market cap denominator)", badDebt * BPS / uint256(meme.marketDebtCapUsdg)
+            );
         }
-        console.log("meme reserve floor at market cap usd (1e18)", reserveFloor);
+        console.log("meme reserve floor reference usd (1e18)", reserveFloor);
     }
 
     function _minimumDebt(
