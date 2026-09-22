@@ -404,7 +404,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     function _requireHookPermitted(
         address hooks
     ) internal view {
-        if (HookPermissions.leavesRemoveLiquidityAlone(IHooks(hooks))) return;
+        if (HookPermissions.passesBitCheck(IHooks(hooks))) return;
         if (!hookAllowlist[hooks]) revert HookNotPermitted(hooks);
     }
 

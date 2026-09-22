@@ -20,18 +20,18 @@ library HookPermissions {
     ///      ARCHITECTURE §6.1 quotes: if Uniswap ever renumbers a bit, this mask follows and
     ///      a hard-coded constant would silently start admitting the wrong hooks.
     ///      `test_maskMatchesTheSpec` pins the two together.
-    uint160 internal constant REMOVE_LIQUIDITY_MASK = Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
-        | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG;
+    uint160 internal constant BIT_CHECK_MASK = Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
+        | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG;
 
     /// @notice True if the hook implements none of the remove-liquidity callbacks.
     /// @dev A `true` here is not admission on its own. Since v0.5 every pool is listed
     ///      explicitly (§6.1), so this is a precondition of review, not a gate: a hook that
     ///      passes still needs the pool listed, and a hook that fails can still be listed via
     ///      `hookAllowlist` once someone has read its source (§6.3).
-    function leavesRemoveLiquidityAlone(
+    function passesBitCheck(
         IHooks hooks
     ) internal pure returns (bool) {
-        return uint160(address(hooks)) & REMOVE_LIQUIDITY_MASK == 0;
+        return uint160(address(hooks)) & BIT_CHECK_MASK == 0;
     }
 
     /// @notice True if the hook may return a delta from `afterRemoveLiquidity`.
