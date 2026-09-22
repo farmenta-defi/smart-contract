@@ -114,11 +114,10 @@ contract MarketHandler is Test {
         market.withdraw(amount, lender, lender);
     }
 
-    /// @dev Never reaches the market in this suite. The blue-chip floor is 1% of `totalAssets`, 3 USDG
-    ///      from the lender's deposit alone, and the interest one position's debt earns in a run stays
-    ///      under it, so the lens answers zero. Measured on `main` `2af1217`: no successful withdrawal in
-    ///      16 runs. The floor ghost is fed by `withdrawReservesPastTheFloor`; a legitimate withdrawal is
-    ///      covered by the unit lane only.
+    /// @dev Reaches the market only in runs where interest has taken reserves past the floor, which
+    ///      needs `passTime`'s long steps: 3 to 5 successful withdrawals per campaign (FAR-61), none
+    ///      when steps were capped at 30 days. Amounts come from the lens, so this action cannot ask
+    ///      for more than the floor leaves; `withdrawReservesPastTheFloor` does.
     function withdrawReserves(
         uint256 amount
     ) external {
