@@ -110,6 +110,22 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         assertEq(nft.ownerOf(tokenId), address(market), "the position stays in custody");
     }
 
+    /// @notice A removal from a position holding no fees still reports them, as zero (FAR-52).
+    /// @dev Edge case: the first removal has just paid out every fee, so the second realises none.
+    function test_aRemovalWithNoFeesReportsZeroFees() public {
+        _deposit(tokenId);
+        uint128 quarter = liquidity / 4;
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, quarter, 0, 0, recipient);
+        (uint256 left0, uint256 left1) = valuer.feesOf(tokenId);
+        assertEq(left0 + left1, 0, "the first removal must have paid out every fee");
+
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.CollectFees(tokenId, _keyOf(tokenId).toId(), 0, 0);
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, quarter, 0, 0, recipient);
+    }
+
     /// @notice An ERC-20 pair pays both legs to `to` the same way.
     function test_bothErc20LegsReachTheRecipient() public {
         uint256 id = Fixtures.POS_WETH_USDG_WIDE_IN_RANGE;

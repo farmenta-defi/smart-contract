@@ -233,6 +233,22 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         assertEq(valuer.value(tokenId).fees0, 0, "the position still holds fees");
     }
 
+    /// @notice An addition to a position holding no fees still reports its claim, as zero (FAR-52).
+    /// @dev Edge case: the first addition has just claimed everything, so the second realises nothing.
+    function test_anAdditionWithNoFeesReportsAZeroClaim() public {
+        uint256 tokenId = _depositFixture(Fixtures.POS_WETH_USDG_ABOVE_RANGE);
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId) / 10;
+        // Permit2 pulls each maximum in full, and the first addition spends part of the balance,
+        // so each addition is given half the budget.
+        _increase(tokenId, liquidity, WETH_BUDGET / 2, USDG_BUDGET / 2, 0);
+        (uint256 left0, uint256 left1) = valuer.feesOf(tokenId);
+        assertEq(left0 + left1, 0, "the first addition must have claimed every fee");
+
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.CollectFees(tokenId, _keyOf(tokenId).toId(), 0, 0);
+        _increase(tokenId, liquidity, WETH_BUDGET / 2, USDG_BUDGET / 2, 1);
+    }
+
     /// @notice With debt outstanding, the claim may not leave the position under water.
     /// @dev The claim takes the counted fees out of the collateral value (capped at 10% of
     ///      principal, §6.2), so a maximum borrow plus a small addition ends below 1. §7's
