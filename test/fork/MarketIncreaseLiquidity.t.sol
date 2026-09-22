@@ -10,6 +10,7 @@ import {PoolDonateTest} from "@uniswap/v4-core/src/test/PoolDonateTest.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {SlippageCheck} from "@uniswap/v4-periphery/src/libraries/SlippageCheck.sol";
 import {IAllowanceTransfer} from "permit2/src/interfaces/IAllowanceTransfer.sol";
 import {ISignatureTransfer} from "permit2/src/interfaces/ISignatureTransfer.sol";
@@ -211,11 +212,14 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
         uint256 wethBefore = IERC20(RobinhoodChain.WETH).balanceOf(borrower);
 
-        // FAR-52: the claim is reported first, with the fees the position held, as `collectFees`
-        // reports one.
+        // FAR-52: the claim is reported first, as `collectFees` reports one, with what PositionManager
+        // actually pays out for the claim alone: on the USDG leg the fees reach the borrower mixed
+        // with the change, so their balance cannot say.
+        (uint256 realised0, uint256 realised1) = _realisedFees(tokenId);
+        assertGt(realised1, 0, "the fixture must realise USDG fees");
         PoolId poolId = _keyOf(tokenId).toId();
         vm.expectEmit(true, true, false, true, address(market));
-        emit FarmentaMarket.CollectFees(tokenId, poolId, valuation.fees0, valuation.fees1);
+        emit FarmentaMarket.CollectFees(tokenId, poolId, realised0, realised1);
         vm.expectEmit(true, true, false, true, address(market));
         emit FarmentaMarket.LiquidityChanged(tokenId, poolId, int256(uint256(liquidity)));
         _increase(tokenId, liquidity, WETH_BUDGET, USDG_BUDGET, 0);
@@ -955,5 +959,26 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         });
         (uint160 sqrtPriceX96,,,) = stateView.getSlot0(wethKey.toId());
         poolManager.initialize(key, sqrtPriceX96);
+    }
+
+    /// @dev The fees `id` realises on a claim alone: PositionManager's own `DECREASE_LIQUIDITY(0)`
+    ///      plus `TAKE_PAIR` to a fresh address, run as the market in a snapshot and undone.
+    function _realisedFees(
+        uint256 id
+    ) private returns (uint256 fees0, uint256 fees1) {
+        PoolKey memory key = _keyOf(id);
+        address sink = makeAddr("realised-fees");
+        bytes[] memory params = new bytes[](2);
+        params[0] = abi.encode(id, uint256(0), uint128(0), uint128(0), bytes(""));
+        params[1] = abi.encode(key.currency0, key.currency1, sink);
+        bytes memory call_ =
+            abi.encode(abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR)), params);
+
+        uint256 snapshot = vm.snapshotState();
+        vm.prank(address(market));
+        positionManager.modifyLiquidities(call_, block.timestamp);
+        fees0 = key.currency0.balanceOf(sink);
+        fees1 = key.currency1.balanceOf(sink);
+        vm.revertToState(snapshot);
     }
 }
