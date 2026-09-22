@@ -142,12 +142,13 @@ contract FarmentaMarket is
     event Borrow(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
     event Repay(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
 
-    /// @notice A collateral position's fees were claimed (§4.1, `poolId` per v0.30).
-    /// @dev `amount0`/`amount1` are `to`'s balance change across the claim, not the fees the position
-    ///      realised. Anything else reaching `to` while its ETH callback runs is counted as well, a vault
-    ///      redeem or a transfer from anyone, so indexers (§13) must not treat these figures as verified
-    ///      fee income. A `to` that sends out more than it received during that callback makes the claim
-    ///      revert with an arithmetic panic.
+    /// @notice A collateral position's fees were paid out: by `collectFees`, alongside the principal
+    ///         of `decreaseLiquidity`, or by the claim `increaseLiquidity` makes first (§4.1,
+    ///         `poolId` per v0.30).
+    /// @dev `amount0`/`amount1` are the fees the position realised, read from its fee growth just
+    ///      before PositionManager is called (`IPositionValuer.feesOf`, FAR-52), not a balance change
+    ///      of the recipient: whatever else reaches it meanwhile is not counted. See `feesOf` for the one
+    ///      way the realised figure can differ.
     event CollectFees(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount0, uint256 amount1);
     /// @notice A position was liquidated (§8).
     /// @dev `repaid` and `badDebt` are exact ledger figures. `out0`/`out1` are what the
@@ -422,6 +423,8 @@ contract FarmentaMarket is
     ///      could redeem at that inflated price and have the difference paid out of the
     ///      caller's change (§4.1 v0.26). Nothing is approved and no change is measured here, so
     ///      lenders' cash is out of reach by construction rather than by a balance check.
+    ///
+    ///      Emits `CollectFees` for the claim, then `LiquidityChanged` (FAR-52).
     function increaseLiquidity(
         uint256 tokenId,
         uint128 liquidity,
@@ -539,6 +542,9 @@ contract FarmentaMarket is
     ///        a recipient (§4.1 v0.43).
     /// @dev **Pausable**, like `collectFees`: with debt outstanding the removal prices the position
     ///      (§4.1 pause scope). A frozen or delisted pool does not stop it (§6.5).
+    ///
+    ///      Emits `CollectFees` for the fees that leave with the slice, then `LiquidityChanged`
+    ///      (FAR-52).
     ///
     ///      The removal runs from `MarketLiquidity`, which documents why `to` receives every fee as
     ///      well, the minimum held on what remains, the post-removal borrow limit and its price

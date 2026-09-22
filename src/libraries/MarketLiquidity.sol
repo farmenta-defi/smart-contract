@@ -22,12 +22,11 @@ import {MarketLedger} from "./MarketLedger.sol";
 ///      `msg.sender` is still the borrower. The market keeps the wrapper, the pause and the guard
 ///      (§4.1 v0.33).
 library MarketLiquidity {
-    /// @notice A position's fees were claimed to `to` (§4.1, `poolId` per v0.30).
-    /// @dev `amount0`/`amount1` are `to`'s balance change across the claim, not the fees the position
-    ///      realised. Anything else reaching `to` while its ETH callback runs is counted as well, a vault
-    ///      redeem or a transfer from anyone, so indexers (§13) must not treat these figures as verified
-    ///      fee income. A `to` that sends out more than it received during that callback makes the claim
-    ///      revert with an arithmetic panic.
+    /// @notice A position's fees were paid out (§4.1, `poolId` per v0.30).
+    /// @dev `amount0`/`amount1` are the fees the position realised, read from its fee growth just
+    ///      before PositionManager is called (`IPositionValuer.feesOf`, FAR-52), not a balance change
+    ///      of the recipient: whatever else reaches it meanwhile is not counted. See `feesOf` for the one
+    ///      way the realised figure can differ.
     event CollectFees(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount0, uint256 amount1);
 
     /// @notice Liquidity left a position to `to` (§4.1, `poolId` per v0.30, field order per v0.43).
@@ -82,16 +81,12 @@ library MarketLiquidity {
         if (loan.owner != msg.sender) revert NotTheDepositor(tokenId, loan.owner);
 
         (PoolKey memory key,) = env.positionManager.getPoolAndPositionInfo(tokenId);
-        uint256 amount0 = key.currency0.balanceOf(to);
-        uint256 amount1 = key.currency1.balanceOf(to);
+        (uint256 fees0, uint256 fees1) = env.debt.valuer.feesOf(tokenId);
 
         _decreaseTo(env, key, tokenId, 0, 0, 0, to);
 
-        amount0 = key.currency0.balanceOf(to) - amount0;
-        amount1 = key.currency1.balanceOf(to) - amount1;
-
         MarketDebt.requireHealthy(env.debt, tokenId);
-        emit CollectFees(tokenId, loan.poolKeyId, amount0, amount1);
+        emit CollectFees(tokenId, loan.poolKeyId, fees0, fees1);
     }
 
     /// @dev `FarmentaMarket.decreaseLiquidity`'s arguments. Carried as one calldata struct so the
@@ -117,9 +112,13 @@ library MarketLiquidity {
     ///      against `liquidityDelta - feesAccrued`, so fees never help a removal clear its minimum,
     ///      and a caller sizes them from the slice's principal only.
     ///
+    ///      **The fees are reported as `collectFees` reports them** (FAR-52): `CollectFees` with the
+    ///      fees read from fee growth before the removal, then `LiquidityChanged`. Principal and fees
+    ///      leave in the same `TAKE`, so no balance change could have split them.
+    ///
     ///      **A zero `liquidity` is refused**: that is a fee claim, and `collectFees` is the function
-    ///      for it, with its own event. **More than the position holds is refused here**, by name,
-    ///      rather than deep inside PoolManager as an arithmetic failure.
+    ///      for it. **More than the position holds is refused here**, by name, rather than deep inside
+    ///      PoolManager as an arithmetic failure.
     ///
     ///      **What stays in custody must still pass §6.1's minimum** (decided on FAR-8, 17 Sep 2026):
     ///      principal after the removal haircut, fees excluded, against the pool's
@@ -167,6 +166,7 @@ library MarketLiquidity {
         // through. Placed after the checks above so a refusal names its own reason rather than
         // `TwapUnavailable`.
         if ($.tier == ICollateralPolicy.Tier.MEME) env.debt.oracle.record(key);
+        (uint256 fees0, uint256 fees1) = env.debt.valuer.feesOf(p.tokenId);
 
         _decreaseTo(env, key, p.tokenId, p.liquidity, p.amount0Min, p.amount1Min, p.to);
 
@@ -176,6 +176,7 @@ library MarketLiquidity {
         if (recoverableUsd < terms.minPositionUsd) revert PositionBelowMinimum(recoverableUsd, terms.minPositionUsd);
 
         MarketDebt.requireWithinBorrowLimit(env.debt, p.tokenId);
+        emit CollectFees(p.tokenId, loan.poolKeyId, fees0, fees1);
         emit LiquidityChanged(p.tokenId, loan.poolKeyId, -int256(uint256(p.liquidity)));
     }
 
