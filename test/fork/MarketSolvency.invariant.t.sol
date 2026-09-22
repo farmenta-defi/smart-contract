@@ -262,6 +262,8 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
         assertEq(market.totalBorrows(), market.totalBorrowShares() * market.borrowIndex() / 1e18);
     }
 
+    /// @dev Only bites once reserves pass the floor and `withdraw` drains the cash under what they leave.
+    ///      A lens without its cash cap turns this red; before FAR-61 no run reached that state.
     function invariant_withdrawableNeverExceedsCash() public view {
         assertLe(lens.withdrawableReserves(), IERC20(market.asset()).balanceOf(address(market)));
     }
