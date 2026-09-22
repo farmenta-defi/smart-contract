@@ -114,11 +114,10 @@ contract MarketHandler is Test {
         market.withdraw(amount, lender, lender);
     }
 
-    /// @dev Never reaches the market in this suite. The blue-chip floor is 1% of `totalAssets`, 3 USDG
-    ///      from the lender's deposit alone, and the interest one position's debt earns in a run stays
-    ///      under it, so the lens answers zero. Measured on `main` `2af1217`: no successful withdrawal in
-    ///      16 runs. The floor ghost is fed by `withdrawReservesPastTheFloor`; a legitimate withdrawal is
-    ///      covered by the unit lane only.
+    /// @dev Reaches the market only in runs where interest has taken reserves past the floor, which
+    ///      needs `passTime`'s long steps: 3 to 5 successful withdrawals per campaign (FAR-61), none
+    ///      when steps were capped at 30 days. Amounts come from the lens, so this action cannot ask
+    ///      for more than the floor leaves; `withdrawReservesPastTheFloor` does.
     function withdrawReserves(
         uint256 amount
     ) external {
@@ -203,12 +202,16 @@ contract MarketHandler is Test {
         }
     }
 
+    /// @dev Up to a year per call. Reserves grow only by 15% of the interest, and the blue-chip floor is
+    ///      1% of `totalAssets`: at the setup's 43% utilization that is years of accrual. With steps of at
+    ///      most 30 days no run took reserves past it (FAR-61). A year lets a run cross it, most of all
+    ///      after `withdraw` has drained the cash and utilization sits at the top of the curve.
     function passTime(
         uint40 elapsed
     ) external {
         uint256 oneShare = 10 ** market.decimals();
         uint256 assetsBefore = market.convertToAssets(oneShare);
-        vm.warp(block.timestamp + bound(uint256(elapsed), 1 hours, 30 days));
+        vm.warp(block.timestamp + bound(uint256(elapsed), 1 hours, 365 days));
         market.accrue();
         if (market.convertToAssets(oneShare) < assetsBefore) sawSharePriceDecrease = true;
     }
@@ -259,6 +262,8 @@ contract MarketSolvencyInvariantTest is MarketForkTest {
         assertEq(market.totalBorrows(), market.totalBorrowShares() * market.borrowIndex() / 1e18);
     }
 
+    /// @dev Only bites once reserves pass the floor and `withdraw` drains the cash under what they leave.
+    ///      A lens without its cash cap turns this red; before FAR-61 no run reached that state.
     function invariant_withdrawableNeverExceedsCash() public view {
         assertLe(lens.withdrawableReserves(), IERC20(market.asset()).balanceOf(address(market)));
     }
