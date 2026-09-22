@@ -23,6 +23,7 @@ import {MarketLedger} from "./MarketLedger.sol";
 library MarketMint {
     event CollateralDeposited(uint256 indexed tokenId, address indexed owner, PoolId indexed poolId);
     event LiquidityChanged(uint256 indexed tokenId, PoolId indexed poolId, int256 liqDelta);
+    event CollectFees(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount0, uint256 amount1);
 
     error NotTheDepositor(uint256 tokenId, address depositor);
     error ZeroLiquidity();
@@ -92,18 +93,31 @@ library MarketMint {
     ///      caller's tokens go straight from Permit2 to PositionManager, which settles out of that
     ///      balance and sweeps the rest back, so nothing passes through the market while the pool's
     ///      hook runs. See `FarmentaMarket.increaseLiquidity`.
+    ///
+    ///      The claim is reported as `collectFees` reports one (FAR-52): `CollectFees` with the fees
+    ///      read from fee growth before PositionManager is called, emitted there, and
+    ///      `LiquidityChanged` once the addition has passed its health check. The fees
+    ///      and the change `SWEEP` returns reach the caller together, so no balance change could
+    ///      have told them apart.
     function increaseLiquidity(
         Env calldata env,
         IncreaseParams calldata p,
         ISignatureTransfer.PermitBatchTransferFrom calldata permit,
         bytes calldata signature
     ) external {
-        // A zero addition would be a fee claim with no recipient argument and no `CollectFees`
-        // event: `collectFees` is that function (FAR-7). It would also run the pool's remove hook.
+        // A zero addition would be a fee claim with no recipient argument: `collectFees` is that
+        // function (FAR-7). It would also run the pool's remove hook.
         if (p.liquidity == 0) revert ZeroLiquidity();
         MarketDebt.accrue(env.debt);
 
         (PoolKey memory key, PoolId poolId) = _admitIncrease(env, p.tokenId);
+        // Emitted ahead of the claim it reports, which a revert anywhere below undoes with it. Held
+        // until after the action instead, the two fees would not fit the unoptimised `lite` build's
+        // stack.
+        {
+            (uint256 fees0, uint256 fees1) = env.valuer.feesOf(p.tokenId);
+            emit CollectFees(p.tokenId, poolId, fees0, fees1);
+        }
         ISignatureTransfer.SignatureTransferDetails[] memory transfers = _transfersFor(
             key, p.amount0Max, p.amount1Max, permit, _firstLeg(key, p.amount0Max), address(env.positionManager)
         );

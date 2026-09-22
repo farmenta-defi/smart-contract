@@ -211,6 +211,13 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
         uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
         uint256 wethBefore = IERC20(RobinhoodChain.WETH).balanceOf(borrower);
 
+        // FAR-52: the claim is reported first, with the fees the position held, as `collectFees`
+        // reports one.
+        PoolId poolId = _keyOf(tokenId).toId();
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.CollectFees(tokenId, poolId, valuation.fees0, valuation.fees1);
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.LiquidityChanged(tokenId, poolId, int256(uint256(liquidity)));
         _increase(tokenId, liquidity, WETH_BUDGET, USDG_BUDGET, 0);
 
         assertEq(positionManager.getPositionLiquidity(tokenId), 2 * liquidity, "liquidity was not added");

@@ -142,8 +142,9 @@ contract FarmentaMarket is
     event Borrow(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
     event Repay(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
 
-    /// @notice A collateral position's fees were paid out, by `collectFees` or alongside the
-    ///         principal of `decreaseLiquidity` (§4.1, `poolId` per v0.30).
+    /// @notice A collateral position's fees were paid out: by `collectFees`, alongside the principal
+    ///         of `decreaseLiquidity`, or by the claim `increaseLiquidity` makes first (§4.1,
+    ///         `poolId` per v0.30).
     /// @dev `amount0`/`amount1` are the fees the position realised, read from its fee growth just
     ///      before PositionManager is called (`IPositionValuer.feesOf`, FAR-52), not a balance change
     ///      of the recipient: whatever else reaches it meanwhile is not counted. See `feesOf` for the one
@@ -422,6 +423,8 @@ contract FarmentaMarket is
     ///      could redeem at that inflated price and have the difference paid out of the
     ///      caller's change (§4.1 v0.26). Nothing is approved and no change is measured here, so
     ///      lenders' cash is out of reach by construction rather than by a balance check.
+    ///
+    ///      Emits `CollectFees` for the claim, then `LiquidityChanged` (FAR-52).
     function increaseLiquidity(
         uint256 tokenId,
         uint128 liquidity,
