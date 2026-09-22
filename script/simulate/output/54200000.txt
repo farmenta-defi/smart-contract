@@ -1,8 +1,10 @@
 FAR-22 risk simulation (Robinhood fork block 54,200,000)
 
 Chainlink history: 1,992 rounds, 7,841,969 seconds, $1,600.81 -> $2,526.57
-maxLTV positions crossing HF 1: 0 (0 bps)
-crossing delay: none
+maxLTV positions crossing HF 1 within 24h: 0 (0 bps)
+crossing delay within 24h: none
+maxLTV positions crossing HF 1 over history: 100 (502 bps)
+crossing delay over history: 260505 / 723545 / 920493 seconds (min / average / max)
 peak-to-trough drawdown: 1,794 bps
 worst 1h drawdown: 549 bps
 worst 24h drawdown: 854 bps

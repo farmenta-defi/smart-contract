@@ -41,6 +41,14 @@ contract RiskParameters is Script {
     IERC20 private usdg;
     IAggregatorV3 private ethUsd;
 
+    struct CrossingStats {
+        uint256 crossed;
+        uint256 delaySum;
+        uint256 delayMin;
+        uint256 delayMax;
+        uint256 peakToTrough;
+    }
+
     function run() external {
         vm.createSelectFork("robinhood", FORK_BLOCK);
         stateView = IStateView(RobinhoodChain.STATE_VIEW);
@@ -87,19 +95,35 @@ contract RiskParameters is Script {
             prices[i] = uint256(answer);
         }
         uint256 lastIndex = count - 1;
-        (uint256 crossedPositions, uint256 delaySum, uint256 delayMin, uint256 delayMax, uint256 worstDrop) =
-            _historyCrossings(prices, timestamps, lastIndex);
+        CrossingStats memory withinHeartbeat = _historyCrossings(prices, timestamps, lastIndex, 24 hours);
+        CrossingStats memory fullHistory = _historyCrossings(prices, timestamps, lastIndex, type(uint256).max);
         (, int256 last,, uint256 lastAt,) = ethUsd.getRoundData(LAST_ETH_ROUND);
         console.log("chainlink history rounds", uint256(LAST_ETH_ROUND - FIRST_ETH_ROUND + 1));
         console.log("chainlink history seconds", lastAt - firstAt);
         console.log("chainlink first price (8 decimals)", uint256(first));
         console.log("chainlink last price (8 decimals)", uint256(last));
-        console.log("chainlink maxLTV positions crossing HF 1", crossedPositions);
-        console.log("chainlink maxLTV crossing percentage bps", crossedPositions * BPS / count);
-        console.log("chainlink crossing delay average seconds", crossedPositions == 0 ? 0 : delaySum / crossedPositions);
-        console.log("chainlink crossing delay minimum seconds", crossedPositions == 0 ? 0 : delayMin);
-        console.log("chainlink crossing delay maximum seconds", delayMax);
-        console.log("chainlink peak-to-trough drawdown bps", worstDrop);
+        console.log("chainlink maxLTV positions crossing HF 1 within 24h", withinHeartbeat.crossed);
+        console.log("chainlink maxLTV crossing percentage within 24h bps", withinHeartbeat.crossed * BPS / count);
+        console.log(
+            "chainlink crossing delay average within 24h seconds",
+            withinHeartbeat.crossed == 0 ? 0 : withinHeartbeat.delaySum / withinHeartbeat.crossed
+        );
+        console.log(
+            "chainlink crossing delay minimum within 24h seconds",
+            withinHeartbeat.crossed == 0 ? 0 : withinHeartbeat.delayMin
+        );
+        console.log("chainlink crossing delay maximum within 24h seconds", withinHeartbeat.delayMax);
+        console.log("chainlink maxLTV positions crossing HF 1 over history", fullHistory.crossed);
+        console.log("chainlink maxLTV crossing percentage over history bps", fullHistory.crossed * BPS / count);
+        console.log(
+            "chainlink crossing delay average over history seconds",
+            fullHistory.crossed == 0 ? 0 : fullHistory.delaySum / fullHistory.crossed
+        );
+        console.log(
+            "chainlink crossing delay minimum over history seconds", fullHistory.crossed == 0 ? 0 : fullHistory.delayMin
+        );
+        console.log("chainlink crossing delay maximum over history seconds", fullHistory.delayMax);
+        console.log("chainlink peak-to-trough drawdown bps", fullHistory.peakToTrough);
         console.log("chainlink worst 1h drawdown bps", _worstWindowDrop(prices, timestamps, lastIndex, 1 hours));
         console.log("chainlink worst 24h drawdown bps", _worstWindowDrop(prices, timestamps, lastIndex, 24 hours));
     }
@@ -107,25 +131,26 @@ contract RiskParameters is Script {
     function _historyCrossings(
         uint256[] memory prices,
         uint256[] memory timestamps,
-        uint256 lastIndex
-    ) private pure returns (uint256 crossed, uint256 delaySum, uint256 delayMin, uint256 delayMax, uint256 worstDrop) {
-        delayMin = type(uint256).max;
+        uint256 lastIndex,
+        uint256 window
+    ) private pure returns (CrossingStats memory stats) {
+        stats.delayMin = type(uint256).max;
         uint256 peak = prices[0];
         for (uint256 i; i <= lastIndex; ++i) {
             if (prices[i] > peak) peak = prices[i];
             uint256 drawdown = prices[i] < peak ? BPS - prices[i] * BPS / peak : 0;
-            if (drawdown > worstDrop) worstDrop = drawdown;
+            if (drawdown > stats.peakToTrough) stats.peakToTrough = drawdown;
             uint256 threshold =
                 prices[i] * uint256(TierPresets.blueChip().maxLtvBps) / uint256(TierPresets.blueChip().ltBps);
             for (uint256 j = i + 1; j <= lastIndex; ++j) {
                 if (timestamps[j] < timestamps[i]) continue;
-                if (timestamps[j] - timestamps[i] > 24 hours) break;
+                if (timestamps[j] - timestamps[i] > window) break;
                 if (prices[j] < threshold) {
-                    crossed++;
+                    stats.crossed++;
                     uint256 delay = timestamps[j] - timestamps[i];
-                    delaySum += delay;
-                    if (delay < delayMin) delayMin = delay;
-                    if (delay > delayMax) delayMax = delay;
+                    stats.delaySum += delay;
+                    if (delay < stats.delayMin) stats.delayMin = delay;
+                    if (delay > stats.delayMax) stats.delayMax = delay;
                     break;
                 }
             }
