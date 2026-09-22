@@ -11,12 +11,12 @@ import {Fixtures} from "../base/Fixtures.sol";
 /// @notice Unit tests for reading hook permissions from an address. No network.
 contract HookPermissionsTest is Test {
     /// @notice Pins the mask built from Uniswap's flags to the literal the spec quotes.
-    /// @dev §6.1 states the check as `uint160(hooks) & 0x301 == 0`. The library derives the
+    /// @dev §6.1 states the check as `uint160(hooks) & 0x303 == 0` (0x301 before FAR-47). The library derives the
     ///      mask from v4-core instead of copying that number; this is the seam where the two
     ///      have to agree. If Uniswap renumbers a bit, this fails and the spec needs updating
     ///      — which is the correct outcome, rather than the code quietly diverging.
     function test_maskMatchesTheSpec() public pure {
-        assertEq(HookPermissions.BIT_CHECK_MASK, 0x301, "mask no longer matches spec 6.1");
+        assertEq(HookPermissions.BIT_CHECK_MASK, 0x303, "mask no longer matches spec 6.1");
     }
 
     function test_noHookPassesTheBitCheck() public pure {
@@ -62,24 +62,27 @@ contract HookPermissionsTest is Test {
         );
     }
 
-    /// @dev Each of the three bits must fail on its own — a mask that only caught two of them
-    ///      would still pass every test above, since the real hooks set more than one bit.
+    /// @dev Each of the four bits must fail on its own: a mask that missed one of them would
+    ///      still pass every test above, since the real hooks set more than one bit.
     function testFuzz_anySingleMaskedBitFails(
         uint160 base
     ) public pure {
-        base = uint160(bound(base, 0, type(uint160).max)) & ~uint160(0x301);
+        base = uint160(bound(base, 0, type(uint160).max)) & ~uint160(0x303);
         assertTrue(HookPermissions.passesBitCheck(IHooks(address(base))), "clean address rejected");
 
         assertFalse(HookPermissions.passesBitCheck(IHooks(address(base | (1 << 9)))), "bit 9 missed");
         assertFalse(HookPermissions.passesBitCheck(IHooks(address(base | (1 << 8)))), "bit 8 missed");
         assertFalse(HookPermissions.passesBitCheck(IHooks(address(base | 1))), "bit 0 missed");
+        assertFalse(HookPermissions.passesBitCheck(IHooks(address(base | (1 << 1)))), "bit 1 missed");
     }
 
     /// @dev Bits Farmenta does not object to must not cause a rejection. A mask that was too
-    ///      wide would quietly exclude most of the chain's hooked pools.
+    ///      wide would quietly exclude most of the chain's hooked pools. Bit 1 left this set in
+    ///      FAR-47; `afterAddLiquidity` (bit 10) stays, since without its delta flag it cannot
+    ///      bill the addition it observes.
     function test_unrelatedBitsAreIgnored() public pure {
         uint160 swapAndDonate = (1 << 7) | (1 << 6) | (1 << 5) | (1 << 4) | (1 << 13) | (1 << 12) | (1 << 11)
-            | (1 << 10) | (1 << 3) | (1 << 2) | (1 << 1);
+            | (1 << 10) | (1 << 3) | (1 << 2);
         assertTrue(
             HookPermissions.passesBitCheck(IHooks(address(swapAndDonate))),
             "mask is too wide - it rejects callbacks Farmenta does not care about"
