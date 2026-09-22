@@ -155,4 +155,35 @@ contract PositionValuerForkTest is ForkTest {
         vm.expectRevert(abi.encodeWithSelector(MockPriceOracle.PriceNotSet.selector, key.currency0));
         valuer.value(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
     }
+
+    /* --------------------------------- feesOf --------------------------------- */
+
+    /// @notice `feesOf` reports the same fees `value` does (FAR-52): the market emits these as
+    ///         the fees a claim, an addition or a removal paid out.
+    function test_feesOfMatchesTheValuation() public view {
+        IPositionValuer.Valuation memory v = valuer.value(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        (uint256 fees0, uint256 fees1) = valuer.feesOf(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+
+        assertGt(fees0, 0, "fixture has uncollected currency0 fees");
+        assertEq(fees0, v.fees0, "fees0");
+        assertEq(fees1, v.fees1, "fees1");
+    }
+
+    /// @dev Reads no price, so a debt-free position's addition or claim does not start depending on
+    ///      the oracle just to report its fees.
+    function test_feesOfReadsNoPrice() public {
+        (PoolKey memory key,) = positionManager.getPoolAndPositionInfo(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        (uint256 fees0, uint256 fees1) = valuer.feesOf(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        oracle.set(key.currency0, 0, 18);
+
+        (uint256 unpriced0, uint256 unpriced1) = valuer.feesOf(Fixtures.POS_ETH_USDG_DYN_IN_RANGE);
+        assertEq(unpriced0, fees0, "fees0");
+        assertEq(unpriced1, fees1, "fees1");
+    }
+
+    function test_feesOfAnUnknownPositionReverts() public {
+        uint256 missing = positionManager.nextTokenId() + 1;
+        vm.expectRevert(abi.encodeWithSelector(IPositionValuer.PositionNotFound.selector, missing));
+        valuer.feesOf(missing);
+    }
 }
