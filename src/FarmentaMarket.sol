@@ -143,11 +143,10 @@ contract FarmentaMarket is
     event Repay(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
 
     /// @notice A collateral position's fees were claimed (§4.1, `poolId` per v0.30).
-    /// @dev `amount0`/`amount1` are `to`'s balance change across the claim, not the fees the position
-    ///      realised. Anything else reaching `to` while its ETH callback runs is counted as well, a vault
-    ///      redeem or a transfer from anyone, so indexers (§13) must not treat these figures as verified
-    ///      fee income. A `to` that sends out more than it received during that callback makes the claim
-    ///      revert with an arithmetic panic.
+    /// @dev `amount0`/`amount1` are the fees the position realised, read from its fee growth just
+    ///      before PositionManager is called (`IPositionValuer.feesOf`, FAR-52), not a balance change
+    ///      of the recipient: whatever else reaches it meanwhile is not counted. See `feesOf` for the one
+    ///      way the realised figure can differ.
     event CollectFees(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount0, uint256 amount1);
     /// @notice A position was liquidated (§8).
     /// @dev `repaid` and `badDebt` are exact ledger figures. `out0`/`out1` are what the

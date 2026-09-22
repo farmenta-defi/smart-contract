@@ -22,12 +22,11 @@ import {MarketLedger} from "./MarketLedger.sol";
 ///      `msg.sender` is still the borrower. The market keeps the wrapper, the pause and the guard
 ///      (§4.1 v0.33).
 library MarketLiquidity {
-    /// @notice A position's fees were claimed to `to` (§4.1, `poolId` per v0.30).
-    /// @dev `amount0`/`amount1` are `to`'s balance change across the claim, not the fees the position
-    ///      realised. Anything else reaching `to` while its ETH callback runs is counted as well, a vault
-    ///      redeem or a transfer from anyone, so indexers (§13) must not treat these figures as verified
-    ///      fee income. A `to` that sends out more than it received during that callback makes the claim
-    ///      revert with an arithmetic panic.
+    /// @notice A position's fees were paid out (§4.1, `poolId` per v0.30).
+    /// @dev `amount0`/`amount1` are the fees the position realised, read from its fee growth just
+    ///      before PositionManager is called (`IPositionValuer.feesOf`, FAR-52), not a balance change
+    ///      of the recipient: whatever else reaches it meanwhile is not counted. See `feesOf` for the one
+    ///      way the realised figure can differ.
     event CollectFees(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount0, uint256 amount1);
 
     /// @notice Liquidity left a position to `to` (§4.1, `poolId` per v0.30, field order per v0.43).
@@ -82,16 +81,12 @@ library MarketLiquidity {
         if (loan.owner != msg.sender) revert NotTheDepositor(tokenId, loan.owner);
 
         (PoolKey memory key,) = env.positionManager.getPoolAndPositionInfo(tokenId);
-        uint256 amount0 = key.currency0.balanceOf(to);
-        uint256 amount1 = key.currency1.balanceOf(to);
+        (uint256 fees0, uint256 fees1) = env.debt.valuer.feesOf(tokenId);
 
         _decreaseTo(env, key, tokenId, 0, 0, 0, to);
 
-        amount0 = key.currency0.balanceOf(to) - amount0;
-        amount1 = key.currency1.balanceOf(to) - amount1;
-
         MarketDebt.requireHealthy(env.debt, tokenId);
-        emit CollectFees(tokenId, loan.poolKeyId, amount0, amount1);
+        emit CollectFees(tokenId, loan.poolKeyId, fees0, fees1);
     }
 
     /// @dev `FarmentaMarket.decreaseLiquidity`'s arguments. Carried as one calldata struct so the
