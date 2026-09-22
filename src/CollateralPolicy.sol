@@ -316,6 +316,11 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     /// @dev Reverts with the specific reason rather than returning false, so a rejected
     ///      deposit tells the user which rule stopped it. The caller still has to enforce the
     ///      value-dependent rules from the returned terms: `minPositionUsd` and the debt cap.
+    ///
+    ///      The hook must pass the §6.1 bit check (`HookPermissions.BIT_CHECK_MASK`, 0x303) or
+    ///      be in `hookAllowlist`. The mask covers the callbacks that can block or skim a
+    ///      removal and, since FAR-47, the return delta on `afterAddLiquidity`, which lets a
+    ///      hook bill the borrower on `mintAndDeposit` and `increaseLiquidity`.
     function checkPool(
         PoolKey calldata key,
         Tier marketTier
@@ -404,7 +409,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     function _requireHookPermitted(
         address hooks
     ) internal view {
-        if (HookPermissions.leavesRemoveLiquidityAlone(IHooks(hooks))) return;
+        if (HookPermissions.passesBitCheck(IHooks(hooks))) return;
         if (!hookAllowlist[hooks]) revert HookNotPermitted(hooks);
     }
 

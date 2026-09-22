@@ -2,6 +2,8 @@
 pragma solidity 0.8.26;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -18,6 +20,7 @@ import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
+import {AdditionChargingHook} from "../mocks/AdditionChargingHook.sol";
 
 /// @notice The EIP-712 domain separator, which `IPositionManager` does not expose.
 interface IEIP712Domain {
@@ -187,6 +190,41 @@ contract MarketCustodyForkTest is MarketForkTest {
     }
 
     /// @notice Dust is refused, measured on principal alone.
+    /// @notice A pool whose hook bills liquidity additions is refused once nobody vouches for
+    ///         the hook.
+    /// @dev FAR-47. The hook keeps a tenth of every leg added to its pool and touches no removal
+    ///      callback, so the 0x301 mask admitted it on bits alone. The mint shows the bill. The
+    ///      pool is listed while the hook is allowlisted, the way the owner would list it after
+    ///      review, and a first deposit goes through. Withdrawing the allowlisting must then
+    ///      refuse the next one: under 0x301 it changed nothing and the deposit was accepted.
+    function test_hookChargingAdditionsIsRefusedWithoutTheAllowlist() public {
+        address hook = address(
+            (uint160(0xC4A6) << 144) | Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG
+        );
+        vm.etch(hook, address(new AdditionChargingHook(poolManager, 1000)).code);
+        PoolKey memory key = _initWethUsdgPool(hook);
+
+        _fundAndApprove(key, 10 ether, 100_000e6);
+        int24 mid = _alignedOracleTick(key.tickSpacing);
+        uint256 accepted = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e15);
+        uint256 refused = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e15);
+        assertGt(IERC20(RobinhoodChain.USDG).balanceOf(hook), 0, "the hook should have billed the mint");
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, true);
+        _listPool(key, TierPresets.blueChip().minPositionUsd, 0);
+        nft.approve(address(market), accepted);
+        market.depositCollateral(accepted);
+        assertEq(nft.ownerOf(accepted), address(market), "an allowlisted hook's pool should accept");
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, false);
+        nft.approve(address(market), refused);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
+        market.depositCollateral(refused);
+        assertEq(nft.ownerOf(refused), address(this), "a refused deposit must leave the NFT alone");
+    }
+
     /// @dev The fixture is worth roughly $382, so a floor above that must stop it. Listings
     ///      may only tighten the tier preset, which is why the floor is raised rather than
     ///      lowered to build this case.

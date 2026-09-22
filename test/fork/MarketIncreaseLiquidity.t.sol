@@ -603,12 +603,13 @@ contract MarketIncreaseLiquidityForkTest is Permit2Signer {
     /// @notice A hook that redeems its vault shares from inside the addition gets exactly what
     ///         they were worth, and the borrower pays nothing for it.
     /// @dev §4.1 v0.26: every market function that calls out must survive a vault exit from
-    ///      inside the call. The hook here passes the §6.1 bit check, which is about removing
-    ///      liquidity, not adding it. Had the borrower's tokens been pulled into the market,
-    ///      they would count toward `totalAssets` while the hook ran: measured on
-    ///      `mintAndDeposit` before FAR-45, shares worth 20,000 USDG redeemed for 48,571 and
-    ///      the borrower's change paid the difference. Here the tokens never reach the market,
-    ///      so the share price the hook sees is the one everyone else sees.
+    ///      inside the call. The hook here passes the §6.1 bit check: `afterAddLiquidity`
+    ///      without its delta flag can act during an addition but cannot bill it (FAR-47).
+    ///      Had the borrower's tokens been pulled into the market, they would count toward
+    ///      `totalAssets` while the hook ran: measured on `mintAndDeposit` before FAR-45,
+    ///      shares worth 20,000 USDG redeemed for 48,571 and the borrower's change paid the
+    ///      difference. Here the tokens never reach the market, so the share price the hook
+    ///      sees is the one everyone else sees.
     function test_aRedeemFromInsideTheHookGainsNothing() public {
         address hook = address((uint160(0xDEF1) << 144) | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
         deployCodeTo("VaultRedeemingHook.sol:VaultRedeemingHook", abi.encode(market), hook);
