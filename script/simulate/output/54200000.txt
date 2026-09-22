@@ -1,0 +1,29 @@
+FAR-22 risk simulation (Robinhood fork block 54,200,000)
+
+Chainlink history: 1,992 rounds, 7,841,969 seconds, $1,600.81 -> $2,526.57
+maxLTV positions crossing HF 1 within 24h: 0 (0 bps)
+crossing delay within 24h: none
+maxLTV positions crossing HF 1 over history: 100 (502 bps)
+crossing delay over history: 260505 / 723545 / 920493 seconds (min / average / max)
+peak-to-trough drawdown: 1,794 bps
+worst 1h drawdown: 549 bps
+worst 24h drawdown: 854 bps
+
+TWAP 10x one-of-six multiplier: 14,676 bps (1.4676x)
+base fee: 353,082,000 wei (0.353082 gwei)
+liquidation gas: 262,444
+blue debt floor: $6.689220577732801600
+meme debt floor: $2.926534002581007000
+blue position floor: $10.291108580504640000
+meme position floor: $9.755113341936690000
+
+Flash dump at the real ETH/USDG fixture (model/control cost):
+round-trip loss: $1,388.679455173274449164
+attack profit at meme cap (first-order extrapolation): $9,133.333333333333333333
+
+Rug model using meme TierPreset:
+depth | bad debt | lender share-price loss (market-cap denominator)
+50%   | $0       | 0 bps
+75%   | $8,636.363636363636363637 | 1,727.272727272727 bps
+90%   | $15,454.545454545454545455 | 3,090.909090909090 bps
+99%   | $19,545.454545454545454546 | 3,909.090909090909 bps
