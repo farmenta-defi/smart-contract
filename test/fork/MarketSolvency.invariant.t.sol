@@ -203,12 +203,16 @@ contract MarketHandler is Test {
         }
     }
 
+    /// @dev Up to a year per call. Reserves grow only by 15% of the interest, and the blue-chip floor is
+    ///      1% of `totalAssets`: at the setup's 43% utilization that is years of accrual. With steps of at
+    ///      most 30 days no run took reserves past it (FAR-61). A year lets a run cross it, most of all
+    ///      after `withdraw` has drained the cash and utilization sits at the top of the curve.
     function passTime(
         uint40 elapsed
     ) external {
         uint256 oneShare = 10 ** market.decimals();
         uint256 assetsBefore = market.convertToAssets(oneShare);
-        vm.warp(block.timestamp + bound(uint256(elapsed), 1 hours, 30 days));
+        vm.warp(block.timestamp + bound(uint256(elapsed), 1 hours, 365 days));
         market.accrue();
         if (market.convertToAssets(oneShare) < assetsBefore) sawSharePriceDecrease = true;
     }
