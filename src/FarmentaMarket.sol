@@ -142,7 +142,8 @@ contract FarmentaMarket is
     event Borrow(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
     event Repay(uint256 indexed tokenId, PoolId indexed poolId, uint256 amount);
 
-    /// @notice A collateral position's fees were claimed (§4.1, `poolId` per v0.30).
+    /// @notice A collateral position's fees were paid out, by `collectFees` or alongside the
+    ///         principal of `decreaseLiquidity` (§4.1, `poolId` per v0.30).
     /// @dev `amount0`/`amount1` are the fees the position realised, read from its fee growth just
     ///      before PositionManager is called (`IPositionValuer.feesOf`, FAR-52), not a balance change
     ///      of the recipient: whatever else reaches it meanwhile is not counted. See `feesOf` for the one
@@ -538,6 +539,9 @@ contract FarmentaMarket is
     ///        a recipient (§4.1 v0.43).
     /// @dev **Pausable**, like `collectFees`: with debt outstanding the removal prices the position
     ///      (§4.1 pause scope). A frozen or delisted pool does not stop it (§6.5).
+    ///
+    ///      Emits `CollectFees` for the fees that leave with the slice, then `LiquidityChanged`
+    ///      (FAR-52).
     ///
     ///      The removal runs from `MarketLiquidity`, which documents why `to` receives every fee as
     ///      well, the minimum held on what remains, the post-removal borrow limit and its price

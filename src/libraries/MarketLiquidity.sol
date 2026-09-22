@@ -112,9 +112,13 @@ library MarketLiquidity {
     ///      against `liquidityDelta - feesAccrued`, so fees never help a removal clear its minimum,
     ///      and a caller sizes them from the slice's principal only.
     ///
+    ///      **The fees are reported as `collectFees` reports them** (FAR-52): `CollectFees` with the
+    ///      fees read from fee growth before the removal, then `LiquidityChanged`. Principal and fees
+    ///      leave in the same `TAKE`, so no balance change could have split them.
+    ///
     ///      **A zero `liquidity` is refused**: that is a fee claim, and `collectFees` is the function
-    ///      for it, with its own event. **More than the position holds is refused here**, by name,
-    ///      rather than deep inside PoolManager as an arithmetic failure.
+    ///      for it. **More than the position holds is refused here**, by name, rather than deep inside
+    ///      PoolManager as an arithmetic failure.
     ///
     ///      **What stays in custody must still pass §6.1's minimum** (decided on FAR-8, 17 Sep 2026):
     ///      principal after the removal haircut, fees excluded, against the pool's
@@ -162,6 +166,7 @@ library MarketLiquidity {
         // through. Placed after the checks above so a refusal names its own reason rather than
         // `TwapUnavailable`.
         if ($.tier == ICollateralPolicy.Tier.MEME) env.debt.oracle.record(key);
+        (uint256 fees0, uint256 fees1) = env.debt.valuer.feesOf(p.tokenId);
 
         _decreaseTo(env, key, p.tokenId, p.liquidity, p.amount0Min, p.amount1Min, p.to);
 
@@ -171,6 +176,7 @@ library MarketLiquidity {
         if (recoverableUsd < terms.minPositionUsd) revert PositionBelowMinimum(recoverableUsd, terms.minPositionUsd);
 
         MarketDebt.requireWithinBorrowLimit(env.debt, p.tokenId);
+        emit CollectFees(p.tokenId, loan.poolKeyId, fees0, fees1);
         emit LiquidityChanged(p.tokenId, loan.poolKeyId, -int256(uint256(p.liquidity)));
     }
 

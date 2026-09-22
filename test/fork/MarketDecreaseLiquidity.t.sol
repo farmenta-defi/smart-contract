@@ -80,6 +80,9 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         uint256 marketEth = address(market).balance;
         uint256 marketUsdg = usdg.balanceOf(address(market));
 
+        // FAR-52: the fees that leave with the slice are reported first, as `collectFees` reports them.
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.CollectFees(tokenId, _keyOf(tokenId).toId(), before.fees0, before.fees1);
         vm.expectEmit(true, true, false, true, address(market));
         emit FarmentaMarket.LiquidityChanged(tokenId, _keyOf(tokenId).toId(), -int256(uint256(half)));
         vm.prank(borrower);
