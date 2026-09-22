@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -175,6 +176,38 @@ contract CollateralPolicyTest is Test {
         policy.setHookAllowlist(Fixtures.HOOK_DOPPLER, false);
 
         vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, Fixtures.HOOK_DOPPLER));
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+    }
+
+    /// @dev FAR-47: a hook that returns a delta from `afterAddLiquidity` can bill the borrower
+    ///      on `mintAndDeposit` and `increaseLiquidity`. It touches nothing on removal, so under
+    ///      the old 0x301 mask it was admitted without anyone reading it.
+    function test_hookChargingAdditionsNeedsAllowlisting() public {
+        address hook = address(uint160(Hooks.AFTER_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG));
+        PoolKey memory key = _blueChipKey(hook);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
+        policy.list(key, _blueChipParams());
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, true);
+        _list(key, _blueChipParams());
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, false);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+    }
+
+    /// @dev Without the delta flag `afterAddLiquidity` can watch an addition but not bill it,
+    ///      so it still passes on bits alone. The vault-exit tests of FAR-9 and FAR-45 list
+    ///      pools behind exactly this hook.
+    function test_afterAddLiquidityWithoutDeltaIsAcceptedWithoutAllowlisting() public {
+        address hook = address(uint160(Hooks.AFTER_ADD_LIQUIDITY_FLAG));
+        PoolKey memory key = _blueChipKey(hook);
+        _list(key, _blueChipParams());
         policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
     }
 
