@@ -23,7 +23,9 @@ library HookPermissions {
     /// @dev v4-core subtracts the hook's `afterAddLiquidity` delta from the caller's
     ///      (`callerDelta - hookDelta` in `Hooks.afterModifyLiquidity`), and PositionManager
     ///      checks its maxima against what is left. `afterAddLiquidity` without the delta
-    ///      flag can observe an addition but cannot bill it, so it stays out of the mask.
+    ///      flag can observe an addition but cannot bill it through a delta, so it stays out of
+    ///      the mask. A hook that also has `beforeAddLiquidity` can still move the price the
+    ///      addition is made at, by swapping its own pool from inside the callbacks (FAR-63).
     ///
     ///      Built from v4-core's own flags rather than the literal 0x303 that §6.1 quotes: if
     ///      Uniswap ever renumbers a bit, this mask follows and a hard-coded constant would

@@ -201,8 +201,8 @@ contract CollateralPolicyTest is Test {
         policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
     }
 
-    /// @dev Without the delta flag `afterAddLiquidity` can watch an addition but not bill it,
-    ///      so it still passes on bits alone. The vault-exit tests of FAR-9 and FAR-45 list
+    /// @dev Without the delta flag `afterAddLiquidity` can watch an addition but not bill it
+    ///      through a delta, so it still passes on bits alone. The vault-exit tests of FAR-9 and FAR-45 list
     ///      pools behind exactly this hook.
     function test_afterAddLiquidityWithoutDeltaIsAcceptedWithoutAllowlisting() public {
         address hook = address(uint160(Hooks.AFTER_ADD_LIQUIDITY_FLAG));
