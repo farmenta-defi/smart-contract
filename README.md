@@ -49,7 +49,11 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
      adalah alamat implementasi, dan data itu hanya dapat menjalankan kode implementasi
      tersebut.
 
-   Belum diaudit. Sumber: `ARCHITECTURE.md` §4.1, **§15 no. 9**.
+   Kuasa yang tersisa ini diterima untuk MVP yang belum diaudit dan belum memiliki TVL
+   nyata. Timelock adalah syarat yang §15 no. 9 tetapkan sebelum dana sungguhan; ia
+   menunda kuasa itu, bukan mencabutnya, dan spesifikasi tidak menetapkan syarat lain
+   yang mencabutnya (kunci admin sengaja tidak dibahas, §1).
+   Sumber: `ARCHITECTURE.md` §4.1, **§15 no. 9**.
 
 2. **Owner dapat membuat pinjaman sehat menjadi likuidatable.** Owner dapat menurunkan
    liquidation threshold (LT) sebuah pool sedalam dan secepat apa pun, tanpa batas laju
@@ -90,7 +94,8 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    upgrade. Yang berubah sejak FAR-21: upgrade itu harus dijadwalkan dan menunggu
    timelock 2 hari di poin 1, jadi aturan lantai tidak dapat ditulis ulang tanpa
    pengumuman on-chain lebih dulu. Timelock menunda perubahan aturan, bukan membuat
-   lantai kebal terhadap upgrade.
+   lantai kebal terhadap upgrade. Risiko yang tersisa diterima untuk MVP yang belum
+   diaudit dan belum memiliki TVL nyata, dengan syarat yang sama seperti poin 1.
    Sumber: `ARCHITECTURE.md` §7, **§15 no. 13**.
 
 Ketiga poin merujuk SOT
