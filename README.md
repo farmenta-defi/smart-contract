@@ -131,7 +131,7 @@ src/
   interfaces/                    ICollateralPolicy, IPositionValuer, IPriceOracle, IAggregatorV3
   libraries/                     PositionAmounts, PriceMath, HookPermissions, TierPresets,
                                  MarketLedger, MarketDebt, MarketMint, MarketLiquidation, MarketLiquidity,
-                                 LiquidationMath, DebtMath
+                                 MarketUpgrade, LiquidationMath, DebtMath
 test/
   base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
               PositionMinter (mints positions in the fork for shapes the chain lacks),
@@ -149,10 +149,11 @@ script/
                                  execute() two days later
 ```
 
-`MarketDebt`, `MarketMint`, `MarketLiquidation` and `MarketLiquidity` are linked delegatecall
-libraries. Deploy and link them in order: `MarketDebt`, then `MarketMint` linked to
+`MarketDebt`, `MarketMint`, `MarketLiquidation`, `MarketLiquidity` and `MarketUpgrade` are linked
+delegatecall libraries. Deploy and link them in order: `MarketDebt`, then `MarketMint` linked to
 `MarketDebt`, then `MarketLiquidation` (§8 seizure), then `MarketLiquidity` (fee claims) linked
-to `MarketDebt`, then the market implementation linked to all four. They
+to `MarketDebt`, then `MarketUpgrade` (the upgrade timelock, linked to nothing), then the market
+implementation linked to all five. They
 write only the market's ERC-7201 ledger namespace and preserve the market's caller, events,
 and storage.
 `MarketLens` is a separate read-only contract bound to one proxy, so deploy one lens for

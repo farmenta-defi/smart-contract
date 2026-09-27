@@ -28,6 +28,7 @@ import {MarketLedger} from "./libraries/MarketLedger.sol";
 import {MarketLiquidation} from "./libraries/MarketLiquidation.sol";
 import {MarketLiquidity} from "./libraries/MarketLiquidity.sol";
 import {MarketMint} from "./libraries/MarketMint.sol";
+import {MarketUpgrade} from "./libraries/MarketUpgrade.sol";
 
 /// @title FarmentaMarket
 /// @notice Custodies Uniswap v4 LP position NFTs and lends USDG against them
@@ -41,8 +42,8 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///
 ///      **Logic lives in linked libraries; this contract keeps the wrappers** (§4.1 v0.33).
 ///      Borrow and repay run from `MarketDebt`, collateral intake from `MarketMint`, §8's seizure
-///      from `MarketLiquidation`, fee claims and liquidity removals from `MarketLiquidity`, each by
-///      `delegatecall`:
+///      from `MarketLiquidation`, fee claims and liquidity removals from `MarketLiquidity`, the
+///      upgrade queue from `MarketUpgrade`, each by `delegatecall`:
 ///      the market's storage, the
 ///      market's address, the caller's `msg.sender`, code at its own address. Risk views are
 ///      read from `MarketLens`, one per proxy. That is what keeps the implementation under
@@ -816,31 +817,19 @@ contract FarmentaMarket is
     ///
     ///      Not pausable, like `cancelUpgrade`: a pause is no reason to hold back a fix, and the
     ///      delay runs the same either way.
+    ///
+    ///      The queue runs from `MarketUpgrade` (§15 no. 17); `onlyOwner` stays here.
     function scheduleUpgrade(
         address newImplementation
     ) external onlyOwner {
-        if (newImplementation == address(0)) revert ZeroAddress();
-
-        MarketLedger.Layout storage $ = _marketStorage();
-        if ($.pendingImplementation != address(0)) revert UpgradeAlreadyScheduled($.pendingImplementation);
-
-        uint256 eta = block.timestamp + TIMELOCK_DELAY;
-        $.pendingImplementation = newImplementation;
-        $.upgradeEta = uint64(eta);
-        emit UpgradeScheduled(newImplementation, eta);
+        MarketUpgrade.schedule(newImplementation, TIMELOCK_DELAY);
     }
 
     /// @notice Withdraws the scheduled upgrade.
     /// @dev Instant, because cancelling adds no power: it only takes away the one upgrade that
     ///      could have been installed.
     function cancelUpgrade() external onlyOwner {
-        MarketLedger.Layout storage $ = _marketStorage();
-        address pending = $.pendingImplementation;
-        if (pending == address(0)) revert NoUpgradeScheduled();
-
-        delete $.pendingImplementation;
-        delete $.upgradeEta;
-        emit UpgradeCancelled(pending);
+        MarketUpgrade.cancel();
     }
 
     /// @notice Transfers reserve revenue above the tier's lender-protection floor.
@@ -934,13 +923,7 @@ contract FarmentaMarket is
     function _authorizeUpgrade(
         address newImplementation
     ) internal override onlyOwner {
-        MarketLedger.Layout storage $ = _marketStorage();
-        (address pending, uint256 eta) = ($.pendingImplementation, $.upgradeEta);
-        if (pending == address(0) || newImplementation != pending) revert UpgradeNotScheduled(newImplementation);
-        if (block.timestamp < eta) revert UpgradeNotReady(newImplementation, eta);
-
-        delete $.pendingImplementation;
-        delete $.upgradeEta;
+        MarketUpgrade.spend(newImplementation);
     }
 
     /// @inheritdoc ERC4626Upgradeable
