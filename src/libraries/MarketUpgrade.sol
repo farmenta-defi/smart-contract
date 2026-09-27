@@ -15,6 +15,9 @@ library MarketUpgrade {
     /// @notice An upgrade was scheduled: `newImplementation` can be installed from `eta` on.
     event UpgradeScheduled(address indexed newImplementation, uint256 eta);
 
+    /// @notice The hash of the code `newImplementation` held when it was scheduled.
+    event UpgradeCodeBound(address indexed newImplementation, bytes32 codehash);
+
     /// @notice The scheduled upgrade was withdrawn before it was installed.
     event UpgradeCancelled(address indexed newImplementation);
 
@@ -64,8 +67,10 @@ library MarketUpgrade {
         uint256 eta = block.timestamp + delay;
         $.pendingImplementation = newImplementation;
         $.upgradeEta = SafeCast.toUint64(eta);
-        $.pendingCodehash = newImplementation.codehash;
+        bytes32 codehash = newImplementation.codehash;
+        $.pendingCodehash = codehash;
         emit UpgradeScheduled(newImplementation, eta);
+        emit UpgradeCodeBound(newImplementation, codehash);
     }
 
     /// @notice Withdraws the scheduled upgrade.

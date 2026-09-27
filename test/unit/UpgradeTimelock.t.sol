@@ -511,7 +511,12 @@ contract UpgradeTimelockTest is Test {
     /* --------------------------------- the code ------------------------------- */
 
     /// @notice A schedule is held to the code it was given, not to the address alone.
+    /// @dev Both events, in the order the market emits them.
     function test_schedulingRecordsTheHashOfTheCodeItWasGiven() public {
+        vm.expectEmit(address(market));
+        emit FarmentaMarket.UpgradeScheduled(address(next), block.timestamp + DELAY);
+        vm.expectEmit(address(market));
+        emit FarmentaMarket.UpgradeCodeBound(address(next), address(next).codehash);
         _schedule(address(next));
 
         assertEq(market.pendingUpgradeCodehash(), address(next).codehash, "code hash");

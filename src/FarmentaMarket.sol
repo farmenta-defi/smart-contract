@@ -201,6 +201,13 @@ contract FarmentaMarket is
     ///      upgrade waits now. It can be installed until `eta + TIMELOCK_GRACE` and not after.
     event UpgradeScheduled(address indexed newImplementation, uint256 eta);
 
+    /// @notice The hash of the code `newImplementation` held when it was scheduled, which is the
+    ///         code an upgrade to it is held to.
+    /// @dev Emitted with `UpgradeScheduled`, in its own event so that one keeps the signature
+    ///      FAR-21 gave it. The hash leaves storage when the schedule ends; this is what is left
+    ///      of it for a reader of logs.
+    event UpgradeCodeBound(address indexed newImplementation, bytes32 codehash);
+
     /// @notice The scheduled upgrade was withdrawn before it was installed.
     event UpgradeCancelled(address indexed newImplementation);
 
