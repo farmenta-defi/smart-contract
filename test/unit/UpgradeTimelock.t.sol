@@ -32,6 +32,7 @@ import {UnlockedMarketMock} from "../mocks/UnlockedMarketMock.sol";
 contract UpgradeTimelockTest is Test {
     /// @dev Written out rather than read from the market, so a change to the constant fails here.
     uint256 internal constant DELAY = 2 days;
+    uint256 internal constant GRACE = 14 days;
 
     address internal owner = address(0xA11CE);
     address internal stranger = address(0xBAD);
@@ -225,18 +226,85 @@ contract UpgradeTimelockTest is Test {
         assertEq(market.owner(), owner, "owner lost across upgrade");
     }
 
-    /// @dev Nothing expires a schedule: it stays installable, and visible, until it is installed
-    ///      or cancelled.
-    function testFuzz_aScheduledUpgradeInstallsAnyTimeFromItsEta(
-        uint32 late
+    /// @dev From the eta to the end of the grace period, both ends included.
+    function testFuzz_aScheduledUpgradeInstallsAnyTimeInsideItsGrace(
+        uint256 late
     ) public {
         uint256 eta = _schedule(address(next));
-        vm.warp(eta + late);
+        vm.warp(eta + bound(late, 0, GRACE));
 
         vm.prank(owner);
         market.upgradeToAndCall(address(next), "");
 
         assertEq(_installed(), address(next), "the scheduled implementation was not installed");
+    }
+
+    /// @dev The last second the upgrade is allowed.
+    function test_aScheduledUpgradeInstallsAtTheEndOfItsGrace() public {
+        uint256 eta = _schedule(address(next));
+        vm.warp(eta + GRACE);
+
+        vm.prank(owner);
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(next), "the scheduled implementation was not installed");
+    }
+
+    /// @notice Past its grace a schedule installs nothing. Whoever arrived after the notice was
+    ///         given is not upgraded on the strength of it.
+    function test_aScheduleIsRefusedOnceItsGraceIsOver() public {
+        uint256 eta = _schedule(address(next));
+        bytes32 scheduled = address(next).codehash;
+        vm.warp(eta + GRACE + 1);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeExpired.selector, address(next), eta + GRACE));
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(implementation), "an expired schedule went through");
+        (address pending, uint256 pendingEta) = market.pendingUpgrade();
+        assertEq(pending, address(next), "the refusal spent the schedule");
+        assertEq(pendingEta, eta, "the refusal moved the eta");
+        assertEq(market.pendingUpgradeCodehash(), scheduled, "the refusal moved the code hash");
+    }
+
+    function testFuzz_noUpgradeIsInstalledPastTheGrace(
+        uint32 late
+    ) public {
+        uint256 eta = _schedule(address(next));
+        vm.warp(eta + GRACE + 1 + late);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeExpired.selector, address(next), eta + GRACE));
+        market.upgradeToAndCall(address(next), "");
+    }
+
+    /// @notice An expired schedule holds the queue until it is cancelled, and the schedule after it
+    ///         waits a full delay of its own.
+    function test_anExpiredScheduleIsCancelledAndScheduledAgainWithAFullDelay() public {
+        uint256 eta = _schedule(address(next));
+        vm.warp(eta + GRACE + 1);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeAlreadyScheduled.selector, address(next)));
+        market.scheduleUpgrade(address(next));
+
+        vm.expectEmit(address(market));
+        emit FarmentaMarket.UpgradeCancelled(address(next));
+        vm.prank(owner);
+        market.cancelUpgrade();
+
+        uint256 secondEta = _schedule(address(next));
+        assertEq(secondEta, block.timestamp + DELAY, "the second schedule did not wait a full delay");
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotReady.selector, address(next), secondEta));
+        market.upgradeToAndCall(address(next), "");
+
+        vm.warp(secondEta);
+        vm.prank(owner);
+        market.upgradeToAndCall(address(next), "");
+        assertEq(_installed(), address(next), "the second schedule was not installed");
     }
 
     /// @dev A waited-out schedule lets through the implementation it names and no other.
@@ -384,6 +452,11 @@ contract UpgradeTimelockTest is Test {
         assertEq(implementation.TIMELOCK_DELAY(), DELAY, "delay read from the implementation");
     }
 
+    function test_theGraceIsFourteenDays() public view {
+        assertEq(market.TIMELOCK_GRACE(), GRACE, "grace read through the proxy");
+        assertEq(implementation.TIMELOCK_GRACE(), GRACE, "grace read from the implementation");
+    }
+
     /// @notice No storage write changes the delay, so no owner transaction can.
     /// @dev Every transaction the owner sends the proxy can only write the proxy's storage. The
     ///      market's namespace is overwritten here from its first slot to past its last, the queue
@@ -393,6 +466,7 @@ contract UpgradeTimelockTest is Test {
             vm.store(address(market), bytes32(uint256(MarketLedger.LOCATION) + i), bytes32(0));
         }
         assertEq(market.TIMELOCK_DELAY(), DELAY, "delay read from zeroed storage");
+        assertEq(market.TIMELOCK_GRACE(), GRACE, "grace read from zeroed storage");
 
         uint256 eta = _schedule(address(next));
         assertEq(eta, block.timestamp + DELAY, "a zeroed namespace shortened the delay");

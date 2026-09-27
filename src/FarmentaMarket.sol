@@ -115,6 +115,13 @@ contract FarmentaMarket is
     ///      it. Changing it takes another implementation, and that one waits out this delay.
     uint256 public constant TIMELOCK_DELAY = 2 days;
 
+    /// @notice How long a scheduled upgrade stays installable once its eta has come (§4.1, FAR-21).
+    /// @dev Past `eta + TIMELOCK_GRACE` the schedule can only be cancelled, and scheduling again
+    ///      gives a new notice and a new delay. Without it an upgrade scheduled before anyone
+    ///      deposited could be installed on them at any later time, with no notice they saw. A
+    ///      constant, for the reason `TIMELOCK_DELAY` is.
+    uint256 public constant TIMELOCK_GRACE = 14 days;
+
     /// @notice The Uniswap position NFT this market custodies.
     /// @dev Immutable in the implementation and changed by upgrading, like every other
     ///      dependency here (§4.1): each extra proxy would double the storage-collision
@@ -189,9 +196,9 @@ contract FarmentaMarket is
     /// @notice An upgrade was scheduled: `newImplementation` can be installed from `eta` on.
     /// @dev The notice the delay exists to give. Whoever would rather not stay under the new
     ///      implementation has until `eta` to repay, withdraw and redeem, which is why indexers
-    ///      consume it (§13). The event is not enough by itself: a schedule does not expire, so one
-    ///      made before a reader started listening is still pending. `pendingUpgrade` is what
-    ///      says whether an upgrade waits now.
+    ///      consume it (§13). The event is not enough by itself: a schedule made before a reader
+    ///      started listening may still be pending. `pendingUpgrade` is what says whether an
+    ///      upgrade waits now. It can be installed until `eta + TIMELOCK_GRACE` and not after.
     event UpgradeScheduled(address indexed newImplementation, uint256 eta);
 
     /// @notice The scheduled upgrade was withdrawn before it was installed.
@@ -232,6 +239,7 @@ contract FarmentaMarket is
     error ImplementationHasNoCode(address implementation);
     error ImplementationCodeChanged(address implementation, bytes32 scheduled, bytes32 found);
     error ImplementationIsAPointer(address implementation);
+    error UpgradeExpired(address implementation, uint256 expiredAt);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -941,7 +949,7 @@ contract FarmentaMarket is
     function _authorizeUpgrade(
         address newImplementation
     ) internal override onlyOwner {
-        MarketUpgrade.spend(newImplementation);
+        MarketUpgrade.spend(newImplementation, TIMELOCK_GRACE);
     }
 
     /// @inheritdoc ERC4626Upgradeable

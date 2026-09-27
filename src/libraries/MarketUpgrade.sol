@@ -26,6 +26,7 @@ library MarketUpgrade {
     error ImplementationHasNoCode(address implementation);
     error ImplementationCodeChanged(address implementation, bytes32 scheduled, bytes32 found);
     error ImplementationIsAPointer(address implementation);
+    error UpgradeExpired(address implementation, uint256 expiredAt);
 
     /// @notice Queues `newImplementation`, installable `delay` from now at the earliest.
     /// @dev One upgrade waits at a time. A second schedule is refused until the first is cancelled
@@ -80,16 +81,22 @@ library MarketUpgrade {
     }
 
     /// @notice Lets `newImplementation` through if it is the one scheduled, its eta has come and
-    ///         its code is the code that was scheduled, and spends the schedule.
+    ///         not gone by more than `grace`, and its code is the code that was scheduled, and
+    ///         spends the schedule.
     /// @dev Spent, so installing the same implementation a second time takes a new schedule and a
     ///      new delay. A refusal spends nothing: the schedule stays as it was.
+    ///
+    ///      An expired schedule stays in the queue until it is cancelled, so it still ends in
+    ///      exactly one event, and the next schedule is a new notice with a full delay.
     function spend(
-        address newImplementation
+        address newImplementation,
+        uint256 grace
     ) external {
         MarketLedger.Layout storage $ = MarketLedger.layout();
         (address pending, uint256 eta) = ($.pendingImplementation, $.upgradeEta);
         if (pending == address(0) || newImplementation != pending) revert UpgradeNotScheduled(newImplementation);
         if (block.timestamp < eta) revert UpgradeNotReady(newImplementation, eta);
+        if (block.timestamp > eta + grace) revert UpgradeExpired(newImplementation, eta + grace);
 
         bytes32 scheduled = $.pendingCodehash;
         bytes32 found = newImplementation.codehash;
