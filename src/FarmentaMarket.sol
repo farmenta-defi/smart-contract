@@ -189,7 +189,9 @@ contract FarmentaMarket is
     /// @notice An upgrade was scheduled: `newImplementation` can be installed from `eta` on.
     /// @dev The notice the delay exists to give. Whoever would rather not stay under the new
     ///      implementation has until `eta` to repay, withdraw and redeem, which is why indexers
-    ///      consume it (§13) instead of leaving the schedule to be read from state.
+    ///      consume it (§13). The event is not enough by itself: a schedule does not expire, so one
+    ///      made before a reader started listening is still pending. `pendingUpgrade` is what
+    ///      says whether an upgrade waits now.
     event UpgradeScheduled(address indexed newImplementation, uint256 eta);
 
     /// @notice The scheduled upgrade was withdrawn before it was installed.
@@ -820,8 +822,10 @@ contract FarmentaMarket is
     /// @notice Schedules `newImplementation` to replace this one, `TIMELOCK_DELAY` from now at the
     ///         earliest (§4.1, FAR-21).
     /// @param newImplementation The implementation to install. Its code is what lenders and
-    ///        borrowers get the delay to read, so it has to be there already, and the schedule is
-    ///        held to its hash (`pendingUpgradeCodehash`).
+    ///        borrowers get the delay to read, so it has to be there when it is scheduled, it may
+    ///        not be a pointer to other code, and the schedule is held to its hash
+    ///        (`pendingUpgradeCodehash`). That the code stays readable for the whole delay is
+    ///        not something the market can enforce: see `MarketUpgrade.schedule`.
     /// @dev One upgrade waits at a time. A second schedule is refused until the first is cancelled
     ///      or installed, so every schedule ends in exactly one event: `UpgradeCancelled`, or
     ///      ERC-1967's `Upgraded`. Cancelling and scheduling again starts a full delay over, so no
@@ -931,8 +935,9 @@ contract FarmentaMarket is
     ///      implementation a second time takes a new schedule and a new delay.
     ///
     ///      The calldata `upgradeToAndCall` runs is not part of the schedule. It is run by the
-    ///      scheduled implementation, so it can do nothing that the code the delay was given to
-    ///      read does not contain.
+    ///      scheduled implementation, so it can do nothing that code and the code it calls do not
+    ///      contain. The hash covers the implementation only: a library or dependency it names by
+    ///      address is covered by reading what stands at that address.
     function _authorizeUpgrade(
         address newImplementation
     ) internal override onlyOwner {

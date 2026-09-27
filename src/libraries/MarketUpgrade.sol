@@ -44,6 +44,11 @@ library MarketUpgrade {
     ///      (EIP-7702), which name an address and nothing else. Their hash would stay the same
     ///      while the account is pointed at other code, after the upgrade and without a schedule.
     ///      Checked here only: an account that holds code has no key to delegate with later.
+    ///
+    ///      What none of this can tell is code created in the installing transaction from code
+    ///      that stood there before it. Code put back, installed and removed in one transaction
+    ///      passes, and leaves the address free for other code afterwards. The sign is off chain:
+    ///      the scheduled address holds no code during the delay.
     function schedule(
         address newImplementation,
         uint256 delay

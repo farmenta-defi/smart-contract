@@ -33,10 +33,17 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    yang dijadwalkan.
 
    **Jadwal mengikat kode, bukan hanya alamat.** `scheduleUpgrade` menolak alamat yang
-   belum berisi kode dan mencatat hash kode yang ada di sana saat itu;
+   belum berisi kode, menolak akun yang hanya menunjuk ke kode lain (delegasi EIP-7702,
+   kode berawalan `0xEF`), dan mencatat hash kode yang ada di sana saat itu;
    `pendingUpgradeCodehash()` memperlihatkannya. `upgradeToAndCall` ditolak bila kode di
    alamat itu sudah berbeda, termasuk bila kodenya dihapus lalu diganti, dan penolakan
-   itu tidak menghabiskan jadwal. Jadi yang dipasang adalah kode yang diumumkan.
+   itu tidak menghabiskan jadwal. Jadi kode yang dipasang ber-hash sama dengan yang
+   diumumkan.
+
+   **Cara membaca jadwal yang menunggu.** Bandingkan hash kode di alamat terjadwal
+   dengan `pendingUpgradeCodehash()`. Bila alamat itu kosong, atau hash-nya berbeda,
+   pada saat mana pun selama jeda, perlakukan upgrade itu sebagai bermusuhan dan
+   keluar: kontrak tidak dapat memaksa kode tetap terbaca selama jeda.
 
    Hanya satu jadwal yang menunggu pada satu waktu. `cancelUpgrade`
    instan dan menerbitkan `UpgradeCancelled`; menjadwalkan ulang memulai jeda dari nol.
@@ -57,10 +64,20 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
      adalah alamat implementasi dan hash kodenya, dan data itu hanya dapat menjalankan
      kode implementasi tersebut.
    - Hash itu mengikat kode implementasi, bukan kode yang dipanggilnya. Linked library
-     tertulis di implementasi sebagai alamat, jadi membaca implementasi berarti juga
-     membaca kode di alamat library yang ditautkannya.
+     dan dependency (`policy`, `valuer`, `oracle`, `interestRateModel`) tertulis di
+     implementasi sebagai alamat. Tiap alamat itu harus diperiksa sendiri: kontrak biasa,
+     bukan proxy dan bukan akun delegasi. Kode di balik penunjuk dapat diganti sesudah
+     upgrade terpasang, tanpa jadwal dan tanpa jeda.
+   - Kode yang diumumkan bisa tidak terbaca selama jeda. Kode yang dibuat, dijadwalkan,
+     dan dihapus dalam satu transaksi meninggalkan alamat kosong, dan kode ber-hash sama
+     dapat dipasang kembali tepat saat upgrade.
+   - Kode yang dibuat di transaksi pemasangan dapat menghapus dirinya di transaksi itu
+     juga. Market lalu menjalankan alamat kosong, dan kode apa pun yang kemudian
+     ditaruh di sana berjalan tanpa jadwal. Kontrak tidak dapat membedakannya dari kode
+     yang sudah ada sebelumnya; tandanya sama, alamat terjadwal kosong selama jeda.
    - Jadwal tidak kedaluwarsa. Sesudah `eta` lewat, implementasi itu dapat dipasang
-     kapan saja sampai dipasang atau dibatalkan.
+     kapan saja sampai dipasang atau dibatalkan, termasuk jadwal yang dibuat sebelum
+     seorang deposan masuk. Baca `pendingUpgrade()` sebelum menyetor, bukan hanya event.
 
    Kuasa yang tersisa ini diterima untuk MVP yang belum diaudit dan belum memiliki TVL
    nyata. Timelock adalah syarat yang §15 no. 9 tetapkan sebelum dana sungguhan; ia
