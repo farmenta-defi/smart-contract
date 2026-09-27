@@ -16,6 +16,11 @@ import {IInterestRateModel} from "../../src/interfaces/IInterestRateModel.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
 import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
+import {
+    MetamorphicFactoryMock,
+    OtherImplementationMock,
+    RemovableImplementationMock
+} from "../mocks/MetamorphicFactoryMock.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {UnlockedMarketMock} from "../mocks/UnlockedMarketMock.sol";
 
@@ -431,6 +436,87 @@ contract UpgradeTimelockTest is Test {
         assertEq(market.TIMELOCK_DELAY(), 0, "the replacement's delay is not in force");
     }
 
+    /* --------------------------------- the code ------------------------------- */
+
+    /// @notice A schedule is held to the code it was given, not to the address alone.
+    function test_schedulingRecordsTheHashOfTheCodeItWasGiven() public {
+        _schedule(address(next));
+
+        assertEq(market.pendingUpgradeCodehash(), address(next).codehash, "code hash");
+    }
+
+    /// @dev Two days with nothing to read, and anything at all installed after them.
+    function test_anAddressWithNoCodeIsRefusedAtScheduling() public {
+        address empty = new MetamorphicFactoryMock().where();
+        assertEq(empty.code.length, 0, "the address holds code");
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.ImplementationHasNoCode.selector, empty));
+        market.scheduleUpgrade(empty);
+
+        _assertNothingScheduled();
+    }
+
+    /// @notice Other code under the scheduled address is refused, and the refusal spends nothing.
+    function test_codeThatChangedSinceItWasScheduledIsRefused() public {
+        uint256 eta = _schedule(address(next));
+        bytes32 scheduled = address(next).codehash;
+        vm.warp(eta);
+
+        vm.etch(address(next), type(OtherImplementationMock).runtimeCode);
+        bytes32 found = address(next).codehash;
+        assertTrue(found != scheduled, "the code did not change");
+
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(FarmentaMarket.ImplementationCodeChanged.selector, address(next), scheduled, found)
+        );
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(implementation), "other code than was scheduled went through");
+        (address pending, uint256 pendingEta) = market.pendingUpgrade();
+        assertEq(pending, address(next), "the refused upgrade spent the schedule");
+        assertEq(pendingEta, eta, "the refused upgrade moved the eta");
+        assertEq(market.pendingUpgradeCodehash(), scheduled, "the refused upgrade moved the code hash");
+    }
+
+    /// @dev An address emptied after it was scheduled does not match what was scheduled either.
+    function test_codeRemovedSinceItWasScheduledIsRefused() public {
+        uint256 eta = _schedule(address(next));
+        bytes32 scheduled = address(next).codehash;
+        vm.warp(eta);
+
+        vm.etch(address(next), "");
+
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                FarmentaMarket.ImplementationCodeChanged.selector, address(next), scheduled, address(next).codehash
+            )
+        );
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(implementation), "an emptied address went through");
+    }
+
+    /// @notice A cancelled schedule leaves no hash behind for the next one to inherit.
+    function test_aScheduleAfterACancelIsHeldToItsOwnCode() public {
+        _schedule(address(next));
+        vm.prank(owner);
+        market.cancelUpgrade();
+        assertEq(market.pendingUpgradeCodehash(), bytes32(0), "cancelling left the code hash behind");
+
+        address other = address(new UnlockedMarketMock());
+        assertTrue(other.codehash != address(next).codehash, "the two implementations share their code");
+        uint256 eta = _schedule(other);
+        assertEq(market.pendingUpgradeCodehash(), other.codehash, "the second schedule kept the first one's hash");
+
+        vm.warp(eta);
+        vm.prank(owner);
+        market.upgradeToAndCall(other, "");
+        assertEq(_installed(), other, "the second schedule was not installed");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _schedule(
@@ -454,6 +540,7 @@ contract UpgradeTimelockTest is Test {
         (address pending, uint256 eta) = market.pendingUpgrade();
         assertEq(pending, address(0), "an upgrade is scheduled");
         assertEq(eta, 0, "an eta is left behind");
+        assertEq(market.pendingUpgradeCodehash(), bytes32(0), "a code hash is left behind");
     }
 
     function _deployImplementation() internal returns (FarmentaMarket) {
@@ -464,5 +551,113 @@ contract UpgradeTimelockTest is Test {
             IPriceOracle(address(0x0A11CE)),
             IInterestRateModel(interestRateModel)
         );
+    }
+}
+
+/// @notice The code binding against code that lives for one transaction only (FAR-21, review of
+///         PR #42). No network.
+/// @dev `setUp` is the scheduling transaction: a factory that owns the market puts removable code
+///      at an address, schedules that address and removes the code again. A check for code made
+///      while scheduling passes, and the address is empty from then on. Only the hash the schedule
+///      holds tells what may be installed there.
+contract UpgradeTimelockOneTransactionCodeTest is Test {
+    bytes32 internal constant IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+
+    MetamorphicFactoryMock internal factory;
+    FarmentaMarket internal implementation;
+    FarmentaMarket internal market;
+    address internal scheduled;
+    uint256 internal eta;
+
+    function setUp() public {
+        MockERC20 usdg = new MockERC20("Paxos USDG", "USDG", RobinhoodChain.USDG_DECIMALS);
+        factory = new MetamorphicFactoryMock();
+        implementation = new FarmentaMarket(
+            IPositionManager(payable(address(0xB0B))),
+            ICollateralPolicy(address(0xC0DE)),
+            IPositionValuer(address(0xDEAD)),
+            IPriceOracle(address(0x0A11CE)),
+            IInterestRateModel(address(new InterestRateModel()))
+        );
+        market = FarmentaMarket(
+            payable(address(
+                    new ERC1967Proxy(
+                        address(implementation),
+                        abi.encodeCall(
+                            FarmentaMarket.initialize,
+                            (
+                                IERC20(address(usdg)),
+                                "Farmenta USDG Blue-chip",
+                                "fUSDG-BC",
+                                ICollateralPolicy.Tier.BLUE_CHIP,
+                                address(factory)
+                            )
+                        )
+                    )
+                ))
+        );
+
+        scheduled = factory.deployScheduleAndRemove(market);
+        (, eta) = market.pendingUpgrade();
+    }
+
+    /// @dev What the scheduling transaction left: a schedule, its hash, and nothing to read.
+    function test_theScheduledCodeIsGoneOnceItsTransactionIsOver() public view {
+        (address pending,) = market.pendingUpgrade();
+        assertEq(pending, scheduled, "scheduled implementation");
+        assertEq(scheduled.code.length, 0, "the scheduled code is still there");
+        assertEq(market.pendingUpgradeCodehash(), keccak256(type(RemovableImplementationMock).runtimeCode), "code hash");
+    }
+
+    function test_anAddressLeftEmptyIsRefused() public {
+        vm.warp(eta);
+
+        bytes memory refusal = abi.encodeWithSelector(
+            FarmentaMarket.ImplementationCodeChanged.selector,
+            scheduled,
+            market.pendingUpgradeCodehash(),
+            scheduled.codehash
+        );
+
+        vm.prank(address(factory));
+        vm.expectRevert(refusal);
+        market.upgradeToAndCall(scheduled, "");
+
+        assertEq(_installed(), address(implementation), "an empty address went through");
+    }
+
+    /// @notice Other code put at the scheduled address after the delay is refused.
+    function test_otherCodeAtTheScheduledAddressIsRefused() public {
+        vm.warp(eta);
+        address again = factory.deploy(type(OtherImplementationMock).runtimeCode);
+        assertEq(again, scheduled, "the factory landed elsewhere");
+
+        bytes memory refusal = abi.encodeWithSelector(
+            FarmentaMarket.ImplementationCodeChanged.selector,
+            scheduled,
+            market.pendingUpgradeCodehash(),
+            scheduled.codehash
+        );
+
+        vm.prank(address(factory));
+        vm.expectRevert(refusal);
+        market.upgradeToAndCall(scheduled, "");
+
+        assertEq(_installed(), address(implementation), "other code than was scheduled went through");
+    }
+
+    /// @dev The schedule is held to the code, not to one deployment of it.
+    function test_theScheduledCodePutBackIsInstalled() public {
+        vm.warp(eta);
+        factory.deploy(type(RemovableImplementationMock).runtimeCode);
+
+        vm.prank(address(factory));
+        market.upgradeToAndCall(scheduled, "");
+
+        assertEq(_installed(), scheduled, "the scheduled code was not installed");
+    }
+
+    function _installed() internal view returns (address) {
+        return address(uint160(uint256(vm.load(address(market), IMPLEMENTATION_SLOT))));
     }
 }
