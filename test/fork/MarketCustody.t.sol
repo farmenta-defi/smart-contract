@@ -21,6 +21,7 @@ import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 import {AdditionChargingHook} from "../mocks/AdditionChargingHook.sol";
+import {PriceShiftingHook} from "../mocks/PriceShiftingHook.sol";
 
 /// @notice The EIP-712 domain separator, which `IPositionManager` does not expose.
 interface IEIP712Domain {
@@ -222,6 +223,35 @@ contract MarketCustodyForkTest is MarketForkTest {
         vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
         market.depositCollateral(refused);
         assertEq(nft.ownerOf(refused), address(this), "a refused deposit must leave the NFT alone");
+    }
+
+    /// @notice A hook that moves the price around an addition makes the same liquidity cost
+    ///         more, and pays for none of it.
+    /// @dev FAR-63, the reason bit 11 is in the mask. The pool is seeded, then the same
+    ///      addition is made twice from the same state: once with the hook dormant, once with
+    ///      it pushing the price five spacings down first and swapping back afterwards. The
+    ///      position that comes out is the same one, so whatever the second costs above the
+    ///      first, at the price both started from, is what the adder lost: 5.66 WETH and
+    ///      15,406 USDG against 8.68 WETH and 7,906 USDG. The maxima here are unlimited; a
+    ///      borrower's only bound is the maxima they signed.
+    function test_hookMovingThePriceMakesTheSameAdditionCostMore() public {
+        (address hook, PoolKey memory key) = _initPriceShiftingPool();
+        int24 mid = _alignedOracleTick(key.tickSpacing);
+        _mint(key, mid - 100 * key.tickSpacing, mid + 100 * key.tickSpacing, 1e15);
+        assertEq(key.currency0.balanceOf(hook) + key.currency1.balanceOf(hook), 0, "the hook must start with nothing");
+
+        uint256 snapshot = vm.snapshotState();
+        (uint256 control, uint256 controlId) = _costOfMinting(key, mid, 1e16);
+        vm.revertToState(snapshot);
+
+        PriceShiftingHook(hook).arm(5);
+        (uint256 shifted, uint256 shiftedId) = _costOfMinting(key, mid, 1e16);
+
+        assertEq(shiftedId, controlId, "both runs must mint from the same state");
+        assertEq(positionManager.getPositionLiquidity(shiftedId), 1e16, "the adder got other liquidity");
+        // Measured at the pinned block: $29,672.38 against $29,769.14, 32 bps more.
+        assertGt(shifted - control, control * 25 / 10_000, "moving the price should have cost the adder 25 bps");
+        assertGt(key.currency0.balanceOf(hook), 0, "the hook should have kept what the swap back returned");
     }
 
     /// @notice Dust is refused, measured on principal alone.
@@ -654,6 +684,31 @@ contract MarketCustodyForkTest is MarketForkTest {
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev A fresh WETH/USDG pool behind `PriceShiftingHook`, dormant, with this contract
+    ///      funded to add to it. The address carries the two add-liquidity callbacks and no
+    ///      other permission.
+    function _initPriceShiftingPool() internal returns (address hook, PoolKey memory key) {
+        hook = address((uint160(0x5A1F) << 144) | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
+        vm.etch(hook, address(new PriceShiftingHook(poolManager)).code);
+        key = _initWethUsdgPool(hook);
+        _fundAndApprove(key, 100 ether, 1_000_000e6);
+    }
+
+    /// @dev Mints `liquidity` ten spacings either side of `mid` and returns what it cost in
+    ///      USD (1e18), both legs valued at the oracle price the pool was initialized at.
+    function _costOfMinting(
+        PoolKey memory key,
+        int24 mid,
+        uint256 liquidity
+    ) internal returns (uint256 costUsd, uint256 tokenId) {
+        uint256 weth = key.currency0.balanceOfSelf();
+        uint256 usdg = key.currency1.balanceOfSelf();
+        tokenId = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, liquidity);
+        weth -= key.currency0.balanceOfSelf();
+        usdg -= key.currency1.balanceOfSelf();
+        costUsd = weth * ETH_AT_POOL_SPOT / 1e18 + usdg * ONE_USD / 10 ** RobinhoodChain.USDG_DECIMALS;
     }
 
     function _deposit(
