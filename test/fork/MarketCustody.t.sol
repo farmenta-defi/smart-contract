@@ -189,7 +189,6 @@ contract MarketCustodyForkTest is MarketForkTest {
         vm.stopPrank();
     }
 
-    /// @notice Dust is refused, measured on principal alone.
     /// @notice A pool whose hook bills liquidity additions is refused once nobody vouches for
     ///         the hook.
     /// @dev FAR-47. The hook keeps a tenth of every leg added to its pool and touches no removal
@@ -225,6 +224,7 @@ contract MarketCustodyForkTest is MarketForkTest {
         assertEq(nft.ownerOf(refused), address(this), "a refused deposit must leave the NFT alone");
     }
 
+    /// @notice Dust is refused, measured on principal alone.
     /// @dev The fixture is worth roughly $382, so a floor above that must stop it. Listings
     ///      may only tighten the tier preset, which is why the floor is raised rather than
     ///      lowered to build this case.
