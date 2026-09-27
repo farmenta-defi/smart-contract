@@ -30,7 +30,15 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    `eta = waktu penjadwalan + TIMELOCK_DELAY`, dan `pendingUpgrade()` memperlihatkan
    jadwal yang sedang menunggu. `upgradeToAndCall` ditolak sebelum `eta`, ditolak untuk
    implementasi yang tidak dijadwalkan, dan ditolak untuk implementasi yang berbeda dari
-   yang dijadwalkan. Hanya satu jadwal yang menunggu pada satu waktu. `cancelUpgrade`
+   yang dijadwalkan.
+
+   **Jadwal mengikat kode, bukan hanya alamat.** `scheduleUpgrade` menolak alamat yang
+   belum berisi kode dan mencatat hash kode yang ada di sana saat itu;
+   `pendingUpgradeCodehash()` memperlihatkannya. `upgradeToAndCall` ditolak bila kode di
+   alamat itu sudah berbeda, termasuk bila kodenya dihapus lalu diganti, dan penolakan
+   itu tidak menghabiskan jadwal. Jadi yang dipasang adalah kode yang diumumkan.
+
+   Hanya satu jadwal yang menunggu pada satu waktu. `cancelUpgrade`
    instan dan menerbitkan `UpgradeCancelled`; menjadwalkan ulang memulai jeda dari nol.
    `TIMELOCK_DELAY` adalah konstanta di bytecode implementasi, bukan storage: satu-satunya
    cara mengubahnya adalah upgrade, dan upgrade itu sendiri menunggu 2 hari.
@@ -46,8 +54,13 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
      disengaja: keadaan yang paling butuh `pause` adalah yang paling tidak punya waktu.
      Kuasa owner atas `CollateralPolicy` di poin 2 dan 3 juga tetap instan.
    - Data yang dijalankan `upgradeToAndCall` tidak ikut dijadwalkan. Yang diumumkan
-     adalah alamat implementasi, dan data itu hanya dapat menjalankan kode implementasi
-     tersebut.
+     adalah alamat implementasi dan hash kodenya, dan data itu hanya dapat menjalankan
+     kode implementasi tersebut.
+   - Hash itu mengikat kode implementasi, bukan kode yang dipanggilnya. Linked library
+     tertulis di implementasi sebagai alamat, jadi membaca implementasi berarti juga
+     membaca kode di alamat library yang ditautkannya.
+   - Jadwal tidak kedaluwarsa. Sesudah `eta` lewat, implementasi itu dapat dipasang
+     kapan saja sampai dipasang atau dibatalkan.
 
    Kuasa yang tersisa ini diterima untuk MVP yang belum diaudit dan belum memiliki TVL
    nyata. Timelock adalah syarat yang §15 no. 9 tetapkan sebelum dana sungguhan; ia

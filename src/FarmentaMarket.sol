@@ -62,7 +62,8 @@ import {MarketUpgrade} from "./libraries/MarketUpgrade.sol";
 ///
 ///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` and holds every upgrade to a
 ///      timelock (§4.1, FAR-21): the implementation is scheduled first, in an event anyone can
-///      index, and can be installed only `TIMELOCK_DELAY` later. This contract custodies
+///      index, and can be installed only `TIMELOCK_DELAY` later, and only while the code at its
+///      address is the code that was scheduled. This contract custodies
 ///      collateral NFTs and holds USDG deposits, so whoever holds the owner key can still replace
 ///      its entire logic, including taking everything. What the delay takes away is doing it
 ///      without warning: lenders and borrowers get that long to leave. It stays the largest risk
@@ -818,7 +819,8 @@ contract FarmentaMarket is
     /// @notice Schedules `newImplementation` to replace this one, `TIMELOCK_DELAY` from now at the
     ///         earliest (§4.1, FAR-21).
     /// @param newImplementation The implementation to install. Its code is what lenders and
-    ///        borrowers get the delay to read.
+    ///        borrowers get the delay to read, so it has to be there already, and the schedule is
+    ///        held to its hash (`pendingUpgradeCodehash`).
     /// @dev One upgrade waits at a time. A second schedule is refused until the first is cancelled
     ///      or installed, so every schedule ends in exactly one event: `UpgradeCancelled`, or
     ///      ERC-1967's `Upgraded`. Cancelling and scheduling again starts a full delay over, so no
@@ -923,8 +925,9 @@ contract FarmentaMarket is
 
     /// @inheritdoc UUPSUpgradeable
     /// @dev Owner-only, and only for the implementation that was scheduled, once its eta has come
-    ///      (§4.1, FAR-21). See the trust note on this contract. The upgrade spends its schedule, so
-    ///      installing the same implementation a second time takes a new schedule and a new delay.
+    ///      and only while its code is the code that was scheduled (§4.1, FAR-21). See the trust
+    ///      note on this contract. The upgrade spends its schedule, so installing the same
+    ///      implementation a second time takes a new schedule and a new delay.
     ///
     ///      The calldata `upgradeToAndCall` runs is not part of the schedule. It is run by the
     ///      scheduled implementation, so it can do nothing that the code the delay was given to
