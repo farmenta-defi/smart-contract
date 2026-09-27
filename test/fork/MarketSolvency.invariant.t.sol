@@ -3,11 +3,14 @@ pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {MarketLens} from "../../src/MarketLens.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
+import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 
@@ -24,6 +27,12 @@ contract MarketHandler is Test {
     address internal immutable borrower;
     address internal immutable lender;
     address internal immutable owner;
+    /// @dev The suite's one price source. `MarketForkTest` wires the market and the valuer to an
+    ///      oracle stub, not to Chainlink feeds: the feed addresses in the policy are placeholders
+    ///      nothing reads. A price moves here or nowhere.
+    IPriceOracle internal immutable oracle;
+    /// @dev The leg of `tokenId`'s pool that is not the market's asset: the one a price fall hits.
+    Currency internal immutable collateral;
     /// @dev Ghost state is asserted by invariant functions because with `fail_on_revert = false`,
     ///      an assert in a handler only reverts a discarded call and cannot fail the suite.
     bool public sawFloorBreach;
@@ -55,6 +64,9 @@ contract MarketHandler is Test {
         borrower = borrower_;
         lender = lender_;
         owner = owner_;
+        oracle = market_.oracle();
+        (PoolKey memory key,) = market_.positionManager().getPoolAndPositionInfo(tokenId_);
+        collateral = Currency.unwrap(key.currency0) == market_.asset() ? key.currency1 : key.currency0;
     }
 
     function borrow(
