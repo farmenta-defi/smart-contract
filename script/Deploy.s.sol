@@ -9,7 +9,6 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 import {IStateView} from "@uniswap/v4-periphery/src/interfaces/IStateView.sol";
 import {Script} from "forge-std/Script.sol";
-import {VmSafe} from "forge-std/Vm.sol";
 import {console2} from "forge-std/console2.sol";
 
 import {CollateralPolicy} from "../src/CollateralPolicy.sol";
@@ -35,9 +34,10 @@ import {IFlashLoanMorpho, ILiquidationMarket, LiquidatorHelper} from "../src/per
 ///      The linked libraries (`MarketDebt`, `MarketMint`, `MarketLiquidity`, `MarketLiquidation`,
 ///      `MarketUpgrade`) are deployed by forge itself, through the CREATE2 factory, before the
 ///      market implementation. The broadcast log under `broadcast/Deploy.s.sol/<chainid>/` keeps
-///      every address, including theirs. On `--broadcast` the run also writes
-///      `deployments/<chainid>.json` (or `DEPLOYMENT_OUT`), one address per contract, for the
-///      off-chain services and the frontend.
+///      every address, including theirs. After a broadcast, script/manifest.sh turns that log
+///      into `deployments/<chainid>.json` for the off-chain services and the frontend. It has to
+///      run afterwards: each contract's `startBlock` exists only in the receipts, because
+///      `block.number` on this chain reports the L1 block (ARCHITECTURE §14).
 ///
 ///      External addresses default to `RobinhoodChain` on chain 4663 and are read from the
 ///      environment everywhere else, so another chain needs no code change (ARCHITECTURE §14).
@@ -49,8 +49,10 @@ import {IFlashLoanMorpho, ILiquidationMarket, LiquidatorHelper} from "../src/per
 ///      and the policy goes through it: `TIMELOCK_PROPOSER` schedules, waits `TIMELOCK_MIN_DELAY`,
 ///      and `TIMELOCK_EXECUTOR` executes (script/Timelock.s.sol). Both default to `OWNER`, which
 ///      defaults to the deployer. The timelock has no admin, so its roles and delay change only
-///      through its own queue. `pause` is an owner function too, so a pause waits the delay as
-///      well. `DEPLOY_TIMELOCK=false` skips it and `OWNER` owns everything directly.
+///      through its own queue. Incident responses are owner functions too and wait the delay as
+///      well: `pause`, and on the policy freezing a pool, disabling a token and revoking a hook
+///      (ARCHITECTURE §6.5 assumes those are immediate; FAR-68 tracks a guardian for them).
+///      `DEPLOY_TIMELOCK=false` skips the timelock and `OWNER` owns everything directly.
 ///
 ///      The markets get their owner in `initialize`. The policy cannot: its token configuration
 ///      below has to be written by its owner in this run, so it is deployed owned by the deployer
@@ -108,13 +110,10 @@ contract Deploy is Script {
     error ZeroTimelockDelay();
     error LiquidatorHelperNeedsRobinhood(uint256 chainId);
 
-    function run() external returns (Deployment memory d) {
-        d = deploy(config());
-        if (vm.isContext(VmSafe.ForgeContext.ScriptBroadcast)) {
-            _writeManifest(d, vm.envOr("DEPLOYMENT_OUT", _defaultManifestPath()));
-        } else {
-            console2.log("Simulation: no manifest written");
-        }
+    /// @dev The returned `Deployment` lands in the broadcast log, where script/manifest.sh reads
+    ///      it: keep the field order of `Deployment` in step with that script.
+    function run() external returns (Deployment memory) {
+        return deploy(config());
     }
 
     /// @notice Deploys with `c` as given, without reading the environment.
@@ -307,7 +306,7 @@ contract Deploy is Script {
         Deployment memory d,
         Config memory c,
         address deployer
-    ) private pure {
+    ) private view {
         console2.log("Deployer", deployer);
         console2.log("Owner of markets and policy", d.admin);
         console2.log("TimelockController", address(d.timelock));
@@ -324,6 +323,10 @@ contract Deploy is Script {
         console2.log("LiquidatorHelper Blue-chip", address(d.blueChipLiquidator));
         console2.log("LiquidatorHelper Meme", address(d.memeLiquidator));
 
+        if (block.chainid == RobinhoodChain.CHAIN_ID && c.owner == deployer) {
+            console2.log("WARNING: OWNER is the deployer. The timelock's proposer and executor are the key");
+            console2.log("         that sent this deploy; set OWNER to a separate key or a multisig");
+        }
         if (d.admin == deployer) return;
         if (d.acceptOperation != bytes32(0)) {
             console2.log("Scheduled on the timelock: CollateralPolicy.acceptOwnership(), operation id");
@@ -334,37 +337,6 @@ contract Deploy is Script {
         } else {
             console2.log("Next: OWNER calls acceptOwnership() on CollateralPolicy");
         }
-    }
-
-    /// @dev Written only on `--broadcast`, so a simulation never leaves addresses that do not
-    ///      exist. The broadcast log under `broadcast/` stays the record of every transaction;
-    ///      this is the one file the frontend, indexer, keeper and backend read addresses from.
-    function _writeManifest(
-        Deployment memory d,
-        string memory path
-    ) private {
-        string memory k = "deployment";
-        vm.serializeUint(k, "chainId", block.chainid);
-        vm.serializeAddress(k, "owner", d.admin);
-        vm.serializeAddress(k, "timelock", address(d.timelock));
-        vm.serializeAddress(k, "twapRecorder", address(d.recorder));
-        vm.serializeAddress(k, "collateralPolicy", address(d.policy));
-        vm.serializeAddress(k, "priceOracle", address(d.oracle));
-        vm.serializeAddress(k, "positionValuer", address(d.valuer));
-        vm.serializeAddress(k, "interestRateModel", address(d.interestRateModel));
-        vm.serializeAddress(k, "marketImplementation", address(d.implementation));
-        vm.serializeAddress(k, "blueChipMarket", address(d.blueChip));
-        vm.serializeAddress(k, "memeMarket", address(d.meme));
-        vm.serializeAddress(k, "blueChipLens", address(d.blueChipLens));
-        vm.serializeAddress(k, "memeLens", address(d.memeLens));
-        vm.serializeAddress(k, "blueChipLiquidatorHelper", address(d.blueChipLiquidator));
-        string memory json = vm.serializeAddress(k, "memeLiquidatorHelper", address(d.memeLiquidator));
-        vm.writeJson(json, path);
-        console2.log("Manifest written to", path);
-    }
-
-    function _defaultManifestPath() private view returns (string memory) {
-        return string.concat("deployments/", vm.toString(block.chainid), ".json");
     }
 
     function _implementation(

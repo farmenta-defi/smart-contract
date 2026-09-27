@@ -4,7 +4,7 @@
 -include .env
 export
 
-.PHONY: install build clean fmt fmt-check test test-fork test-all test-deep addresses gas simulate-risk
+.PHONY: install build clean fmt fmt-check test test-fork test-all test-deep addresses gas simulate-risk manifest
 
 install:
 	forge install
@@ -46,3 +46,7 @@ addresses:
 
 gas:
 	forge test --gas-report
+
+## Address manifest from the last Deploy.s.sol broadcast (needs jq). CHAIN defaults to 4663.
+manifest:
+	script/manifest.sh $(or $(CHAIN),4663)
