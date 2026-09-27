@@ -430,8 +430,9 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
     ///      Since FAR-45 the change leaves PositionManager through `SWEEP` and the market's
     ///      balance plays no part, so that theft is gone either way. `_deposit` still refuses
     ///      re-entry, because nothing legitimate deposits from inside another market call, and
-    ///      this pins it. The hook passes the §6.1 bit check (that check is about removing
-    ///      liquidity, not adding it); its call fails and the whole mint unwinds.
+    ///      this pins it. The hook passes the §6.1 bit check (`afterAddLiquidity` without its
+    ///      delta flag cannot bill the addition, FAR-47); its call fails and the whole mint
+    ///      unwinds.
     function test_aVaultDepositFromInsideTheMintIsRefused() public {
         address hook = address((uint160(0xDEF0) << 144) | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
         deployCodeTo("MarketMintAndDeposit.t.sol:VaultDepositingHook", abi.encode(market), hook);
@@ -463,12 +464,12 @@ contract MarketMintAndDepositForkTest is Permit2Signer {
     /// @notice A hook that redeems its vault shares from inside the mint gets exactly what they
     ///         were worth, and the borrower pays nothing for it.
     /// @dev §4.1 v0.26: every market function that calls out must survive a vault exit from
-    ///      inside the call. The hook passes the §6.1 bit check, which is about removing
-    ///      liquidity, not adding it. When the borrower's tokens were pulled into the market
-    ///      they counted toward `totalAssets` while the hook ran: shares worth 20,000 USDG
-    ///      redeemed for 48,571, and the borrower's change paid the difference (FAR-45). The
-    ///      tokens now go straight to PositionManager, so the share price the hook sees is the
-    ///      one everyone else sees.
+    ///      inside the call. The hook passes the §6.1 bit check: `afterAddLiquidity` without
+    ///      its delta flag can act during an addition but cannot bill it (FAR-47). When the
+    ///      borrower's tokens were pulled into the market they counted toward `totalAssets`
+    ///      while the hook ran: shares worth 20,000 USDG redeemed for 48,571, and the
+    ///      borrower's change paid the difference (FAR-45). The tokens now go straight to
+    ///      PositionManager, so the share price the hook sees is the one everyone else sees.
     ///
     ///      The pool is listed with the hook allowlisted, then the hook deposits: a hook with no
     ///      shares does nothing, so the order only decides when the redeem arms.

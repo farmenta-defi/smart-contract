@@ -173,14 +173,21 @@ abstract contract MarketForkTest is PositionMinter {
     ) private returns (PoolKey memory key) {
         RemovalHaircutHook hook = new RemovalHaircutHook(poolManager, haircutBps);
         vm.etch(REMOVAL_HAIRCUT_HOOK, address(hook).code);
+        key = _initWethUsdgPool(REMOVAL_HAIRCUT_HOOK);
+    }
 
+    /// @dev Initializes a fresh WETH/USDG pool (fee 3000, tick spacing 60) behind `hook`, at the
+    ///      spot price of the live WETH/USDG fixture pool so the oracle still agrees with it.
+    function _initWethUsdgPool(
+        address hook
+    ) internal returns (PoolKey memory key) {
         PoolKey memory referenceKey = _keyOf(Fixtures.POS_WETH_USDG_WIDE_IN_RANGE);
         key = PoolKey({
             currency0: referenceKey.currency0,
             currency1: referenceKey.currency1,
             fee: 3000,
             tickSpacing: 60,
-            hooks: IHooks(REMOVAL_HAIRCUT_HOOK)
+            hooks: IHooks(hook)
         });
         (uint160 sqrtPriceX96,,,) = stateView.getSlot0(referenceKey.toId());
         poolManager.initialize(key, sqrtPriceX96);
