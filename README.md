@@ -69,7 +69,11 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
      Kuasa owner atas `CollateralPolicy` di poin 2 dan 3 juga tetap instan.
      Catatan ini tentang kontraknya. Deployment dari `script/Deploy.s.sol` menjadikan
      owner sebuah `TimelockController` (lihat “Deploying”), dan dengan owner itu semua
-     panggilan owner ikut menunggu jeda timelock, termasuk `pause`.
+     panggilan owner ikut menunggu jeda timelock: `pause`, dan di `CollateralPolicy`
+     pembekuan pool, penonaktifan token, pencabutan hook, dan pengetatan terms. Spec §6.5
+     mengandaikan pengetatan itu seketika; peran guardian untuknya dilacak di FAR-68.
+     Sebaliknya, penurunan LT dan kenaikan `removeHaircutBps` (poin 2 dan 3) juga menunggu
+     jeda, jadi peminjam melihatnya di antrean timelock sebelum berlaku.
    - Data yang dijalankan `upgradeToAndCall` tidak ikut dijadwalkan. Yang diumumkan
      adalah alamat implementasi dan hash kodenya, dan data itu hanya dapat menjalankan
      kode implementasi tersebut.
@@ -224,10 +228,23 @@ FOUNDRY_PROFILE=deploy OWNER=0x… forge script script/Deploy.s.sol --rpc-url ro
     --broadcast --private-key $PRIVATE_KEY
 ```
 
-On `--broadcast` the run writes `deployments/<chainid>.json`, one address per contract, for
-the frontend and the off-chain services; a simulation writes nothing. An `anvil` fork keeps chain
-id 4663, so a rehearsal against one writes the same file name and a `broadcast/…/4663/` log as a
-mainnet deploy would: set `DEPLOYMENT_OUT` for it, and delete that log afterwards.
+After the broadcast, build the address manifest from its log:
+
+```sh
+script/manifest.sh            # broadcast/Deploy.s.sol/4663/run-latest.json -> deployments/4663.json
+```
+
+It needs `jq`. Every contract gets `{address, startBlock}`; `collateralPolicy`, `twapRecorder`
+and `markets.{blueChip,meme}` are exactly what `indexer/config/deployment.ts` loads, so the file
+goes to `indexer/deployments/<name>.json` unchanged, and the keeper's `KEEPER_LOG_START_BLOCK` is
+`collateralPolicy.startBlock`. The blocks come from the receipts, not from the script:
+`block.number` on this chain is the L1 block (spec §14). The manifest names the fields of the
+returned `Deployment` by position; `test_deploymentFieldOrderMatchesTheManifest` pins that
+order. It refuses a dry-run log, a failed transaction, and an address no receipt created.
+
+An `anvil` fork keeps chain id 4663, so a rehearsal against one leaves a
+`broadcast/Deploy.s.sol/4663/` log that looks like a mainnet deploy: give `manifest.sh` another
+output path, and delete that log afterwards.
 
 The simulation stops before any transaction if an external address has no code, if a Chainlink
 feed does not answer with a fresh price, or if the wiring read back differs from what was
@@ -236,11 +253,10 @@ prints 30 million: it adds a 30% margin), a few dollars at 0.02 gwei.
 
 | Variable | Default on 4663 | Meaning |
 |---|---|---|
-| `OWNER` | the deployer | proposer and executor of the timelock; owner of everything when `DEPLOY_TIMELOCK=false` |
+| `OWNER` | the deployer | proposer and executor of the timelock; owner of everything when `DEPLOY_TIMELOCK=false`. Set it to a key other than the deployer's (a hardware key or a multisig): left at the default, the key in `.env` holds the whole timelock, and the run logs a warning |
 | `DEPLOY_TIMELOCK` | `true` | `false` makes `OWNER` the direct owner |
 | `TIMELOCK_MIN_DELAY` | `172800` (2 days) | the timelock's delay, in seconds; `0` is refused |
 | `TIMELOCK_PROPOSER`, `TIMELOCK_EXECUTOR` | `OWNER` | the timelock's roles; neither may be `address(0)` |
-| `DEPLOYMENT_OUT` | `deployments/<chainid>.json` | where the manifest is written on `--broadcast` |
 | `DEPLOY_LIQUIDATOR_HELPERS` | `true` on 4663, `false` elsewhere | deploy one `LiquidatorHelper` per market; refused off 4663 |
 | `POSITION_MANAGER`, `STATE_VIEW`, `USDG`, `WETH`, `CHAINLINK_ETH_USD`, `CHAINLINK_USDG_USD`, `MORPHO_BLUE`, `UNIVERSAL_ROUTER` | `RobinhoodChain` | external addresses; required on any other chain |
 
@@ -248,10 +264,20 @@ prints 30 million: it adds a 30% margin), a few dollars at 0.02 gwei.
 and refuses `DEPLOY_LIQUIDATOR_HELPERS=true` elsewhere until WETH is a constructor argument.
 
 **Owned by the timelock.** The timelock has no admin: its roles and its delay change only
-through its own queue. Every owner call waits the delay, **including `pause`**, which is the
-only sequencer-downtime mitigation this chain allows (see “Trust assumptions”). A market upgrade
-waits twice: the timelock's delay to run `scheduleUpgrade`, then the market's own
-`TIMELOCK_DELAY` before `upgradeToAndCall` (four days at the defaults).
+through its own queue. Every owner call waits the delay, and that includes the incident
+responses:
+
+- `pause`, the only sequencer-downtime mitigation this chain allows (see “Trust assumptions”);
+- `CollateralPolicy.setFrozen(poolId, true)`, which stops new collateral and borrows on a pool;
+- `setTokenConfig(token, false, …)` and `setHookAllowlist(hook, false)`;
+- tightening a pool's terms or scheduling an LT ramp.
+
+Spec §6.5 assumes tightening is immediate (freeze, then write the new LT). Under this owner a
+pool being drained keeps taking new loans for the length of the delay. A guardian that may only
+pause and tighten, at once, is tracked in FAR-68. The same delay works for borrowers: lowering an
+LT or raising `removeHaircutBps` is visible in the timelock's queue (`CallScheduled`) before it
+applies. A market upgrade waits twice: the timelock's delay to run `scheduleUpgrade`, then the
+market's own `TIMELOCK_DELAY` before `upgradeToAndCall` (four days at the defaults).
 
 **The policy needs one more step.** Its token configuration has to be written by its owner
 during the run, so it is deployed owned by the deployer and handed to the timelock with

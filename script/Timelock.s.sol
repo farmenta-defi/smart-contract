@@ -22,8 +22,10 @@ import {console2} from "forge-std/console2.sol";
 ///      replacement from `Upgrade.s.sol --sig "deployReplacement()"`:
 ///        1. schedule `scheduleUpgrade(implementation)` on the proxy, and wait the timelock delay;
 ///        2. execute it, which starts the market's `TIMELOCK_DELAY`;
-///        3. schedule `upgradeToAndCall(implementation, 0x)` right away, and execute it once both
-///           delays have passed. `Upgrade.s.sol --sig "execute()"` cannot be used here: it calls
+///        3. schedule `upgradeToAndCall(implementation, 0x)`, and execute it once both delays have
+///           passed. It can also be queued together with step 1, with step 1's id as
+///           `PREDECESSOR`: the timelock then holds it until step 1 has run, and the market until
+///           its own `eta`. `Upgrade.s.sol --sig "execute()"` cannot be used here: it calls
 ///           the proxy as its owner, and the owner is now the timelock.
 contract Timelock is Script {
     error NotReady(bytes32 id, uint256 readyAt, uint256 nowIs);
