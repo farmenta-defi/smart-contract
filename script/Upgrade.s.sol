@@ -31,7 +31,10 @@ contract Upgrade is Script {
 
     /// @notice Deploys the replacement implementation and schedules it.
     /// @return implementation The implementation deployed and scheduled.
-    /// @return eta The earliest `block.timestamp` at which `execute()` can install it.
+    /// @return eta The earliest `block.timestamp` at which `execute()` can install it, as the
+    ///         simulation saw it. The eta that binds is counted from the block the broadcast
+    ///         lands in, a few seconds later: read it from `pendingUpgrade()` or from
+    ///         `UpgradeScheduled`.
     function schedule() external returns (address implementation, uint256 eta) {
         FarmentaMarket proxy = _proxy();
         address positionManager = vm.envOr("POSITION_MANAGER", address(proxy.positionManager()));
@@ -56,7 +59,8 @@ contract Upgrade is Script {
         (, eta) = proxy.pendingUpgrade();
         console2.log("Proxy", address(proxy));
         console2.log("Scheduled implementation", implementation);
-        console2.log("Installable from (unix time)", eta);
+        console2.log("Installable from (unix time, simulated)", eta);
+        console2.log("The eta that binds is set by the mined block: read pendingUpgrade() on the proxy");
     }
 
     /// @notice Installs the implementation the proxy has pending, once its eta has come.
