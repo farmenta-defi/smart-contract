@@ -254,6 +254,34 @@ contract MarketCustodyForkTest is MarketForkTest {
         assertGt(key.currency0.balanceOf(hook), 0, "the hook should have kept what the swap back returned");
     }
 
+    /// @notice A pool whose hook moves the price around additions is refused once nobody
+    ///         vouches for the hook.
+    /// @dev FAR-63. The hook carries `beforeAddLiquidity` and `afterAddLiquidity` and nothing
+    ///      else, so the 0x303 mask admitted it on bits alone. The pool is listed while the
+    ///      hook is allowlisted, the way the owner would list it after review, and a first
+    ///      deposit goes through. Withdrawing the allowlisting must then refuse the next one:
+    ///      under 0x303 it changed nothing and the deposit was accepted.
+    function test_hookMovingThePriceIsRefusedWithoutTheAllowlist() public {
+        (address hook, PoolKey memory key) = _initPriceShiftingPool();
+        int24 mid = _alignedOracleTick(key.tickSpacing);
+        uint256 accepted = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e15);
+        uint256 refused = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e15);
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, true);
+        _listPool(key, TierPresets.blueChip().minPositionUsd, 0);
+        nft.approve(address(market), accepted);
+        market.depositCollateral(accepted);
+        assertEq(nft.ownerOf(accepted), address(market), "an allowlisted hook's pool should accept");
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, false);
+        nft.approve(address(market), refused);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
+        market.depositCollateral(refused);
+        assertEq(nft.ownerOf(refused), address(this), "a refused deposit must leave the NFT alone");
+    }
+
     /// @notice Dust is refused, measured on principal alone.
     /// @dev The fixture is worth roughly $382, so a floor above that must stop it. Listings
     ///      may only tighten the tier preset, which is why the floor is raised rather than
