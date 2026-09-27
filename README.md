@@ -67,6 +67,13 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    - Ia hanya menjaga upgrade market. `pause` dan `unpause` tetap instan, dan itu
      disengaja: keadaan yang paling butuh `pause` adalah yang paling tidak punya waktu.
      Kuasa owner atas `CollateralPolicy` di poin 2 dan 3 juga tetap instan.
+     Catatan ini tentang kontraknya. Deployment dari `script/Deploy.s.sol` menjadikan
+     owner sebuah `TimelockController` (lihat “Deploying”), dan dengan owner itu semua
+     panggilan owner ikut menunggu jeda timelock: `pause`, dan di `CollateralPolicy`
+     pembekuan pool, penonaktifan token, pencabutan hook, dan pengetatan terms. Spec §6.5
+     mengandaikan pengetatan itu seketika; peran guardian untuknya dilacak di FAR-68.
+     Sebaliknya, penurunan LT dan kenaikan `removeHaircutBps` (poin 2 dan 3) juga menunggu
+     jeda, jadi peminjam melihatnya di antrean timelock sebelum berlaku.
    - Data yang dijalankan `upgradeToAndCall` tidak ikut dijadwalkan. Yang diumumkan
      adalah alamat implementasi dan hash kodenya, dan data itu hanya dapat menjalankan
      kode implementasi tersebut.
@@ -187,8 +194,11 @@ test/
 script/
   DiscoverPositions.s.sol        finds real positions to use as fixtures
   InspectPositions.s.sol         prints everything the valuer reads, for one position
+  Deploy.s.sol                   deploys the whole protocol, owned by a TimelockController
+  Timelock.s.sol                 schedules, executes or cancels one owner call on that timelock
   Upgrade.s.sol                  upgrades one market through its timelock: schedule(), then
-                                 execute() two days later
+                                 execute() two days later; deployReplacement() for a proxy
+                                 owned by the TimelockController
 ```
 
 `MarketDebt`, `MarketMint`, `MarketLiquidation`, `MarketLiquidity` and `MarketUpgrade` are linked
@@ -200,6 +210,95 @@ write only the market's ERC-7201 ledger namespace and preserve the market's call
 and storage.
 `MarketLens` is a separate read-only contract bound to one proxy, so deploy one lens for
 each Blue-chip or Meme market and direct risk-view consumers to that lens.
+
+## Deploying
+
+`script/Deploy.s.sol` deploys everything in one run: the five linked libraries (forge deploys
+them through the CREATE2 factory), `TwapRecorder`, `CollateralPolicy`, `PriceOracle`,
+`PositionValuer`, `InterestRateModel`, one market implementation, the Blue-chip (`fUSDG-BC`) and
+Meme (`fUSDG-MEME`) proxies, a `MarketLens` and a `LiquidatorHelper` for each, and a
+`TimelockController` that owns both markets and the policy. It configures USDG, WETH and native
+ETH with their Chainlink feeds. It lists no pool: listings are curated one by one (spec §6.3).
+
+```sh
+# simulate against mainnet; nothing is sent
+FOUNDRY_PROFILE=deploy OWNER=0x… forge script script/Deploy.s.sol --rpc-url robinhood
+# broadcast
+FOUNDRY_PROFILE=deploy OWNER=0x… forge script script/Deploy.s.sol --rpc-url robinhood \
+    --broadcast --private-key $PRIVATE_KEY
+```
+
+After the broadcast, build the address manifest from its log:
+
+```sh
+script/manifest.sh            # broadcast/Deploy.s.sol/4663/run-latest.json -> deployments/4663.json
+```
+
+It needs `jq`. Every contract gets `{address, startBlock}`; `collateralPolicy`, `twapRecorder`
+and `markets.{blueChip,meme}` are exactly what `indexer/config/deployment.ts` loads, so the file
+goes to `indexer/deployments/<name>.json` unchanged, and the keeper's `KEEPER_LOG_START_BLOCK` is
+`collateralPolicy.startBlock`. The blocks come from the receipts, not from the script:
+`block.number` on this chain is the L1 block (spec §14). The manifest names the fields of the
+returned `Deployment` by position; `test_deploymentFieldOrderMatchesTheManifest` pins that
+order. It refuses a dry-run log, a failed transaction, and an address no receipt created.
+
+Commit the mainnet manifest (`deployments/4663.json`) together with its broadcast log: it is the
+record the services read addresses from (decided 27 Sep 2026, spec v1.56).
+
+An `anvil` fork keeps chain id 4663, so a rehearsal against one leaves a
+`broadcast/Deploy.s.sol/4663/` log that looks like a mainnet deploy: give `manifest.sh` another
+output path, and delete that log afterwards.
+
+The simulation stops before any transaction if an external address has no code, if a Chainlink
+feed does not answer with a fresh price, or if the wiring read back differs from what was
+deployed. Measured 2026-09-27 on a mainnet fork: 23 transactions and about 23 million gas (forge
+prints 30 million: it adds a 30% margin), a few dollars at 0.02 gwei.
+
+| Variable | Default on 4663 | Meaning |
+|---|---|---|
+| `OWNER` | the deployer | proposer and executor of the timelock; owner of everything when `DEPLOY_TIMELOCK=false`. Set it to a key other than the deployer's (a hardware key or a multisig): left at the default, the key in `.env` holds the whole timelock, and the run logs a warning |
+| `DEPLOY_TIMELOCK` | `true` | `false` makes `OWNER` the direct owner |
+| `TIMELOCK_MIN_DELAY` | `172800` (2 days) | the timelock's delay, in seconds; `0` is refused |
+| `TIMELOCK_PROPOSER`, `TIMELOCK_EXECUTOR` | `OWNER` | the timelock's roles; neither may be `address(0)` |
+| `DEPLOY_LIQUIDATOR_HELPERS` | `true` on 4663, `false` elsewhere | deploy one `LiquidatorHelper` per market; refused off 4663 |
+| `POSITION_MANAGER`, `STATE_VIEW`, `USDG`, `WETH`, `CHAINLINK_ETH_USD`, `CHAINLINK_USDG_USD`, `MORPHO_BLUE`, `UNIVERSAL_ROUTER` | `RobinhoodChain` | external addresses; required on any other chain |
+
+`LiquidatorHelper` still reads WETH from `RobinhoodChain`, so the script deploys it on 4663 only,
+and refuses `DEPLOY_LIQUIDATOR_HELPERS=true` elsewhere until WETH is a constructor argument.
+
+**Owned by the timelock.** The timelock has no admin: its roles and its delay change only
+through its own queue. Every owner call waits the delay, and that includes the incident
+responses:
+
+- `pause`, the only sequencer-downtime mitigation this chain allows (see “Trust assumptions”);
+- `CollateralPolicy.setFrozen(poolId, true)`, which stops new collateral and borrows on a pool;
+- `setTokenConfig(token, false, …)` and `setHookAllowlist(hook, false)`;
+- tightening a pool's terms or scheduling an LT ramp.
+
+Spec §6.5 assumes tightening is immediate (freeze, then write the new LT). Under this owner a
+pool being drained keeps taking new loans for the length of the delay. A guardian that may only
+pause and tighten, at once, is tracked in FAR-68. The same delay works for borrowers: lowering an
+LT or raising `removeHaircutBps` is visible in the timelock's queue (`CallScheduled`) before it
+applies. A market upgrade waits twice: the timelock's delay to run `scheduleUpgrade`, then the
+market's own `TIMELOCK_DELAY` before `upgradeToAndCall` (four days at the defaults).
+
+**The policy needs one more step.** Its token configuration has to be written by its owner
+during the run, so it is deployed owned by the deployer and handed to the timelock with
+`transferOwnership`. The timelock accepts only through its queue. When the deployer is a
+proposer, the run schedules `acceptOwnership()` itself, and anyone with the executor role runs
+it once the delay has passed:
+
+```sh
+TIMELOCK=0x… TARGET=<CollateralPolicy> CALLDATA=$(cast calldata "acceptOwnership()") \
+    forge script script/Timelock.s.sol --sig "execute()" --rpc-url robinhood --broadcast --private-key …
+```
+
+Until then the deployer still owns the policy, and can list pools directly.
+
+Any other owner call goes the same way: `--sig "schedule()"`, wait, then `--sig "execute()"`
+with the same `TARGET`, `CALLDATA` and `SALT`; `--sig "cancel()"` withdraws it. For an upgrade,
+`script/Upgrade.s.sol --sig "deployReplacement()"` deploys the new implementation, and the
+header of `script/Timelock.s.sol` lists the three timelock operations that install it.
 
 ## What `FarmentaMarket` does today
 
@@ -329,7 +428,8 @@ The owner powers are disclosed above. Other trust assumptions:
   every extra proxy doubles the storage-collision surface without adding a capability.
 - The owner can `pause`, and pausing halts liquidations too. Robinhood Chain publishes no
   Chainlink L2 Sequencer Uptime Feed, so pausing is the only sequencer-downtime mitigation
-  available (spec §5.2, §15.1).
+  available (spec §5.2, §15.1). Deployed by `script/Deploy.s.sol`, the owner is a
+  `TimelockController`, and a pause takes effect only after its delay.
 - Robinhood Chain is L2BEAT **Stage 0** with 2 validators; the sequencer can filter
   transactions. "A liquidation can always be submitted" is an assumption, not a guarantee.
 - **ETH sent to the market cannot be recovered.** `receive()` is open because the fee,

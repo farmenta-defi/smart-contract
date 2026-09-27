@@ -158,6 +158,24 @@ contract UpgradeScriptTest is Test {
     }
 
     /// @dev The ERC-1967 implementation slot: what the proxy actually runs.
+    /// @notice `deployReplacement()` deploys with the market's dependencies and schedules
+    ///         nothing, for a proxy owned by the TimelockController (script/Deploy.s.sol).
+    function test_deployReplacementDeploysWithoutScheduling() public {
+        address deployed = script.deployReplacement();
+
+        (address pending,) = market.pendingUpgrade();
+        assertEq(pending, address(0), "deployReplacement scheduled an upgrade");
+        assertTrue(deployed != address(implementation), "nothing new was deployed");
+        assertEq(_installed(), address(implementation), "the upgrade was installed");
+
+        FarmentaMarket replacement = FarmentaMarket(payable(deployed));
+        assertEq(address(replacement.positionManager()), posm, "positionManager");
+        assertEq(address(replacement.policy()), policy, "policy");
+        assertEq(address(replacement.valuer()), valuer, "valuer");
+        assertEq(address(replacement.oracle()), oracle, "oracle");
+        assertEq(address(replacement.interestRateModel()), interestRateModel, "interestRateModel");
+    }
+
     function _installed() internal view returns (address) {
         return address(
             uint160(

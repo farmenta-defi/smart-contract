@@ -12,7 +12,11 @@ import {IPositionValuer} from "../src/interfaces/IPositionValuer.sol";
 import {IPriceOracle} from "../src/interfaces/IPriceOracle.sol";
 
 /// @notice Upgrades one FarmentaMarket proxy through its timelock (ARCHITECTURE §4.1, FAR-21).
-/// @dev Two runs, `TIMELOCK_DELAY` apart, both broadcast by the proxy's owner:
+/// @dev For a proxy whose owner is an account. A proxy deployed by script/Deploy.s.sol is owned
+///      by a `TimelockController`: run `deployReplacement()` here and send the rest through
+///      script/Timelock.s.sol, which spells the steps out.
+///
+///      Two runs, `TIMELOCK_DELAY` apart, both broadcast by the proxy's owner:
 ///
 ///        FOUNDRY_PROFILE=deploy PROXY=0x… forge script script/Upgrade.s.sol --sig "schedule()" \
 ///            --rpc-url robinhood --broadcast
@@ -46,22 +50,9 @@ contract Upgrade is Script {
     ///         `UpgradeScheduled`.
     function schedule() external returns (address implementation, uint256 eta) {
         FarmentaMarket proxy = _proxy();
-        address positionManager = vm.envOr("POSITION_MANAGER", address(proxy.positionManager()));
-        address policy = vm.envOr("COLLATERAL_POLICY", address(proxy.policy()));
-        address valuer = vm.envOr("POSITION_VALUER", address(proxy.valuer()));
-        address oracle = vm.envOr("PRICE_ORACLE", address(proxy.oracle()));
-        address interestRateModel = vm.envOr("INTEREST_RATE_MODEL", address(proxy.interestRateModel()));
 
         vm.startBroadcast();
-        implementation = address(
-            new FarmentaMarket(
-                IPositionManager(payable(positionManager)),
-                ICollateralPolicy(policy),
-                IPositionValuer(valuer),
-                IPriceOracle(oracle),
-                IInterestRateModel(interestRateModel)
-            )
-        );
+        implementation = _deployReplacement(proxy);
         proxy.scheduleUpgrade(implementation);
         vm.stopBroadcast();
 
@@ -116,6 +107,44 @@ contract Upgrade is Script {
 
         console2.log("Proxy", address(proxy));
         console2.log("Cancelled implementation", implementation);
+    }
+
+    /// @notice Deploys the replacement implementation and schedules nothing.
+    /// @return implementation The implementation deployed.
+    /// @dev For a proxy owned by the timelock (script/Deploy.s.sol): the proxy's owner is a
+    ///      contract, so `schedule()` cannot call it, and the schedule goes through
+    ///      script/Timelock.s.sol instead.
+    function deployReplacement() external returns (address implementation) {
+        FarmentaMarket proxy = _proxy();
+
+        vm.startBroadcast();
+        implementation = _deployReplacement(proxy);
+        vm.stopBroadcast();
+
+        console2.log("Proxy", address(proxy));
+        console2.log("Deployed implementation", implementation);
+        console2.log("Code hash");
+        console2.logBytes32(implementation.codehash);
+    }
+
+    /// @dev Each dependency defaults to the one the proxy's current implementation holds.
+    function _deployReplacement(
+        FarmentaMarket proxy
+    ) private returns (address) {
+        address positionManager = vm.envOr("POSITION_MANAGER", address(proxy.positionManager()));
+        address policy = vm.envOr("COLLATERAL_POLICY", address(proxy.policy()));
+        address valuer = vm.envOr("POSITION_VALUER", address(proxy.valuer()));
+        address oracle = vm.envOr("PRICE_ORACLE", address(proxy.oracle()));
+        address interestRateModel = vm.envOr("INTEREST_RATE_MODEL", address(proxy.interestRateModel()));
+        return address(
+            new FarmentaMarket(
+                IPositionManager(payable(positionManager)),
+                ICollateralPolicy(policy),
+                IPositionValuer(valuer),
+                IPriceOracle(oracle),
+                IInterestRateModel(interestRateModel)
+            )
+        );
     }
 
     function _proxy() private view returns (FarmentaMarket) {
