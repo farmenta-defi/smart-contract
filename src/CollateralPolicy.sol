@@ -317,10 +317,12 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     ///      deposit tells the user which rule stopped it. The caller still has to enforce the
     ///      value-dependent rules from the returned terms: `minPositionUsd` and the debt cap.
     ///
-    ///      The hook must pass the §6.1 bit check (`HookPermissions.BIT_CHECK_MASK`, 0x303) or
+    ///      The hook must pass the §6.1 bit check (`HookPermissions.BIT_CHECK_MASK`, 0xB03) or
     ///      be in `hookAllowlist`. The mask covers the callbacks that can block or skim a
-    ///      removal and, since FAR-47, the return delta on `afterAddLiquidity`, which lets a
-    ///      hook bill the borrower on `mintAndDeposit` and `increaseLiquidity`.
+    ///      removal and the two that make the borrower pay more on `mintAndDeposit` and
+    ///      `increaseLiquidity`: the return delta on `afterAddLiquidity`, which bills the
+    ///      addition (FAR-47), and `beforeAddLiquidity`, which lets the hook choose the price
+    ///      the addition is made at (FAR-63).
     function checkPool(
         PoolKey calldata key,
         Tier marketTier

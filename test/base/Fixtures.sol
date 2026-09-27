@@ -110,10 +110,10 @@ library Fixtures {
 
     /* ---------------------------------- Hooks --------------------------------- */
     /* Permission bits live in the low 14 bits of the address itself.             */
-    /* CollateralPolicy rejects bit 9 (beforeRemoveLiquidity), bit 8              */
-    /* (afterRemoveLiquidity), bit 1 (afterAddLiquidityReturnsDelta, FAR-47) and  */
-    /* bit 0 (afterRemoveLiquidityReturnsDelta): mask 0x303. See ARCHITECTURE.md  */
-    /* §6.1.                                                                      */
+    /* CollateralPolicy rejects bit 11 (beforeAddLiquidity, FAR-63), bit 9        */
+    /* (beforeRemoveLiquidity), bit 8 (afterRemoveLiquidity), bit 1               */
+    /* (afterAddLiquidityReturnsDelta, FAR-47) and bit 0                          */
+    /* (afterRemoveLiquidityReturnsDelta): mask 0xB03. See ARCHITECTURE.md §6.1.  */
 
     /// @notice Hook on the largest ETH/USDG pool: `beforeSwap` only → auto path.
     /// @dev Source not verified on Blockscout (§15 item 2); it passes mechanically.

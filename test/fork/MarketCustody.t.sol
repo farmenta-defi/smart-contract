@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -21,6 +22,7 @@ import {TierPresets} from "../../src/libraries/TierPresets.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 import {AdditionChargingHook} from "../mocks/AdditionChargingHook.sol";
+import {PriceShiftingHook} from "../mocks/PriceShiftingHook.sol";
 
 /// @notice The EIP-712 domain separator, which `IPositionManager` does not expose.
 interface IEIP712Domain {
@@ -208,6 +210,63 @@ contract MarketCustodyForkTest is MarketForkTest {
         uint256 accepted = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e15);
         uint256 refused = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e15);
         assertGt(IERC20(RobinhoodChain.USDG).balanceOf(hook), 0, "the hook should have billed the mint");
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, true);
+        _listPool(key, TierPresets.blueChip().minPositionUsd, 0);
+        nft.approve(address(market), accepted);
+        market.depositCollateral(accepted);
+        assertEq(nft.ownerOf(accepted), address(market), "an allowlisted hook's pool should accept");
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, false);
+        nft.approve(address(market), refused);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
+        market.depositCollateral(refused);
+        assertEq(nft.ownerOf(refused), address(this), "a refused deposit must leave the NFT alone");
+    }
+
+    /// @notice A hook that moves the price around an addition makes the same liquidity cost
+    ///         more, and pays for none of it.
+    /// @dev FAR-63, the reason bit 11 is in the mask. The pool is seeded, then the same
+    ///      addition is made twice from the same state: once with the hook dormant, once with
+    ///      it pushing the price five spacings down first and swapping back afterwards. The
+    ///      position that comes out is the same one, so whatever the second costs above the
+    ///      first, at the price the pool stood at before either, is what the adder lost: 5.66
+    ///      WETH and 15,406 USDG against 8.90 WETH and 7,362 USDG. The maxima here are
+    ///      unlimited; a borrower's only bound is the maxima they signed.
+    function test_hookMovingThePriceMakesTheSameAdditionCostMore() public {
+        (address hook, PoolKey memory key) = _initPriceShiftingPool();
+        int24 mid = _alignedOracleTick(key.tickSpacing);
+        _mint(key, mid - 100 * key.tickSpacing, mid + 100 * key.tickSpacing, 1e15);
+        assertEq(key.currency0.balanceOf(hook) + key.currency1.balanceOf(hook), 0, "the hook must start with nothing");
+
+        uint256 snapshot = vm.snapshotState();
+        (uint256 control, uint256 controlId) = _costOfMinting(key, mid, 1e16);
+        vm.revertToState(snapshot);
+
+        PriceShiftingHook(hook).arm(5);
+        (uint256 shifted, uint256 shiftedId) = _costOfMinting(key, mid, 1e16);
+
+        assertEq(shiftedId, controlId, "both runs must mint from the same state");
+        assertEq(positionManager.getPositionLiquidity(shiftedId), 1e16, "the adder got other liquidity");
+        // Measured at the pinned block: 29,704.04 USDG against 29,834.90, 44 bps more.
+        assertGt(shifted - control, control * 40 / 10_000, "moving the price should have cost the adder 40 bps");
+        assertGt(key.currency0.balanceOf(hook), 0, "the hook should have kept what the swap back returned");
+    }
+
+    /// @notice A pool whose hook moves the price around additions is refused once nobody
+    ///         vouches for the hook.
+    /// @dev FAR-63. The hook carries `beforeAddLiquidity` and `afterAddLiquidity` and nothing
+    ///      else, so the 0x303 mask admitted it on bits alone. The pool is listed while the
+    ///      hook is allowlisted, the way the owner would list it after review, and a first
+    ///      deposit goes through. Withdrawing the allowlisting must then refuse the next one:
+    ///      under 0x303 it changed nothing and the deposit was accepted.
+    function test_hookMovingThePriceIsRefusedWithoutTheAllowlist() public {
+        (address hook, PoolKey memory key) = _initPriceShiftingPool();
+        int24 mid = _alignedOracleTick(key.tickSpacing);
+        uint256 accepted = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e15);
+        uint256 refused = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, 1e15);
 
         vm.prank(owner);
         policy.setHookAllowlist(hook, true);
@@ -654,6 +713,33 @@ contract MarketCustodyForkTest is MarketForkTest {
         );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev A fresh WETH/USDG pool behind `PriceShiftingHook`, dormant, with this contract
+    ///      funded to add to it. The address carries the two add-liquidity callbacks and no
+    ///      other permission.
+    function _initPriceShiftingPool() internal returns (address hook, PoolKey memory key) {
+        hook = address((uint160(0x5A1F) << 144) | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG);
+        vm.etch(hook, address(new PriceShiftingHook(poolManager)).code);
+        key = _initWethUsdgPool(hook);
+        _fundAndApprove(key, 100 ether, 1_000_000e6);
+    }
+
+    /// @dev Mints `liquidity` ten spacings either side of `mid` and returns what it cost in
+    ///      USDG, the WETH leg converted at the price the pool stands at before the mint. That
+    ///      is the pool's own price, 2,525.73 at the pinned block, and not the oracle's.
+    function _costOfMinting(
+        PoolKey memory key,
+        int24 mid,
+        uint256 liquidity
+    ) internal returns (uint256 costUsdg, uint256 tokenId) {
+        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(key.toId());
+        uint256 weth = key.currency0.balanceOfSelf();
+        uint256 usdg = key.currency1.balanceOfSelf();
+        tokenId = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, liquidity);
+        weth -= key.currency0.balanceOfSelf();
+        usdg -= key.currency1.balanceOfSelf();
+        costUsdg = FullMath.mulDiv(FullMath.mulDiv(weth, sqrtPriceX96, 1 << 96), sqrtPriceX96, 1 << 96) + usdg;
     }
 
     function _deposit(

@@ -201,9 +201,45 @@ contract CollateralPolicyTest is Test {
         policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
     }
 
+    /// @dev FAR-63: a hook that runs before an addition can swap its own pool first, so the
+    ///      borrower adds at the price the hook chose, and swap back in `afterAddLiquidity`.
+    ///      It returns no delta and touches nothing on removal, so under the 0x303 mask it was
+    ///      admitted without anyone reading it.
+    function test_hookActingBeforeAdditionsNeedsAllowlisting() public {
+        address hook = address(uint160(Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.AFTER_ADD_LIQUIDITY_FLAG));
+        PoolKey memory key = _blueChipKey(hook);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
+        policy.list(key, _blueChipParams());
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, true);
+        _list(key, _blueChipParams());
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+
+        vm.prank(owner);
+        policy.setHookAllowlist(hook, false);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+    }
+
+    /// @dev `beforeAddLiquidity` is what fails, with or without the callback that undoes the
+    ///      swap. A hook that pays for the push itself still chooses the price the borrower
+    ///      adds at, and can trade against the price it left in a later transaction.
+    function test_beforeAddLiquidityAloneNeedsAllowlisting() public {
+        address hook = address(uint160(Hooks.BEFORE_ADD_LIQUIDITY_FLAG));
+        PoolKey memory key = _blueChipKey(hook);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, hook));
+        policy.list(key, _blueChipParams());
+    }
+
     /// @dev Without the delta flag `afterAddLiquidity` can watch an addition but not bill it
-    ///      through a delta, so it still passes on bits alone. The vault-exit tests of FAR-9 and FAR-45 list
-    ///      pools behind exactly this hook.
+    ///      through a delta, and it runs too late to choose the price, so it still passes on
+    ///      bits alone. The vault-exit tests of FAR-9 and FAR-45 list pools behind exactly this
+    ///      hook.
     function test_afterAddLiquidityWithoutDeltaIsAcceptedWithoutAllowlisting() public {
         address hook = address(uint160(Hooks.AFTER_ADD_LIQUIDITY_FLAG));
         PoolKey memory key = _blueChipKey(hook);
