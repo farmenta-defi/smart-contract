@@ -109,6 +109,19 @@ contract UpgradeScriptTest is Test {
         assertEq(pending, address(0), "the schedule outlived its upgrade");
     }
 
+    /// @notice `execute()` refuses to send an upgrade whose grace is over.
+    function test_executeStopsOnceTheScheduleExpired() public {
+        (address scheduled, uint256 eta) = script.schedule();
+        uint256 expiredAt = eta + market.TIMELOCK_GRACE();
+        vm.warp(expiredAt + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(Upgrade.Expired.selector, scheduled, expiredAt, expiredAt + 1));
+        script.execute();
+
+        assertEq(_installed(), address(implementation), "the script installed an expired schedule");
+        assertEq(script.cancel(), scheduled, "an expired schedule could not be cancelled");
+    }
+
     /// @notice `execute()` refuses to send an upgrade whose code is no longer the code scheduled.
     function test_executeStopsWhenTheScheduledCodeChanged() public {
         (address scheduled, uint256 eta) = script.schedule();

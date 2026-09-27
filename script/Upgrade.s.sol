@@ -25,7 +25,8 @@ import {IPriceOracle} from "../src/interfaces/IPriceOracle.sol";
 ///
 ///      There is no `run()`: a script that picked the step itself would make the second run a
 ///      matter of timing, and an upgrade is the one transaction that should never be sent by
-///      accident. `cancel()` withdraws a schedule.
+///      accident. `cancel()` withdraws a schedule, which is also what an expired one needs before
+///      `schedule()` can run again.
 ///
 ///      `schedule()` deploys the replacement itself. Each dependency defaults to the address the
 ///      proxy's current implementation holds; set the matching environment variable to replace
@@ -35,6 +36,7 @@ contract Upgrade is Script {
     error NothingScheduled(address proxy);
     error TooEarly(address implementation, uint256 eta, uint256 nowIs);
     error CodeChanged(address implementation, bytes32 scheduled, bytes32 found);
+    error Expired(address implementation, uint256 expiredAt, uint256 nowIs);
 
     /// @notice Deploys the replacement implementation and schedules it.
     /// @return implementation The implementation deployed and scheduled.
@@ -67,6 +69,7 @@ contract Upgrade is Script {
         console2.log("Proxy", address(proxy));
         console2.log("Scheduled implementation", implementation);
         console2.log("Installable from (unix time, simulated)", eta);
+        console2.log("Installable until (unix time, simulated)", eta + proxy.TIMELOCK_GRACE());
         console2.log("Code hash the schedule is held to");
         console2.logBytes32(proxy.pendingUpgradeCodehash());
         console2.log("The eta that binds is set by the mined block: read pendingUpgrade() on the proxy");
@@ -81,6 +84,8 @@ contract Upgrade is Script {
         (implementation, eta) = proxy.pendingUpgrade();
         if (implementation == address(0)) revert NothingScheduled(address(proxy));
         if (block.timestamp < eta) revert TooEarly(implementation, eta, block.timestamp);
+        uint256 expiredAt = eta + proxy.TIMELOCK_GRACE();
+        if (block.timestamp > expiredAt) revert Expired(implementation, expiredAt, block.timestamp);
         bytes32 scheduled = proxy.pendingUpgradeCodehash();
         if (implementation.codehash != scheduled) {
             revert CodeChanged(implementation, scheduled, implementation.codehash);
