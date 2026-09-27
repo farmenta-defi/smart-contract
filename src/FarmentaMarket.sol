@@ -59,11 +59,14 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///      item asked. Nor can a borrower use ETH to block its own liquidation: its share goes
 ///      out as WETH when it refuses ETH (see `MarketLiquidation`).
 ///
-///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` with no timelock (§4.1, decided
-///      4 Sep 2026). This contract custodies collateral NFTs and holds USDG deposits, so
-///      whoever holds the owner key can replace its entire logic, including taking
-///      everything, in one transaction and without warning. That is the largest risk in the
-///      protocol (§15 no. 9) and is accepted only while there is no real TVL.
+///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` and holds every upgrade to a
+///      timelock (§4.1, FAR-21): the implementation is scheduled first, in an event anyone can
+///      index, and can be installed only `TIMELOCK_DELAY` later. This contract custodies
+///      collateral NFTs and holds USDG deposits, so whoever holds the owner key can still replace
+///      its entire logic, including taking everything. What the delay takes away is doing it
+///      without warning: lenders and borrowers get that long to leave. It stays the largest risk
+///      in the protocol (§15 no. 9). `pause` and `unpause` do not wait, because the moment that
+///      needs a pause has no time to.
 ///
 ///      **Storage discipline.** State lives under an ERC-7201 namespace, so adding variables
 ///      in a later version cannot shift a slot already in use. Inherited OpenZeppelin
@@ -220,6 +223,8 @@ contract FarmentaMarket is
     error ReserveWithdrawalExceedsAvailable(uint256 amount, uint256 available);
     error UpgradeAlreadyScheduled(address implementation);
     error NoUpgradeScheduled();
+    error UpgradeNotScheduled(address implementation);
+    error UpgradeNotReady(address implementation, uint256 eta);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -919,10 +924,24 @@ contract FarmentaMarket is
     }
 
     /// @inheritdoc UUPSUpgradeable
-    /// @dev Owner-only, no timelock. See the trust note on this contract.
+    /// @dev Owner-only, and only for the implementation that was scheduled, once its eta has come
+    ///      (§4.1, FAR-21). See the trust note on this contract. The upgrade spends its schedule, so
+    ///      installing the same implementation a second time takes a new schedule and a new delay.
+    ///
+    ///      The calldata `upgradeToAndCall` runs is not part of the schedule. It is run by the
+    ///      scheduled implementation, so it can do nothing that the code the delay was given to
+    ///      read does not contain.
     function _authorizeUpgrade(
-        address
-    ) internal override onlyOwner {}
+        address newImplementation
+    ) internal override onlyOwner {
+        MarketLedger.Layout storage $ = _marketStorage();
+        (address pending, uint256 eta) = ($.pendingImplementation, $.upgradeEta);
+        if (pending == address(0) || newImplementation != pending) revert UpgradeNotScheduled(newImplementation);
+        if (block.timestamp < eta) revert UpgradeNotReady(newImplementation, eta);
+
+        delete $.pendingImplementation;
+        delete $.upgradeEta;
+    }
 
     /// @inheritdoc ERC4626Upgradeable
     /// @dev Both `deposit` and `mint` route through here, so pausing stops the vault taking

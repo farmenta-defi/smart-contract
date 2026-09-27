@@ -170,6 +170,163 @@ contract UpgradeTimelockTest is Test {
         assertEq(secondEta, firstEta + waited, "the second schedule did not wait a full delay");
     }
 
+    /* -------------------------------- installing ------------------------------ */
+
+    function test_anUnscheduledImplementationIsRefused() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotScheduled.selector, address(next)));
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(implementation), "an unscheduled upgrade went through");
+    }
+
+    /// @dev One second short of the eta is still too early.
+    function test_aScheduledUpgradeIsRefusedBeforeItsEta() public {
+        uint256 eta = _schedule(address(next));
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotReady.selector, address(next), eta));
+        market.upgradeToAndCall(address(next), "");
+
+        vm.warp(eta - 1);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotReady.selector, address(next), eta));
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(implementation), "an upgrade went through ahead of its eta");
+    }
+
+    function testFuzz_noUpgradeIsInstalledInsideTheDelay(
+        uint256 waited
+    ) public {
+        uint256 eta = _schedule(address(next));
+        vm.warp(block.timestamp + bound(waited, 0, DELAY - 1));
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotReady.selector, address(next), eta));
+        market.upgradeToAndCall(address(next), "");
+    }
+
+    /// @dev The eta is the first second the upgrade is allowed, not the last it is refused.
+    function test_aScheduledUpgradeInstallsAtItsEta() public {
+        uint256 eta = _schedule(address(next));
+        vm.warp(eta);
+
+        vm.prank(owner);
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(next), "the scheduled implementation was not installed");
+        assertEq(uint8(market.tier()), uint8(ICollateralPolicy.Tier.BLUE_CHIP), "tier lost across upgrade");
+        assertEq(market.owner(), owner, "owner lost across upgrade");
+    }
+
+    /// @dev Nothing expires a schedule: it stays installable, and visible, until it is installed
+    ///      or cancelled.
+    function testFuzz_aScheduledUpgradeInstallsAnyTimeFromItsEta(
+        uint32 late
+    ) public {
+        uint256 eta = _schedule(address(next));
+        vm.warp(eta + late);
+
+        vm.prank(owner);
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(next), "the scheduled implementation was not installed");
+    }
+
+    /// @dev A waited-out schedule lets through the implementation it names and no other.
+    function test_anImplementationOtherThanTheScheduledOneIsRefused() public {
+        uint256 eta = _schedule(address(next));
+        FarmentaMarket other = _deployImplementation();
+        vm.warp(eta);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotScheduled.selector, address(other)));
+        market.upgradeToAndCall(address(other), "");
+
+        assertEq(_installed(), address(implementation), "an unscheduled upgrade went through");
+        (address pending,) = market.pendingUpgrade();
+        assertEq(pending, address(next), "the refused upgrade spent the schedule");
+    }
+
+    function test_aCancelledUpgradeCannotBeInstalled() public {
+        uint256 eta = _schedule(address(next));
+        vm.prank(owner);
+        market.cancelUpgrade();
+        vm.warp(eta);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotScheduled.selector, address(next)));
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(implementation), "a cancelled upgrade went through");
+    }
+
+    /// @dev The time a cancelled schedule had waited buys the next one nothing.
+    function test_anUpgradeScheduledAgainAfterACancelWaitsTheWholeDelayAgain() public {
+        uint256 firstEta = _schedule(address(next));
+        vm.warp(firstEta);
+        vm.prank(owner);
+        market.cancelUpgrade();
+
+        uint256 secondEta = _schedule(address(next));
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotReady.selector, address(next), secondEta));
+        market.upgradeToAndCall(address(next), "");
+    }
+
+    /// @dev The upgrade spends its schedule. Otherwise an implementation installed once could be
+    ///      put back at any later time, in one transaction, after the market had moved on from it.
+    function test_anInstalledUpgradeSpendsItsSchedule() public {
+        vm.warp(_schedule(address(next)));
+        vm.prank(owner);
+        market.upgradeToAndCall(address(next), "");
+
+        _assertNothingScheduled();
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotScheduled.selector, address(next)));
+        market.upgradeToAndCall(address(next), "");
+    }
+
+    /// @dev Zero is what an empty schedule holds, and must not match it.
+    function test_theZeroAddressDoesNotMatchAnEmptySchedule() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotScheduled.selector, address(0)));
+        market.upgradeToAndCall(address(0), "");
+    }
+
+    /// @dev The schedule says what may be installed, not who may install it.
+    function test_strangerCannotInstallAScheduledUpgrade() public {
+        vm.warp(_schedule(address(next)));
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(implementation), "a stranger installed the upgrade");
+    }
+
+    /// @notice Handing the market to a new owner neither drops a schedule nor shortens it.
+    function test_aNewOwnerInheritsTheScheduleAndItsEta() public {
+        uint256 eta = _schedule(address(next));
+
+        vm.prank(owner);
+        market.transferOwnership(stranger);
+        vm.prank(stranger);
+        market.acceptOwnership();
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotReady.selector, address(next), eta));
+        market.upgradeToAndCall(address(next), "");
+
+        vm.warp(eta);
+        vm.prank(stranger);
+        market.upgradeToAndCall(address(next), "");
+        assertEq(_installed(), address(next), "the scheduled implementation was not installed");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _schedule(
@@ -178,6 +335,15 @@ contract UpgradeTimelockTest is Test {
         vm.prank(owner);
         market.scheduleUpgrade(newImplementation);
         (, eta) = market.pendingUpgrade();
+    }
+
+    /// @dev The ERC-1967 implementation slot: what the proxy actually runs.
+    function _installed() internal view returns (address) {
+        return address(
+            uint160(
+                uint256(vm.load(address(market), 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc))
+            )
+        );
     }
 
     function _assertNothingScheduled() internal view {
