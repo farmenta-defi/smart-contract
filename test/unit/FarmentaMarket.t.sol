@@ -178,8 +178,13 @@ contract FarmentaMarketTest is Test {
 
     /* --------------------------------- upgrades ------------------------------- */
 
+    /// @dev Through the timelock (FAR-21), whose own cases are in `UpgradeTimelock.t.sol`.
     function test_ownerCanUpgrade() public {
         FarmentaMarket next = _deployImplementation();
+
+        vm.prank(owner);
+        market.scheduleUpgrade(address(next));
+        vm.warp(block.timestamp + market.TIMELOCK_DELAY());
 
         vm.prank(owner);
         market.upgradeToAndCall(address(next), "");

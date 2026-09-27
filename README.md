@@ -18,17 +18,79 @@ sebelum menyimpan NFT jaminan atau deposit USDG. Lending dan likuidasi belum
 diimplementasikan; konsekuensinya di bawah mengikuti spesifikasi. Lihat batas
 implementasi pada bagian “What `FarmentaMarket` does today”.
 
-1. **Kunci owner dapat mengambil seluruh aset.** `FarmentaMarket` memakai UUPS;
-   `_authorizeUpgrade` dibatasi `onlyOwner`, dengan `Ownable2StepUpgradeable` untuk
-   perpindahan ownership. Owner EOA dalam desain MVP dapat mengganti seluruh logika,
-   termasuk mengambil semua NFT jaminan dan deposit USDG, dalam satu transaksi tanpa
-   peringatan. Ini risiko terbesar protokol. **Tidak ada timelock.**
-   Dua langkah perpindahan ownership tidak memberi jeda pada upgrade. Ini diterima
-   hanya untuk MVP tanpa TVL nyata dan belum diaudit.
-   Sebelum dana sungguhan, timelock pada `_authorizeUpgrade` wajib diterapkan, dengan
-   `pause` dikecualikan agar respons darurat tetap instan. Timelock memberi jeda; ia
-   tidak menghapus kuasa mengganti logika. Pengungkapan ini wajib diperbarui ketika
-   timelock diterapkan. Sumber: `ARCHITECTURE.md` §4.1, **§15 no. 9**.
+1. **Kunci owner dapat mengambil seluruh aset, tetapi tidak lagi tanpa peringatan.**
+   `FarmentaMarket` memakai UUPS; `_authorizeUpgrade` dibatasi `onlyOwner`, dengan
+   `Ownable2StepUpgradeable` untuk perpindahan ownership. Owner EOA dalam desain MVP
+   tetap dapat mengganti seluruh logika, termasuk mengambil semua NFT jaminan dan
+   deposit USDG. Ini tetap risiko terbesar protokol.
+
+   **Setiap upgrade melewati timelock 2 hari (FAR-21).** Owner harus memanggil
+   `scheduleUpgrade(newImplementation)` lebih dulu. Saat itu event
+   `UpgradeScheduled(newImplementation, eta)` terbit, dengan
+   `eta = waktu penjadwalan + TIMELOCK_DELAY`, dan `pendingUpgrade()` memperlihatkan
+   jadwal yang sedang menunggu. `upgradeToAndCall` ditolak sebelum `eta`, ditolak untuk
+   implementasi yang tidak dijadwalkan, dan ditolak untuk implementasi yang berbeda dari
+   yang dijadwalkan.
+
+   **Jadwal kedaluwarsa 14 hari sesudah `eta`.** Sesudah `eta + TIMELOCK_GRACE`,
+   `upgradeToAndCall` ditolak (`UpgradeExpired`); owner harus membatalkan jadwal itu dan
+   menjadwalkan ulang, yang berarti pengumuman baru dan jeda 2 hari penuh. Jadi jadwal
+   yang dibuat jauh sebelum seorang deposan masuk tidak dapat dipasang padanya.
+
+   **Jadwal mengikat kode, bukan hanya alamat.** `scheduleUpgrade` menolak alamat yang
+   belum berisi kode, menolak akun yang hanya menunjuk ke kode lain (delegasi EIP-7702,
+   kode berawalan `0xEF`), dan mencatat hash kode yang ada di sana saat itu;
+   `pendingUpgradeCodehash()` memperlihatkannya dan event `UpgradeCodeBound` mencatatnya.
+   `upgradeToAndCall` ditolak bila kode di
+   alamat itu sudah berbeda, termasuk bila kodenya dihapus lalu diganti, dan penolakan
+   itu tidak menghabiskan jadwal. Jadi kode yang dipasang ber-hash sama dengan yang
+   diumumkan.
+
+   **Cara membaca jadwal yang menunggu.** Bandingkan hash kode di alamat terjadwal
+   dengan `pendingUpgradeCodehash()`. Bila alamat itu kosong, atau hash-nya berbeda,
+   pada saat mana pun selama jeda, perlakukan upgrade itu sebagai bermusuhan dan
+   keluar: kontrak tidak dapat memaksa kode tetap terbaca selama jeda.
+
+   Hanya satu jadwal yang menunggu pada satu waktu. `cancelUpgrade`
+   instan dan menerbitkan `UpgradeCancelled`; menjadwalkan ulang memulai jeda dari nol.
+   `TIMELOCK_DELAY` dan `TIMELOCK_GRACE` adalah konstanta di bytecode implementasi, bukan
+   storage: satu-satunya cara mengubahnya adalah upgrade, dan upgrade itu sendiri menunggu
+   2 hari.
+
+   Yang **tidak** diberikan timelock ini:
+   - Ia tidak mencabut kuasa. Sesudah jeda lewat owner dapat memasang implementasi apa
+     pun. Jeda hanya memberi peminjam dan deposan waktu untuk keluar, dan itu hanya
+     berguna bila penjadwalan benar-benar dipantau.
+   - Ia tidak menjamin semua orang sempat keluar. `withdraw`/`redeem` dibatasi kas
+     tersedia, jadi pada utilisasi tinggi sebagian deposan tidak dapat menarik
+     seluruh dananya sebelum `eta`.
+   - Ia hanya menjaga upgrade market. `pause` dan `unpause` tetap instan, dan itu
+     disengaja: keadaan yang paling butuh `pause` adalah yang paling tidak punya waktu.
+     Kuasa owner atas `CollateralPolicy` di poin 2 dan 3 juga tetap instan.
+   - Data yang dijalankan `upgradeToAndCall` tidak ikut dijadwalkan. Yang diumumkan
+     adalah alamat implementasi dan hash kodenya, dan data itu hanya dapat menjalankan
+     kode implementasi tersebut.
+   - Hash itu mengikat kode implementasi, bukan kode yang dipanggilnya. Linked library
+     dan dependency (`policy`, `valuer`, `oracle`, `interestRateModel`) tertulis di
+     implementasi sebagai alamat. Tiap alamat itu harus diperiksa sendiri: kontrak biasa,
+     bukan proxy dan bukan akun delegasi. Kode di balik penunjuk dapat diganti sesudah
+     upgrade terpasang, tanpa jadwal dan tanpa jeda.
+   - Kode yang diumumkan bisa tidak terbaca selama jeda. Kode yang dibuat, dijadwalkan,
+     dan dihapus dalam satu transaksi meninggalkan alamat kosong, dan kode ber-hash sama
+     dapat dipasang kembali tepat saat upgrade.
+   - Kode yang dibuat di transaksi pemasangan dapat menghapus dirinya di transaksi itu
+     juga. Market lalu menjalankan alamat kosong, dan kode apa pun yang kemudian
+     ditaruh di sana berjalan tanpa jadwal. Kontrak tidak dapat membedakannya dari kode
+     yang sudah ada sebelumnya; tandanya sama, alamat terjadwal kosong selama jeda.
+   - Selama 14 hari sesudah `eta`, implementasi itu dapat dipasang kapan saja dalam satu
+     transaksi. Deposan yang masuk di jendela itu masuk dengan upgrade yang sudah menunggu:
+     baca `pendingUpgrade()` sebelum menyetor, bukan hanya event.
+
+   Kuasa yang tersisa ini diterima untuk MVP yang belum diaudit dan belum memiliki TVL
+   nyata. Timelock adalah syarat yang §15 no. 9 tetapkan sebelum dana sungguhan; ia
+   menunda kuasa itu, bukan mencabutnya, dan spesifikasi tidak menetapkan syarat lain
+   yang mencabutnya (kunci admin sengaja tidak dibahas, §1).
+   Sumber: `ARCHITECTURE.md` §4.1, **§15 no. 9**.
 
 2. **Owner dapat membuat pinjaman sehat menjadi likuidatable.** Owner dapat menurunkan
    liquidation threshold (LT) sebuah pool sedalam dan secepat apa pun, tanpa batas laju
@@ -64,12 +126,13 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    `withdrawableReserves()` memperlihatkan buffer dan surplus saat ini, sedangkan
    `totalReservesWithdrawn()` mencatat total yang telah ditarik protokol. Bad debt tetap dapat
    menghabiskan reserve, termasuk bagian di bawah lantai.
-   Meski sudah diterapkan, owner dapat mengganti aturan lantai melalui upgrade dan
-   mengambil aset dalam satu transaksi. Lantai mencegah penarikan rutin melewati batas;
-   ia bukan jaminan terhadap pemegang kunci upgrade. Risiko ini diterima hanya untuk
-   MVP tanpa TVL nyata, dengan syarat yang sama seperti kuasa upgrade: timelock pada
-   `_authorizeUpgrade` wajib sebelum dana sungguhan, dengan `pause` tetap instan.
-   Timelock menunda perubahan aturan, bukan membuat lantai kebal terhadap upgrade.
+   Meski sudah diterapkan, owner dapat mengganti aturan lantai melalui upgrade. Lantai
+   mencegah penarikan rutin melewati batas; ia bukan jaminan terhadap pemegang kunci
+   upgrade. Yang berubah sejak FAR-21: upgrade itu harus dijadwalkan dan menunggu
+   timelock 2 hari di poin 1, jadi aturan lantai tidak dapat ditulis ulang tanpa
+   pengumuman on-chain lebih dulu. Timelock menunda perubahan aturan, bukan membuat
+   lantai kebal terhadap upgrade. Risiko yang tersisa diterima untuk MVP yang belum
+   diaudit dan belum memiliki TVL nyata, dengan syarat yang sama seperti poin 1.
    Sumber: `ARCHITECTURE.md` §7, **§15 no. 13**.
 
 Ketiga poin merujuk SOT
@@ -110,7 +173,7 @@ src/
   interfaces/                    ICollateralPolicy, IPositionValuer, IPriceOracle, IAggregatorV3
   libraries/                     PositionAmounts, PriceMath, HookPermissions, TierPresets,
                                  MarketLedger, MarketDebt, MarketMint, MarketLiquidation, MarketLiquidity,
-                                 LiquidationMath, DebtMath
+                                 MarketUpgrade, LiquidationMath, DebtMath
 test/
   base/       ForkTest (pinned-block harness), Fixtures (real pools, hooks, positions),
               PositionMinter (mints positions in the fork for shapes the chain lacks),
@@ -118,17 +181,21 @@ test/
   mocks/      MockPriceOracle and MockAggregatorV3: settable prices for isolated valuation
               and Chainlink checks; MockERC20 — a 6-decimal asset for the vault off-fork
   unit/       no network
+  upgrade/    the market's storage layout, slot by slot; no network
   fork/       pinned-block reads against live Uniswap v4 state
   invariant/  properties asserted across arbitrary call sequences
 script/
   DiscoverPositions.s.sol        finds real positions to use as fixtures
   InspectPositions.s.sol         prints everything the valuer reads, for one position
+  Upgrade.s.sol                  upgrades one market through its timelock: schedule(), then
+                                 execute() two days later
 ```
 
-`MarketDebt`, `MarketMint`, `MarketLiquidation` and `MarketLiquidity` are linked delegatecall
-libraries. Deploy and link them in order: `MarketDebt`, then `MarketMint` linked to
+`MarketDebt`, `MarketMint`, `MarketLiquidation`, `MarketLiquidity` and `MarketUpgrade` are linked
+delegatecall libraries. Deploy and link them in order: `MarketDebt`, then `MarketMint` linked to
 `MarketDebt`, then `MarketLiquidation` (§8 seizure), then `MarketLiquidity` (fee claims) linked
-to `MarketDebt`, then the market implementation linked to all four. They
+to `MarketDebt`, then `MarketUpgrade` (the upgrade timelock, linked to nothing), then the market
+implementation linked to all five. They
 write only the market's ERC-7201 ledger namespace and preserve the market's caller, events,
 and storage.
 `MarketLens` is a separate read-only contract bound to one proxy, so deploy one lens for

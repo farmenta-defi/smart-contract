@@ -28,6 +28,7 @@ import {MarketLedger} from "./libraries/MarketLedger.sol";
 import {MarketLiquidation} from "./libraries/MarketLiquidation.sol";
 import {MarketLiquidity} from "./libraries/MarketLiquidity.sol";
 import {MarketMint} from "./libraries/MarketMint.sol";
+import {MarketUpgrade} from "./libraries/MarketUpgrade.sol";
 
 /// @title FarmentaMarket
 /// @notice Custodies Uniswap v4 LP position NFTs and lends USDG against them
@@ -41,8 +42,8 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///
 ///      **Logic lives in linked libraries; this contract keeps the wrappers** (§4.1 v0.33).
 ///      Borrow and repay run from `MarketDebt`, collateral intake from `MarketMint`, §8's seizure
-///      from `MarketLiquidation`, fee claims and liquidity removals from `MarketLiquidity`, each by
-///      `delegatecall`:
+///      from `MarketLiquidation`, fee claims and liquidity removals from `MarketLiquidity`, the
+///      upgrade queue from `MarketUpgrade`, each by `delegatecall`:
 ///      the market's storage, the
 ///      market's address, the caller's `msg.sender`, code at its own address. Risk views are
 ///      read from `MarketLens`, one per proxy. That is what keeps the implementation under
@@ -59,11 +60,15 @@ import {MarketMint} from "./libraries/MarketMint.sol";
 ///      item asked. Nor can a borrower use ETH to block its own liquidation: its share goes
 ///      out as WETH when it refuses ETH (see `MarketLiquidation`).
 ///
-///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` with no timelock (§4.1, decided
-///      4 Sep 2026). This contract custodies collateral NFTs and holds USDG deposits, so
-///      whoever holds the owner key can replace its entire logic, including taking
-///      everything, in one transaction and without warning. That is the largest risk in the
-///      protocol (§15 no. 9) and is accepted only while there is no real TVL.
+///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` and holds every upgrade to a
+///      timelock (§4.1, FAR-21): the implementation is scheduled first, in an event anyone can
+///      index, and can be installed only `TIMELOCK_DELAY` later, for `TIMELOCK_GRACE` from then,
+///      and only while the code at its address is the code that was scheduled. This contract custodies
+///      collateral NFTs and holds USDG deposits, so whoever holds the owner key can still replace
+///      its entire logic, including taking everything. What the delay takes away is doing it
+///      without warning: lenders and borrowers get that long to leave. It stays the largest risk
+///      in the protocol (§15 no. 9). `pause` and `unpause` do not wait, because the moment that
+///      needs a pause has no time to.
 ///
 ///      **Storage discipline.** State lives under an ERC-7201 namespace, so adding variables
 ///      in a later version cannot shift a slot already in use. Inherited OpenZeppelin
@@ -104,6 +109,18 @@ contract FarmentaMarket is
 
     uint256 private constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
+
+    /// @notice How long a scheduled upgrade waits before it can be installed (§4.1, FAR-21).
+    /// @dev A constant: it sits in the implementation's bytecode, where no transaction can write
+    ///      it. Changing it takes another implementation, and that one waits out this delay.
+    uint256 public constant TIMELOCK_DELAY = 2 days;
+
+    /// @notice How long a scheduled upgrade stays installable once its eta has come (§4.1, FAR-21).
+    /// @dev Past `eta + TIMELOCK_GRACE` the schedule can only be cancelled, and scheduling again
+    ///      gives a new notice and a new delay. Without it an upgrade scheduled before anyone
+    ///      deposited could be installed on them at any later time, with no notice they saw. A
+    ///      constant, for the reason `TIMELOCK_DELAY` is.
+    uint256 public constant TIMELOCK_GRACE = 14 days;
 
     /// @notice The Uniswap position NFT this market custodies.
     /// @dev Immutable in the implementation and changed by upgrading, like every other
@@ -176,6 +193,24 @@ contract FarmentaMarket is
     event ReservesUpdated(uint256 reserves);
     event ReservesWithdrawn(uint256 amount, address indexed to);
 
+    /// @notice An upgrade was scheduled: `newImplementation` can be installed from `eta` on.
+    /// @dev The notice the delay exists to give. Whoever would rather not stay under the new
+    ///      implementation has until `eta` to repay, withdraw and redeem, which is why indexers
+    ///      consume it (§13). The event is not enough by itself: a schedule made before a reader
+    ///      started listening may still be pending. `pendingUpgrade` is what says whether an
+    ///      upgrade waits now. It can be installed until `eta + TIMELOCK_GRACE` and not after.
+    event UpgradeScheduled(address indexed newImplementation, uint256 eta);
+
+    /// @notice The hash of the code `newImplementation` held when it was scheduled, which is the
+    ///         code an upgrade to it is held to.
+    /// @dev Emitted with `UpgradeScheduled`, in its own event so that one keeps the signature
+    ///      FAR-21 gave it. The hash leaves storage when the schedule ends; this is what is left
+    ///      of it for a reader of logs.
+    event UpgradeCodeBound(address indexed newImplementation, bytes32 codehash);
+
+    /// @notice The scheduled upgrade was withdrawn before it was installed.
+    event UpgradeCancelled(address indexed newImplementation);
+
     error ZeroAddress();
     error TierNotSet();
     error NotThePositionManager(address caller);
@@ -204,6 +239,14 @@ contract FarmentaMarket is
     error LiquidityExceedsPosition(uint256 tokenId, uint128 requested, uint128 available);
     error PermitDoesNotMatchPool();
     error ReserveWithdrawalExceedsAvailable(uint256 amount, uint256 available);
+    error UpgradeAlreadyScheduled(address implementation);
+    error NoUpgradeScheduled();
+    error UpgradeNotScheduled(address implementation);
+    error UpgradeNotReady(address implementation, uint256 eta);
+    error ImplementationHasNoCode(address implementation);
+    error ImplementationCodeChanged(address implementation, bytes32 scheduled, bytes32 found);
+    error ImplementationIsAPointer(address implementation);
+    error UpgradeExpired(address implementation, uint256 expiredAt);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -719,6 +762,21 @@ contract FarmentaMarket is
         return _marketStorage().reserveFloorBps;
     }
 
+    /// @notice The upgrade waiting to be installed, and the earliest time it can be.
+    /// @return implementation The scheduled implementation, or zero when none is scheduled.
+    /// @return eta The `block.timestamp` from which it can be installed, or zero.
+    function pendingUpgrade() external view returns (address implementation, uint256 eta) {
+        MarketLedger.Layout storage $ = _marketStorage();
+        return ($.pendingImplementation, $.upgradeEta);
+    }
+
+    /// @notice The hash of the code the pending implementation held when it was scheduled.
+    /// @return The hash `upgradeToAndCall` holds that implementation to, or zero when none is
+    ///         scheduled. Compare it with the code at the address before trusting either.
+    function pendingUpgradeCodehash() external view returns (bytes32) {
+        return _marketStorage().pendingCodehash;
+    }
+
     function _withdrawableReserves(
         uint256 cash
     ) private view returns (uint256) {
@@ -774,6 +832,35 @@ contract FarmentaMarket is
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @notice Schedules `newImplementation` to replace this one, `TIMELOCK_DELAY` from now at the
+    ///         earliest (§4.1, FAR-21).
+    /// @param newImplementation The implementation to install. Its code is what lenders and
+    ///        borrowers get the delay to read, so it has to be there when it is scheduled, it may
+    ///        not be a pointer to other code, and the schedule is held to its hash
+    ///        (`pendingUpgradeCodehash`). That the code stays readable for the whole delay is
+    ///        not something the market can enforce: see `MarketUpgrade.schedule`.
+    /// @dev One upgrade waits at a time. A second schedule is refused until the first is cancelled
+    ///      or installed, so every schedule ends in exactly one event: `UpgradeCancelled`, or
+    ///      ERC-1967's `Upgraded`. Cancelling and scheduling again starts a full delay over, so no
+    ///      sequence of calls brings an eta forward.
+    ///
+    ///      Not pausable, like `cancelUpgrade`: a pause is no reason to hold back a fix, and the
+    ///      delay runs the same either way.
+    ///
+    ///      The queue runs from `MarketUpgrade` (§15 no. 17); `onlyOwner` stays here.
+    function scheduleUpgrade(
+        address newImplementation
+    ) external onlyOwner {
+        MarketUpgrade.schedule(newImplementation, TIMELOCK_DELAY);
+    }
+
+    /// @notice Withdraws the scheduled upgrade.
+    /// @dev Instant, because cancelling adds no power: it only takes away the one upgrade that
+    ///      could have been installed.
+    function cancelUpgrade() external onlyOwner {
+        MarketUpgrade.cancel();
     }
 
     /// @notice Transfers reserve revenue above the tier's lender-protection floor.
@@ -857,10 +944,20 @@ contract FarmentaMarket is
     }
 
     /// @inheritdoc UUPSUpgradeable
-    /// @dev Owner-only, no timelock. See the trust note on this contract.
+    /// @dev Owner-only, and only for the implementation that was scheduled, once its eta has come
+    ///      and only while its code is the code that was scheduled (§4.1, FAR-21). See the trust
+    ///      note on this contract. The upgrade spends its schedule, so installing the same
+    ///      implementation a second time takes a new schedule and a new delay.
+    ///
+    ///      The calldata `upgradeToAndCall` runs is not part of the schedule. It is run by the
+    ///      scheduled implementation, so it can do nothing that code and the code it calls do not
+    ///      contain. The hash covers the implementation only: a library or dependency it names by
+    ///      address is covered by reading what stands at that address.
     function _authorizeUpgrade(
-        address
-    ) internal override onlyOwner {}
+        address newImplementation
+    ) internal override onlyOwner {
+        MarketUpgrade.spend(newImplementation, TIMELOCK_GRACE);
+    }
 
     /// @inheritdoc ERC4626Upgradeable
     /// @dev Both `deposit` and `mint` route through here, so pausing stops the vault taking

@@ -27,6 +27,13 @@ library MarketLedger {
     /// @custom:storage-location erc7201:farmenta.storage.Market
     /// @param tier Which tier this proxy accepts. It is storage, not immutable, because one
     ///        implementation serves both markets.
+    /// @param pendingImplementation The implementation scheduled to replace this one, or zero
+    ///        when no upgrade is scheduled (§4.1, FAR-21). Appended after every field a deployed
+    ///        proxy already uses, so none of them moves.
+    /// @param upgradeEta The earliest `block.timestamp` at which `pendingImplementation` may be
+    ///        installed. It shares the slot of `pendingImplementation`.
+    /// @param pendingCodehash The hash of the code `pendingImplementation` held when it was
+    ///        scheduled, or zero when no upgrade is scheduled. The slot after the queue's first.
     struct Layout {
         ICollateralPolicy.Tier tier;
         mapping(uint256 tokenId => Loan) loans;
@@ -39,6 +46,9 @@ library MarketLedger {
         uint16 reserveFactorBps;
         uint16 reserveFloorBps;
         uint256 totalReservesWithdrawn;
+        address pendingImplementation;
+        uint64 upgradeEta;
+        bytes32 pendingCodehash;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("farmenta.storage.Market")) - 1)) & ~bytes32(uint256(0xff))
