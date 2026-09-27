@@ -15,7 +15,9 @@ import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IInterestRateModel} from "../../src/interfaces/IInterestRateModel.sol";
 import {IPositionValuer} from "../../src/interfaces/IPositionValuer.sol";
 import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
+import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
+import {UnlockedMarketMock} from "../mocks/UnlockedMarketMock.sol";
 
 /// @notice Unit tests for the upgrade timelock (ARCHITECTURE §4.1, §15 no. 9 and 13, FAR-21).
 ///         No network.
@@ -325,6 +327,108 @@ contract UpgradeTimelockTest is Test {
         vm.prank(stranger);
         market.upgradeToAndCall(address(next), "");
         assertEq(_installed(), address(next), "the scheduled implementation was not installed");
+    }
+
+    /* ---------------------------------- pause --------------------------------- */
+
+    /// @notice §4.1: the delay that guards upgrades must not reach the emergency lever.
+    /// @dev Everything here happens in the block that scheduled the upgrade, a full delay ahead
+    ///      of its eta.
+    function test_pauseAndUnpauseDoNotWaitForTheQueue() public {
+        uint256 eta = _schedule(address(next));
+
+        vm.prank(owner);
+        market.pause();
+        assertTrue(market.paused(), "pause waited");
+
+        vm.prank(owner);
+        market.unpause();
+        assertFalse(market.paused(), "unpause waited");
+
+        (address pending, uint256 pendingEta) = market.pendingUpgrade();
+        assertEq(pending, address(next), "pausing touched the schedule");
+        assertEq(pendingEta, eta, "pausing moved the eta");
+    }
+
+    /// @notice A pause neither stops the queue nor lets an upgrade through early.
+    function test_aPausedMarketRunsItsQueueOnTheSameClock() public {
+        vm.prank(owner);
+        market.pause();
+
+        uint256 eta = _schedule(address(next));
+        vm.prank(owner);
+        market.cancelUpgrade();
+        _assertNothingScheduled();
+
+        eta = _schedule(address(next));
+        vm.warp(eta - 1);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotReady.selector, address(next), eta));
+        market.upgradeToAndCall(address(next), "");
+
+        vm.warp(eta);
+        vm.prank(owner);
+        market.upgradeToAndCall(address(next), "");
+
+        assertEq(_installed(), address(next), "a paused market could not be upgraded");
+        assertTrue(market.paused(), "the upgrade lifted the pause");
+    }
+
+    /* -------------------------------- the delay ------------------------------- */
+
+    function test_theDelayIsTwoDays() public view {
+        assertEq(market.TIMELOCK_DELAY(), DELAY, "delay read through the proxy");
+        assertEq(implementation.TIMELOCK_DELAY(), DELAY, "delay read from the implementation");
+    }
+
+    /// @notice No storage write changes the delay, so no owner transaction can.
+    /// @dev Every transaction the owner sends the proxy can only write the proxy's storage. The
+    ///      market's namespace is overwritten here from its first slot to past its last, the queue
+    ///      included, and the delay that guards the next upgrade is still the whole two days.
+    function test_theDelayIsNotReadFromStorage() public {
+        for (uint256 i = 0; i < 16; ++i) {
+            vm.store(address(market), bytes32(uint256(MarketLedger.LOCATION) + i), bytes32(0));
+        }
+        assertEq(market.TIMELOCK_DELAY(), DELAY, "delay read from zeroed storage");
+
+        uint256 eta = _schedule(address(next));
+        assertEq(eta, block.timestamp + DELAY, "a zeroed namespace shortened the delay");
+    }
+
+    /// @notice The owner's other calls leave the delay, and a pending eta, where they were.
+    function test_noOwnerCallShortensTheDelayOrAPendingEta() public {
+        uint256 eta = _schedule(address(next));
+
+        vm.startPrank(owner);
+        market.pause();
+        market.unpause();
+        market.withdrawReserves(0, owner);
+        market.rescueUnaccountedEth(owner);
+        market.transferOwnership(stranger);
+        market.transferOwnership(owner);
+        vm.stopPrank();
+
+        (address pending, uint256 pendingEta) = market.pendingUpgrade();
+        assertEq(pending, address(next), "the schedule changed");
+        assertEq(pendingEta, eta, "the eta moved");
+        assertEq(market.TIMELOCK_DELAY(), DELAY, "the delay changed");
+    }
+
+    /// @notice Changing the delay takes an upgrade, and that upgrade waits out the delay it removes.
+    function test_theDelayOnlyChangesThroughAnUpgradeThatWaitedItOut() public {
+        address unlocked = address(new UnlockedMarketMock());
+        uint256 eta = _schedule(unlocked);
+
+        vm.warp(eta - 1);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotReady.selector, unlocked, eta));
+        market.upgradeToAndCall(unlocked, "");
+        assertEq(market.TIMELOCK_DELAY(), DELAY, "the delay changed ahead of the upgrade");
+
+        vm.warp(eta);
+        vm.prank(owner);
+        market.upgradeToAndCall(unlocked, "");
+        assertEq(market.TIMELOCK_DELAY(), 0, "the replacement's delay is not in force");
     }
 
     /* --------------------------------- helpers -------------------------------- */
