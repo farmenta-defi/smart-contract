@@ -13,8 +13,10 @@ via_ir = false                  # kept off for fast iteration; the `deploy` prof
 bytecode_hash = "none"
 
 # Fork tests pin a block, so results stay reproducible over time; the `robinhood` alias is
-# resolved from [rpc_endpoints] below. No filesystem access is granted: fixtures are
-# expressed as constants in test/base/Fixtures.sol, not read from disk.
+# resolved from [rpc_endpoints] below. Filesystem access is limited to ./deployments, where
+# script/Deploy.s.sol writes its address manifest on --broadcast: fixtures are expressed as
+# constants in test/base/Fixtures.sol, not read from disk.
+fs_permissions = [{ access = "read-write", path = "./deployments" }]
 
 [profile.default.fuzz]
 runs = 512
