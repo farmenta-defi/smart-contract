@@ -11,6 +11,7 @@ import {Timelock} from "../../script/Timelock.s.sol";
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
+import {MarketUpgrade} from "../../src/libraries/MarketUpgrade.sol";
 import {ForkTest} from "../base/ForkTest.sol";
 
 /// @notice `script/Deploy.s.sol` deploys the protocol wired together and owned by a timelock, and
@@ -79,7 +80,7 @@ contract DeployScriptForkTest is ForkTest {
 
         bytes memory accept = abi.encodeCall(d.policy.acceptOwnership, ());
         vm.warp(block.timestamp + d.timelock.getMinDelay() - 1);
-        vm.expectRevert();
+        vm.expectRevert(_notReady(address(d.policy), accept, bytes32(0)));
         d.timelock.execute(address(d.policy), 0, accept, bytes32(0), bytes32(0));
 
         vm.warp(block.timestamp + 1);
@@ -94,7 +95,7 @@ contract DeployScriptForkTest is ForkTest {
 
         bytes memory pause = abi.encodeCall(FarmentaMarket.pause, ());
         _schedule(address(d.blueChip), pause);
-        vm.expectRevert();
+        vm.expectRevert(_notReady(address(d.blueChip), pause, bytes32(0)));
         _execute(address(d.blueChip), pause);
 
         vm.warp(block.timestamp + d.timelock.getMinDelay());
@@ -102,29 +103,80 @@ contract DeployScriptForkTest is ForkTest {
         assertTrue(d.blueChip.paused());
     }
 
-    /// @notice An upgrade crosses the timelock's queue, then the market's, in that order.
+    /// @notice An upgrade crosses the timelock's queue, then the market's own, and the market's
+    ///         holds on its own: both operations are queued at once, so the install is ready on
+    ///         the timelock two days before the market's `eta`, and the market refuses it.
     function test_upgradeCrossesBothQueues() public {
         FarmentaMarket replacement =
             new FarmentaMarket(positionManager, d.policy, d.valuer, d.oracle, d.interestRateModel);
         uint256 delay = d.timelock.getMinDelay();
+        address market = address(d.blueChip);
         bytes memory scheduleUpgrade = abi.encodeCall(FarmentaMarket.scheduleUpgrade, (address(replacement)));
         bytes memory install = abi.encodeCall(d.blueChip.upgradeToAndCall, (address(replacement), ""));
+        bytes32 first = d.timelock.hashOperation(market, 0, scheduleUpgrade, bytes32(0), bytes32(0));
 
-        _schedule(address(d.blueChip), scheduleUpgrade);
-        vm.warp(block.timestamp + delay);
-        _execute(address(d.blueChip), scheduleUpgrade);
+        d.timelock.schedule(market, 0, scheduleUpgrade, bytes32(0), bytes32(0), delay);
+        d.timelock.schedule(market, 0, install, first, bytes32(0), delay);
+
+        vm.warp(block.timestamp + delay - 1);
+        vm.expectRevert(_notReady(market, scheduleUpgrade, bytes32(0)));
+        _execute(market, scheduleUpgrade);
+
+        vm.warp(block.timestamp + 1);
+        _execute(market, scheduleUpgrade);
         (address pending, uint256 eta) = d.blueChip.pendingUpgrade();
         assertEq(pending, address(replacement));
+        assertEq(eta, block.timestamp + d.blueChip.TIMELOCK_DELAY(), "eta");
 
-        _schedule(address(d.blueChip), install);
+        // Ready on the timelock, not yet on the market: the refusal is the market's.
+        assertTrue(d.timelock.isOperationReady(d.timelock.hashOperation(market, 0, install, first, bytes32(0))));
+        vm.expectRevert(abi.encodeWithSelector(MarketUpgrade.UpgradeNotReady.selector, address(replacement), eta));
+        d.timelock.execute(market, 0, install, first, bytes32(0));
+
         vm.warp(eta - 1);
-        vm.expectRevert();
-        _execute(address(d.blueChip), install);
+        vm.expectRevert(abi.encodeWithSelector(MarketUpgrade.UpgradeNotReady.selector, address(replacement), eta));
+        d.timelock.execute(market, 0, install, first, bytes32(0));
 
         vm.warp(eta);
-        _execute(address(d.blueChip), install);
+        d.timelock.execute(market, 0, install, first, bytes32(0));
         assertEq(_implementation(d.blueChip), address(replacement));
         assertEq(_implementation(d.meme), address(d.implementation), "the other market moved too");
+    }
+
+    /// @notice script/manifest.sh names the fields of the returned `Deployment` by position, so
+    ///         the struct's order is pinned here to the list in that script.
+    function test_deploymentFieldOrderMatchesTheManifest() public view {
+        address[15] memory expected = [
+            address(d.timelock),
+            address(d.recorder),
+            address(d.policy),
+            address(d.oracle),
+            address(d.valuer),
+            address(d.interestRateModel),
+            address(d.implementation),
+            address(d.blueChip),
+            address(d.meme),
+            address(d.blueChipLens),
+            address(d.memeLens),
+            address(d.blueChipLiquidator),
+            address(d.memeLiquidator),
+            d.admin,
+            address(0)
+        ];
+        bytes memory encoded = abi.encode(d);
+        assertEq(encoded.length, 15 * 32, "Deployment gained or lost a field: update script/manifest.sh");
+        for (uint256 i; i < 14; ++i) {
+            bytes32 word;
+            assembly ("memory-safe") {
+                word := mload(add(add(encoded, 0x20), mul(i, 0x20)))
+            }
+            assertEq(address(uint160(uint256(word))), expected[i], "field order differs from script/manifest.sh");
+        }
+        bytes32 last;
+        assembly ("memory-safe") {
+            last := mload(add(encoded, add(0x20, mul(14, 0x20))))
+        }
+        assertEq(last, d.acceptOperation, "policyAcceptOperation");
     }
 
     /// @notice `script/Timelock.s.sol` names one operation by its variables across all three runs.
@@ -257,6 +309,19 @@ contract DeployScriptForkTest is ForkTest {
         bytes memory data
     ) private {
         d.timelock.execute(target, 0, data, bytes32(0), bytes32(0));
+    }
+
+    /// @dev What the timelock reverts with when an operation is queued but its delay has not passed.
+    function _notReady(
+        address target,
+        bytes memory data,
+        bytes32 predecessor
+    ) private view returns (bytes memory) {
+        return abi.encodeWithSelector(
+            TimelockController.TimelockUnexpectedOperationState.selector,
+            d.timelock.hashOperation(target, 0, data, predecessor, bytes32(0)),
+            bytes32(1 << uint8(TimelockController.OperationState.Ready))
+        );
     }
 
     function _implementation(
