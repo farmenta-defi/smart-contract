@@ -3,11 +3,18 @@ pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {IStateView} from "@uniswap/v4-periphery/src/interfaces/IStateView.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {MarketLens} from "../../src/MarketLens.sol";
+import {PositionValuer} from "../../src/PositionValuer.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
+import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
+import {PriceMath} from "../../src/libraries/PriceMath.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 
@@ -24,6 +31,15 @@ contract MarketHandler is Test {
     address internal immutable borrower;
     address internal immutable lender;
     address internal immutable owner;
+    /// @dev The suite's one price source. `MarketForkTest` wires the market and the valuer to an
+    ///      oracle stub, not to Chainlink feeds: the feed addresses in the policy are placeholders
+    ///      nothing reads. A price moves here or nowhere.
+    IPriceOracle internal immutable oracle;
+    /// @dev The leg of `tokenId`'s pool that is not the market's asset: the one a price fall hits.
+    Currency internal immutable collateral;
+    /// @dev Where the valuer reads the spot price of `tokenId`'s pool, for the §5.2 spot gate.
+    IStateView internal immutable stateView;
+    PoolKey internal poolKey;
     /// @dev Ghost state is asserted by invariant functions because with `fail_on_revert = false`,
     ///      an assert in a handler only reverts a discarded call and cannot fail the suite.
     bool public sawFloorBreach;
@@ -35,6 +51,10 @@ contract MarketHandler is Test {
     ///      stayed under the pool's minimum (§7 post-condition, §4.1 v0.59).
     bool public sawUnsoundRemoval;
     address internal constant FEE_RECIPIENT = address(0xFEE5);
+    /// @dev `IPriceOracle.price` is overloaded, so its two selectors are spelled out. A mocked call
+    ///      matches on the start of the calldata: selector and currency, whatever the pool key.
+    bytes4 internal constant PRICE = bytes4(keccak256("price(address)"));
+    bytes4 internal constant PRICE_IN_POOL = bytes4(keccak256("price(address,(address,address,uint24,int24,address))"));
 
     constructor(
         FarmentaMarket market_,
@@ -55,6 +75,11 @@ contract MarketHandler is Test {
         borrower = borrower_;
         lender = lender_;
         owner = owner_;
+        oracle = market_.oracle();
+        (PoolKey memory key,) = market_.positionManager().getPoolAndPositionInfo(tokenId_);
+        collateral = Currency.unwrap(key.currency0) == market_.asset() ? key.currency1 : key.currency0;
+        stateView = PositionValuer(address(market_.valuer())).stateView();
+        poolKey = key;
     }
 
     function borrow(
@@ -153,14 +178,84 @@ contract MarketHandler is Test {
     ///
     ///      That also means the market never has a claim to refuse here: with nothing to release, a
     ///      claim cannot lower the health factor, and no action brings the position under 1 first.
-    ///      Removing `requireHealthy` from `collectFees` leaves
-    ///      `invariant_aClaimNeverLeavesThePositionUnhealthy` green (FAR-59). `MarketCollectFees.t.sol`
-    ///      guards that check; this ghost needs either fees that lower the health factor (a swap
-    ///      between claims) or a claim on a position already under 1 before it can fire (FAR-62).
+    ///      The claims it must refuse come from `collectFeesWhileUnhealthy`, which is what turns
+    ///      `invariant_aClaimNeverLeavesThePositionUnhealthy` red once `requireHealthy` is taken out
+    ///      of `collectFees` (FAR-62). A claim whose own fees carry a healthy position under 1 is
+    ///      still not reached here: that one is `MarketCollectFees.t.sol`'s.
     function collectFees() external {
         vm.prank(borrower);
         market.collectFees(tokenId, FEE_RECIPIENT);
         if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyClaim = true;
+    }
+
+    /// @dev Only claims the market must refuse: the collateral's price falls until the lens reports
+    ///      the position under 1, and the borrower claims at that price. On the intact market every
+    ///      call reverts and is discarded; kept apart from `collectFees` so that action's successes
+    ///      are not diluted.
+    ///
+    ///      A position's value falls by less than the price does while it still holds USDG, so one
+    ///      step of `price / healthFactor` can land above 1 and the fall is repeated until it does
+    ///      not. `shortfall` is how far under each step aims, up to half.
+    ///
+    ///      The pool follows the oracle, as it does in a fall the market trades through. Left where
+    ///      the fork has it, the pool would stand far over the oracle and §5.2's spot gate would
+    ///      refuse every claim before the health factor is compared to anything.
+    ///
+    ///      The price is a mocked call, and a mocked call outlives a revert. So nothing between the
+    ///      first mock and the last line may revert on its own: the lens and the claim are both
+    ///      tried, and the mocks are cleared before a refusal is passed on. No other action sees the
+    ///      lowered price.
+    function collectFeesWhileUnhealthy(
+        uint256 shortfall
+    ) external {
+        uint256 health = lens.healthFactor(tokenId);
+        if (health == type(uint256).max) return;
+        shortfall = bound(shortfall, 1, 5000);
+
+        uint256 price = oracle.price(collateral);
+        for (uint256 i = 0; i < 8 && health >= 1e18; ++i) {
+            price = price * 1e18 / health * (10_000 - shortfall) / 10_000;
+            vm.mockCall(address(oracle), abi.encodeWithSelector(PRICE, collateral), abi.encode(price));
+            vm.mockCall(address(oracle), abi.encodeWithSelector(PRICE_IN_POOL, collateral), abi.encode(price));
+            try lens.healthFactor(tokenId) returns (uint256 lowered) {
+                health = lowered;
+            } catch {
+                break;
+            }
+        }
+
+        if (health < 1e18) {
+            _movePoolToTheOracle();
+            vm.prank(borrower);
+            try market.collectFees(tokenId, FEE_RECIPIENT) {
+                if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyClaim = true;
+            } catch (bytes memory refusal) {
+                vm.clearMockedCalls();
+                assembly ("memory-safe") {
+                    revert(add(refusal, 0x20), mload(refusal))
+                }
+            }
+        }
+        vm.clearMockedCalls();
+    }
+
+    /// @dev Only what `StateView.getSlot0` answers for this pool changes, which in the market is
+    ///      read by the valuer for the spot gate alone. The pool itself, and with it the fees the
+    ///      claim pays out, stays as the fork has it. The lens has just valued the position at
+    ///      these prices, so deriving the same square root price here cannot revert.
+    function _movePoolToTheOracle() private {
+        uint160 sqrtPriceX96 = PriceMath.derivedSqrtPriceX96(
+            oracle.price(poolKey.currency0),
+            oracle.price(poolKey.currency1),
+            oracle.decimals(poolKey.currency0),
+            oracle.decimals(poolKey.currency1)
+        );
+        (,, uint24 protocolFee, uint24 lpFee) = stateView.getSlot0(poolKey.toId());
+        vm.mockCall(
+            address(stateView),
+            abi.encodeCall(IStateView.getSlot0, (poolKey.toId())),
+            abi.encode(sqrtPriceX96, TickMath.getTickAtSqrtPrice(sqrtPriceX96), protocolFee, lpFee)
+        );
     }
 
     /// @dev Any amount up to everything the position holds. The market refuses the removals that go
