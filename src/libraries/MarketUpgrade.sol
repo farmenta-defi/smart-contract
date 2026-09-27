@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+
 import {MarketLedger} from "./MarketLedger.sol";
 
 /// @title MarketUpgrade
@@ -23,6 +25,7 @@ library MarketUpgrade {
     error UpgradeNotReady(address implementation, uint256 eta);
     error ImplementationHasNoCode(address implementation);
     error ImplementationCodeChanged(address implementation, bytes32 scheduled, bytes32 found);
+    error ImplementationIsAPointer(address implementation);
 
     /// @notice Queues `newImplementation`, installable `delay` from now at the earliest.
     /// @dev One upgrade waits at a time. A second schedule is refused until the first is cancelled
@@ -35,19 +38,26 @@ library MarketUpgrade {
     ///      removed inside the scheduling transaction is gone again by its end (EIP-6780 still
     ///      lets a contract remove itself in the transaction that created it). Refusing an empty
     ///      address here stops the first; only `spend` comparing the hash stops the second.
+    ///
+    ///      Code that starts with 0xEF is refused too. No deployed contract starts with it
+    ///      (EIP-3541); what does is the 23 bytes an account holds while it is delegated
+    ///      (EIP-7702), which name an address and nothing else. Their hash would stay the same
+    ///      while the account is pointed at other code, after the upgrade and without a schedule.
+    ///      Checked here only: an account that holds code has no key to delegate with later.
     function schedule(
         address newImplementation,
         uint256 delay
     ) external {
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) revert ImplementationHasNoCode(newImplementation);
+        if (_firstByte(newImplementation) == 0xEF) revert ImplementationIsAPointer(newImplementation);
 
         MarketLedger.Layout storage $ = MarketLedger.layout();
         if ($.pendingImplementation != address(0)) revert UpgradeAlreadyScheduled($.pendingImplementation);
 
         uint256 eta = block.timestamp + delay;
         $.pendingImplementation = newImplementation;
-        $.upgradeEta = uint64(eta);
+        $.upgradeEta = SafeCast.toUint64(eta);
         $.pendingCodehash = newImplementation.codehash;
         emit UpgradeScheduled(newImplementation, eta);
     }
@@ -83,5 +93,15 @@ library MarketUpgrade {
         delete $.pendingImplementation;
         delete $.upgradeEta;
         delete $.pendingCodehash;
+    }
+
+    function _firstByte(
+        address account
+    ) private view returns (bytes1 first) {
+        assembly ("memory-safe") {
+            mstore(0x00, 0)
+            extcodecopy(account, 0x00, 0, 1)
+            first := mload(0x00)
+        }
     }
 }

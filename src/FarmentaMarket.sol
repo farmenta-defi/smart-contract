@@ -229,6 +229,7 @@ contract FarmentaMarket is
     error UpgradeNotReady(address implementation, uint256 eta);
     error ImplementationHasNoCode(address implementation);
     error ImplementationCodeChanged(address implementation, bytes32 scheduled, bytes32 found);
+    error ImplementationIsAPointer(address implementation);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
