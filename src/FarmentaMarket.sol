@@ -226,6 +226,8 @@ contract FarmentaMarket is
     error NoUpgradeScheduled();
     error UpgradeNotScheduled(address implementation);
     error UpgradeNotReady(address implementation, uint256 eta);
+    error ImplementationHasNoCode(address implementation);
+    error ImplementationCodeChanged(address implementation, bytes32 scheduled, bytes32 found);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -747,6 +749,13 @@ contract FarmentaMarket is
     function pendingUpgrade() external view returns (address implementation, uint256 eta) {
         MarketLedger.Layout storage $ = _marketStorage();
         return ($.pendingImplementation, $.upgradeEta);
+    }
+
+    /// @notice The hash of the code the pending implementation held when it was scheduled.
+    /// @return The hash `upgradeToAndCall` holds that implementation to, or zero when none is
+    ///         scheduled. Compare it with the code at the address before trusting either.
+    function pendingUpgradeCodehash() external view returns (bytes32) {
+        return _marketStorage().pendingCodehash;
     }
 
     function _withdrawableReserves(

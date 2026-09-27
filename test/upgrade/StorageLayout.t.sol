@@ -37,8 +37,9 @@ contract StorageLayoutTest is Test {
     uint256 internal constant RESERVE_BPS = ROOT + 8;
     uint256 internal constant TOTAL_RESERVES_WITHDRAWN = ROOT + 9;
     uint256 internal constant UPGRADE_QUEUE = ROOT + 10;
+    uint256 internal constant UPGRADE_CODEHASH = ROOT + 11;
 
-    /// @dev Every slot of the namespace that holds a value directly, the queue left out.
+    /// @dev Every slot of the namespace that holds a value directly, the queue's two left out.
     uint256 internal constant LEDGER_SLOTS = 10;
 
     uint256 internal constant TOKEN_ID = 77;
@@ -82,6 +83,7 @@ contract StorageLayoutTest is Test {
         assertEq(_load(LAST_ACCRUAL), block.timestamp, "lastAccrual slot");
         assertEq(_load(RESERVE_BPS), uint256(2500) | uint256(250) << 16, "reserve factor and floor slot");
         assertEq(_load(UPGRADE_QUEUE), 0, "a fresh market has a schedule");
+        assertEq(_load(UPGRADE_CODEHASH), 0, "a fresh market holds a code hash");
     }
 
     /// @notice Every ledger field is read from the slot it has always had.
@@ -110,9 +112,11 @@ contract StorageLayoutTest is Test {
         (address pending, uint256 eta) = market.pendingUpgrade();
         assertEq(pending, address(0xABCD), "pendingImplementation");
         assertEq(eta, 1234, "upgradeEta");
+        assertEq(market.pendingUpgradeCodehash(), bytes32(uint256(0xC0DE5)), "pendingCodehash");
     }
 
-    /// @notice The queue sits in the slot after the last field, packed as address then eta.
+    /// @notice The queue sits in the two slots after the last field: address then eta packed in
+    ///         the first, the hash of the scheduled code in the second.
     function test_theUpgradeQueueTakesTheSlotAfterTheLastField() public {
         address next = address(_deployImplementation());
 
@@ -121,9 +125,10 @@ contract StorageLayoutTest is Test {
 
         uint256 eta = block.timestamp + market.TIMELOCK_DELAY();
         assertEq(_load(UPGRADE_QUEUE), uint256(uint160(next)) | eta << 160, "queue slot");
+        assertEq(_load(UPGRADE_CODEHASH), uint256(next.codehash), "code hash slot");
     }
 
-    /// @notice Scheduling and cancelling write the queue's slot and no other.
+    /// @notice Scheduling and cancelling write the queue's two slots and no other.
     function test_theQueueWritesNoSlotButItsOwn() public {
         address next = address(_deployImplementation());
 
@@ -137,6 +142,7 @@ contract StorageLayoutTest is Test {
         market.cancelUpgrade();
         _assertOnlyTheQueueWasWritten("cancelUpgrade");
         assertEq(_load(UPGRADE_QUEUE), 0, "cancelling left the queue slot set");
+        assertEq(_load(UPGRADE_CODEHASH), 0, "cancelling left the code hash set");
     }
 
     /// @notice An upgrade through the queue leaves every ledger slot as it found it, and the
@@ -144,6 +150,7 @@ contract StorageLayoutTest is Test {
     function test_anUpgradeThroughTheQueueKeepsTheLedger() public {
         _fillLedger();
         vm.store(address(market), bytes32(UPGRADE_QUEUE), bytes32(0));
+        vm.store(address(market), bytes32(UPGRADE_CODEHASH), bytes32(0));
         address next = address(_deployImplementation());
 
         vm.prank(owner);
@@ -167,6 +174,7 @@ contract StorageLayoutTest is Test {
         assertEq(_load(uint256(loanRoot) + 2), loan[2], "loan poolKeyId");
         assertEq(_load(uint256(keccak256(abi.encode(POOL_ID, POOL_DEBT_SHARES)))), poolShares, "poolDebtShares");
         assertEq(_load(UPGRADE_QUEUE), 0, "the upgrade left its schedule behind");
+        assertEq(_load(UPGRADE_CODEHASH), 0, "the upgrade left its code hash behind");
         assertEq(market.owner(), owner, "owner");
         assertEq(market.asset(), address(usdg), "vault asset");
     }
@@ -184,6 +192,7 @@ contract StorageLayoutTest is Test {
         _store(RESERVE_BPS, uint256(707) | uint256(808) << 16);
         _store(TOTAL_RESERVES_WITHDRAWN, 9e6);
         _store(UPGRADE_QUEUE, uint256(uint160(address(0xABCD))) | uint256(1234) << 160);
+        _store(UPGRADE_CODEHASH, 0xC0DE5);
 
         uint256 loanRoot = uint256(_loanRoot(TOKEN_ID));
         _store(loanRoot, uint256(uint160(borrower)) | uint256(ICollateralPolicy.Tier.MEME) << 160);
@@ -198,7 +207,11 @@ contract StorageLayoutTest is Test {
         (, bytes32[] memory writes) = vm.accesses(address(market));
         assertGt(writes.length, 0, string.concat(action, " wrote nothing"));
         for (uint256 i = 0; i < writes.length; ++i) {
-            assertEq(uint256(writes[i]), UPGRADE_QUEUE, string.concat(action, " wrote outside the queue slot"));
+            uint256 slot = uint256(writes[i]);
+            assertTrue(
+                slot == UPGRADE_QUEUE || slot == UPGRADE_CODEHASH,
+                string.concat(action, " wrote outside the queue's slots")
+            );
         }
     }
 
