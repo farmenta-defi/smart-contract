@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
@@ -231,9 +232,9 @@ contract MarketCustodyForkTest is MarketForkTest {
     ///      addition is made twice from the same state: once with the hook dormant, once with
     ///      it pushing the price five spacings down first and swapping back afterwards. The
     ///      position that comes out is the same one, so whatever the second costs above the
-    ///      first, at the price both started from, is what the adder lost: 5.66 WETH and
-    ///      15,406 USDG against 8.68 WETH and 7,906 USDG. The maxima here are unlimited; a
-    ///      borrower's only bound is the maxima they signed.
+    ///      first, at the price the pool stood at before either, is what the adder lost: 5.66
+    ///      WETH and 15,406 USDG against 8.90 WETH and 7,362 USDG. The maxima here are
+    ///      unlimited; a borrower's only bound is the maxima they signed.
     function test_hookMovingThePriceMakesTheSameAdditionCostMore() public {
         (address hook, PoolKey memory key) = _initPriceShiftingPool();
         int24 mid = _alignedOracleTick(key.tickSpacing);
@@ -249,8 +250,8 @@ contract MarketCustodyForkTest is MarketForkTest {
 
         assertEq(shiftedId, controlId, "both runs must mint from the same state");
         assertEq(positionManager.getPositionLiquidity(shiftedId), 1e16, "the adder got other liquidity");
-        // Measured at the pinned block: $29,672.38 against $29,769.14, 32 bps more.
-        assertGt(shifted - control, control * 25 / 10_000, "moving the price should have cost the adder 25 bps");
+        // Measured at the pinned block: 29,704.04 USDG against 29,834.90, 44 bps more.
+        assertGt(shifted - control, control * 40 / 10_000, "moving the price should have cost the adder 40 bps");
         assertGt(key.currency0.balanceOf(hook), 0, "the hook should have kept what the swap back returned");
     }
 
@@ -725,18 +726,20 @@ contract MarketCustodyForkTest is MarketForkTest {
     }
 
     /// @dev Mints `liquidity` ten spacings either side of `mid` and returns what it cost in
-    ///      USD (1e18), both legs valued at the oracle price the pool was initialized at.
+    ///      USDG, the WETH leg converted at the price the pool stands at before the mint. That
+    ///      is the pool's own price, 2,525.73 at the pinned block, and not the oracle's.
     function _costOfMinting(
         PoolKey memory key,
         int24 mid,
         uint256 liquidity
-    ) internal returns (uint256 costUsd, uint256 tokenId) {
+    ) internal returns (uint256 costUsdg, uint256 tokenId) {
+        (uint160 sqrtPriceX96,,,) = stateView.getSlot0(key.toId());
         uint256 weth = key.currency0.balanceOfSelf();
         uint256 usdg = key.currency1.balanceOfSelf();
         tokenId = _mint(key, mid - 10 * key.tickSpacing, mid + 10 * key.tickSpacing, liquidity);
         weth -= key.currency0.balanceOfSelf();
         usdg -= key.currency1.balanceOfSelf();
-        costUsd = weth * ETH_AT_POOL_SPOT / 1e18 + usdg * ONE_USD / 10 ** RobinhoodChain.USDG_DECIMALS;
+        costUsdg = FullMath.mulDiv(FullMath.mulDiv(weth, sqrtPriceX96, 1 << 96), sqrtPriceX96, 1 << 96) + usdg;
     }
 
     function _deposit(
