@@ -3,14 +3,18 @@ pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {IStateView} from "@uniswap/v4-periphery/src/interfaces/IStateView.sol";
 import {Test} from "forge-std/Test.sol";
 
 import {FarmentaMarket} from "../../src/FarmentaMarket.sol";
 import {MarketLens} from "../../src/MarketLens.sol";
+import {PositionValuer} from "../../src/PositionValuer.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
+import {PriceMath} from "../../src/libraries/PriceMath.sol";
 import {Fixtures} from "../base/Fixtures.sol";
 import {MarketForkTest} from "../base/MarketForkTest.sol";
 
@@ -33,6 +37,9 @@ contract MarketHandler is Test {
     IPriceOracle internal immutable oracle;
     /// @dev The leg of `tokenId`'s pool that is not the market's asset: the one a price fall hits.
     Currency internal immutable collateral;
+    /// @dev Where the valuer reads the spot price of `tokenId`'s pool, for the §5.2 spot gate.
+    IStateView internal immutable stateView;
+    PoolKey internal poolKey;
     /// @dev Ghost state is asserted by invariant functions because with `fail_on_revert = false`,
     ///      an assert in a handler only reverts a discarded call and cannot fail the suite.
     bool public sawFloorBreach;
@@ -71,6 +78,8 @@ contract MarketHandler is Test {
         oracle = market_.oracle();
         (PoolKey memory key,) = market_.positionManager().getPoolAndPositionInfo(tokenId_);
         collateral = Currency.unwrap(key.currency0) == market_.asset() ? key.currency1 : key.currency0;
+        stateView = PositionValuer(address(market_.valuer())).stateView();
+        poolKey = key;
     }
 
     function borrow(
@@ -188,6 +197,10 @@ contract MarketHandler is Test {
     ///      step of `price / healthFactor` can land above 1 and the fall is repeated until it does
     ///      not. `shortfall` is how far under each step aims, up to half.
     ///
+    ///      The pool follows the oracle, as it does in a fall the market trades through. Left where
+    ///      the fork has it, the pool would stand far over the oracle and §5.2's spot gate would
+    ///      refuse every claim before the health factor is compared to anything.
+    ///
     ///      The price is a mocked call, and a mocked call outlives a revert. So nothing between the
     ///      first mock and the last line may revert on its own: the lens and the claim are both
     ///      tried, and the mocks are cleared before a refusal is passed on. No other action sees the
@@ -212,6 +225,7 @@ contract MarketHandler is Test {
         }
 
         if (health < 1e18) {
+            _movePoolToTheOracle();
             vm.prank(borrower);
             try market.collectFees(tokenId, FEE_RECIPIENT) {
                 if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyClaim = true;
@@ -223,6 +237,25 @@ contract MarketHandler is Test {
             }
         }
         vm.clearMockedCalls();
+    }
+
+    /// @dev Only what `StateView.getSlot0` answers for this pool changes, which in the market is
+    ///      read by the valuer for the spot gate alone. The pool itself, and with it the fees the
+    ///      claim pays out, stays as the fork has it. The lens has just valued the position at
+    ///      these prices, so deriving the same square root price here cannot revert.
+    function _movePoolToTheOracle() private {
+        uint160 sqrtPriceX96 = PriceMath.derivedSqrtPriceX96(
+            oracle.price(poolKey.currency0),
+            oracle.price(poolKey.currency1),
+            oracle.decimals(poolKey.currency0),
+            oracle.decimals(poolKey.currency1)
+        );
+        (,, uint24 protocolFee, uint24 lpFee) = stateView.getSlot0(poolKey.toId());
+        vm.mockCall(
+            address(stateView),
+            abi.encodeCall(IStateView.getSlot0, (poolKey.toId())),
+            abi.encode(sqrtPriceX96, TickMath.getTickAtSqrtPrice(sqrtPriceX96), protocolFee, lpFee)
+        );
     }
 
     /// @dev Any amount up to everything the position holds. The market refuses the removals that go
