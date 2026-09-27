@@ -32,6 +32,8 @@ library MarketLedger {
     ///        proxy already uses, so none of them moves.
     /// @param upgradeEta The earliest `block.timestamp` at which `pendingImplementation` may be
     ///        installed. It shares the slot of `pendingImplementation`.
+    /// @param pendingCodehash The hash of the code `pendingImplementation` held when it was
+    ///        scheduled, or zero when no upgrade is scheduled. The slot after the queue's first.
     struct Layout {
         ICollateralPolicy.Tier tier;
         mapping(uint256 tokenId => Loan) loans;
@@ -46,6 +48,7 @@ library MarketLedger {
         uint256 totalReservesWithdrawn;
         address pendingImplementation;
         uint64 upgradeEta;
+        bytes32 pendingCodehash;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("farmenta.storage.Market")) - 1)) & ~bytes32(uint256(0xff))
