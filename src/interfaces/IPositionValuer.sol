@@ -46,4 +46,13 @@ interface IPositionValuer {
     function valueForLiquidation(
         uint256 tokenId
     ) external view returns (Valuation memory);
+
+    /// @notice The fees `tokenId` has accrued and not yet collected, in raw token units.
+    /// @dev The same `fees0`/`fees1` as `value`, read without any price, so it answers while the
+    ///      oracle does not. These are exactly what the next `DECREASE_LIQUIDITY` on the position
+    ///      realises, unless something moves the pool's fee growth first in the same transaction:
+    ///      a swap or donate made by the pool's hook from inside that decrease (FAR-52).
+    function feesOf(
+        uint256 tokenId
+    ) external view returns (uint256 fees0, uint256 fees1);
 }

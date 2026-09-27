@@ -58,6 +58,15 @@ contract PositionValuer is IPositionValuer {
         return _value(tokenId, true);
     }
 
+    /// @inheritdoc IPositionValuer
+    function feesOf(
+        uint256 tokenId
+    ) external view returns (uint256 fees0, uint256 fees1) {
+        (PoolKey memory key, PositionInfo info) = positionManager.getPoolAndPositionInfo(tokenId);
+        if (PositionInfo.unwrap(info) == 0) revert PositionNotFound(tokenId);
+        (, fees0, fees1) = _positionState(key.toId(), tokenId, info.tickLower(), info.tickUpper());
+    }
+
     /// @dev Split across helpers purely to stay within the EVM's stack limit; the sequence is
     ///      read position → derive price → split into amounts → add fees → price in USD.
     ///

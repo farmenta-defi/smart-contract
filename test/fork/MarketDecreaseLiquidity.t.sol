@@ -80,6 +80,14 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         uint256 marketEth = address(market).balance;
         uint256 marketUsdg = usdg.balanceOf(address(market));
 
+        // FAR-52: the fees that leave with the slice are reported first, as `collectFees` reports them,
+        // and they are what PositionManager actually pays out for a claim alone, not the valuer's own
+        // arithmetic read back.
+        Probe memory realised = _probe(tokenId, 0);
+        assertGt(realised.out0, 0, "the fixture must realise ETH fees");
+        assertGt(realised.out1, 0, "the fixture must realise USDG fees");
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.CollectFees(tokenId, _keyOf(tokenId).toId(), realised.out0, realised.out1);
         vm.expectEmit(true, true, false, true, address(market));
         emit FarmentaMarket.LiquidityChanged(tokenId, _keyOf(tokenId).toId(), -int256(uint256(half)));
         vm.prank(borrower);
@@ -100,6 +108,22 @@ contract MarketDecreaseLiquidityForkTest is MarketForkTest {
         assertEq(address(market).balance, marketEth, "no ETH is left in the market");
         assertEq(usdg.balanceOf(address(market)), marketUsdg, "the removal never touches the market's cash");
         assertEq(nft.ownerOf(tokenId), address(market), "the position stays in custody");
+    }
+
+    /// @notice A removal from a position holding no fees still reports them, as zero (FAR-52).
+    /// @dev Edge case: the first removal has just paid out every fee, so the second realises none.
+    function test_aRemovalWithNoFeesReportsZeroFees() public {
+        _deposit(tokenId);
+        uint128 quarter = liquidity / 4;
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, quarter, 0, 0, recipient);
+        (uint256 left0, uint256 left1) = valuer.feesOf(tokenId);
+        assertEq(left0 + left1, 0, "the first removal must have paid out every fee");
+
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.CollectFees(tokenId, _keyOf(tokenId).toId(), 0, 0);
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, quarter, 0, 0, recipient);
     }
 
     /// @notice An ERC-20 pair pays both legs to `to` the same way.

@@ -431,6 +431,26 @@ contract MarketCollectFeesForkTest is MarketForkTest {
         assertEq(attacker.redeemed(), fair, "a share redeemed mid-claim is worth what it is worth after");
     }
 
+    /// @notice The event reports the fees the position realised, not what reached `to` (FAR-52).
+    /// @dev The recipient redeems vault shares for USDG while its ETH lands, after the USDG fee leg.
+    ///      A balance change across the claim would count that USDG as fees.
+    function test_theEventReportsTheFeesNotTheRecipientsGain() public {
+        _deposit(tokenId);
+        IPositionValuer.Valuation memory before = valuer.value(tokenId);
+        RedeemingRecipient receiver = new RedeemingRecipient(market);
+        deal(address(usdg), address(receiver), 100e6);
+        receiver.deposit(100e6);
+        receiver.arm();
+
+        vm.expectEmit(true, true, false, true, address(market));
+        emit FarmentaMarket.CollectFees(tokenId, _keyOf(tokenId).toId(), before.fees0, before.fees1);
+        vm.prank(borrower);
+        market.collectFees(tokenId, address(receiver));
+
+        assertGt(receiver.redeemed(), 0, "the redeem must actually run inside the payout");
+        assertEq(usdg.balanceOf(address(receiver)), before.fees1 + receiver.redeemed(), "the recipient got both");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _deposit(
