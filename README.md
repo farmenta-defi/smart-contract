@@ -242,6 +242,9 @@ goes to `indexer/deployments/<name>.json` unchanged, and the keeper's `KEEPER_LO
 returned `Deployment` by position; `test_deploymentFieldOrderMatchesTheManifest` pins that
 order. It refuses a dry-run log, a failed transaction, and an address no receipt created.
 
+Commit the mainnet manifest (`deployments/4663.json`) together with its broadcast log: it is the
+record the services read addresses from (decided 27 Sep 2026, spec v1.56).
+
 An `anvil` fork keeps chain id 4663, so a rehearsal against one leaves a
 `broadcast/Deploy.s.sol/4663/` log that looks like a mainnet deploy: give `manifest.sh` another
 output path, and delete that log afterwards.
