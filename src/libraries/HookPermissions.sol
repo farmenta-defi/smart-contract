@@ -13,26 +13,37 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 ///      Farmenta asks two questions of a hook. Can it interfere with pulling liquidity back
 ///      out? That is the operation both `liquidate` and `withdrawCollateral` depend on, so a
 ///      hook able to block it or skim from it can strand collateral or make a loan
-///      unliquidatable. And can it charge whoever adds liquidity? `mintAndDeposit` and
+///      unliquidatable. And can it make whoever adds liquidity pay more? `mintAndDeposit` and
 ///      `increaseLiquidity` add liquidity on the borrower's behalf, bounded only by the
-///      maxima the borrower signed, so a hook able to bill that addition takes the borrower's
-///      tokens without adding a cent to the collateral (FAR-47).
+///      maxima the borrower signed, so a hook able to bill that addition (FAR-47), or to
+///      choose the price it is made at (FAR-63), takes the borrower's tokens without adding a
+///      cent to the collateral.
 library HookPermissions {
-    /// @notice The four callbacks that fail the bit check of ARCHITECTURE §6.1: the three
-    ///         that can interfere with removing liquidity, plus the return delta on adding it.
+    /// @notice The five callbacks that fail the bit check of ARCHITECTURE §6.1: the three
+    ///         that can interfere with removing liquidity, the return delta on adding it, and
+    ///         the callback that runs before an addition.
     /// @dev v4-core subtracts the hook's `afterAddLiquidity` delta from the caller's
     ///      (`callerDelta - hookDelta` in `Hooks.afterModifyLiquidity`), and PositionManager
-    ///      checks its maxima against what is left. `afterAddLiquidity` without the delta
-    ///      flag can observe an addition but cannot bill it through a delta, so it stays out of
-    ///      the mask. A hook that also has `beforeAddLiquidity` can still move the price the
-    ///      addition is made at, by swapping its own pool from inside the callbacks (FAR-63).
+    ///      checks its maxima against what is left. That is the bill through a delta.
     ///
-    ///      Built from v4-core's own flags rather than the literal 0x303 that §6.1 quotes: if
+    ///      `beforeAddLiquidity` is the bill through the price. `PoolManager.modifyLiquidity`
+    ///      calls it before the pool reads its own price, `swap` asks only that the manager is
+    ///      unlocked, and `noSelfCall` keeps the hook's callbacks from running on its own swap.
+    ///      So the hook can swap its pool, let the addition be made at the price it left, and
+    ///      swap back in `afterAddLiquidity` against the liquidity just added, inside the same
+    ///      unlock and with no capital of its own (FAR-63).
+    ///
+    ///      `afterAddLiquidity` alone stays out of the mask. It runs once the amounts are fixed,
+    ///      so without the delta flag it cannot bill the addition, and moving the price
+    ///      afterwards does not change what the adder paid.
+    ///
+    ///      Built from v4-core's own flags rather than the literal 0xB03 that §6.1 quotes: if
     ///      Uniswap ever renumbers a bit, this mask follows and a hard-coded constant would
     ///      silently start admitting the wrong hooks. `test_maskMatchesTheSpec` pins the two
     ///      together.
     uint160 internal constant BIT_CHECK_MASK = Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG | Hooks.AFTER_REMOVE_LIQUIDITY_FLAG
-        | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG;
+        | Hooks.AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA_FLAG | Hooks.AFTER_ADD_LIQUIDITY_RETURNS_DELTA_FLAG
+        | Hooks.BEFORE_ADD_LIQUIDITY_FLAG;
 
     /// @notice True if the hook implements none of the callbacks in `BIT_CHECK_MASK`.
     /// @dev A `true` here is not admission on its own. Since v0.5 every pool is listed
