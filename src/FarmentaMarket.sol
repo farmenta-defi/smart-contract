@@ -62,8 +62,8 @@ import {MarketUpgrade} from "./libraries/MarketUpgrade.sol";
 ///
 ///      **Upgrade power.** `_authorizeUpgrade` is `onlyOwner` and holds every upgrade to a
 ///      timelock (§4.1, FAR-21): the implementation is scheduled first, in an event anyone can
-///      index, and can be installed only `TIMELOCK_DELAY` later, and only while the code at its
-///      address is the code that was scheduled. This contract custodies
+///      index, and can be installed only `TIMELOCK_DELAY` later, for `TIMELOCK_GRACE` from then,
+///      and only while the code at its address is the code that was scheduled. This contract custodies
 ///      collateral NFTs and holds USDG deposits, so whoever holds the owner key can still replace
 ///      its entire logic, including taking everything. What the delay takes away is doing it
 ///      without warning: lenders and borrowers get that long to leave. It stays the largest risk

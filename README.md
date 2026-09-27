@@ -32,10 +32,16 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    implementasi yang tidak dijadwalkan, dan ditolak untuk implementasi yang berbeda dari
    yang dijadwalkan.
 
+   **Jadwal kedaluwarsa 14 hari sesudah `eta`.** Sesudah `eta + TIMELOCK_GRACE`,
+   `upgradeToAndCall` ditolak (`UpgradeExpired`); owner harus membatalkan jadwal itu dan
+   menjadwalkan ulang, yang berarti pengumuman baru dan jeda 2 hari penuh. Jadi jadwal
+   yang dibuat jauh sebelum seorang deposan masuk tidak dapat dipasang padanya.
+
    **Jadwal mengikat kode, bukan hanya alamat.** `scheduleUpgrade` menolak alamat yang
    belum berisi kode, menolak akun yang hanya menunjuk ke kode lain (delegasi EIP-7702,
    kode berawalan `0xEF`), dan mencatat hash kode yang ada di sana saat itu;
-   `pendingUpgradeCodehash()` memperlihatkannya. `upgradeToAndCall` ditolak bila kode di
+   `pendingUpgradeCodehash()` memperlihatkannya dan event `UpgradeCodeBound` mencatatnya.
+   `upgradeToAndCall` ditolak bila kode di
    alamat itu sudah berbeda, termasuk bila kodenya dihapus lalu diganti, dan penolakan
    itu tidak menghabiskan jadwal. Jadi kode yang dipasang ber-hash sama dengan yang
    diumumkan.
@@ -47,8 +53,9 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
 
    Hanya satu jadwal yang menunggu pada satu waktu. `cancelUpgrade`
    instan dan menerbitkan `UpgradeCancelled`; menjadwalkan ulang memulai jeda dari nol.
-   `TIMELOCK_DELAY` adalah konstanta di bytecode implementasi, bukan storage: satu-satunya
-   cara mengubahnya adalah upgrade, dan upgrade itu sendiri menunggu 2 hari.
+   `TIMELOCK_DELAY` dan `TIMELOCK_GRACE` adalah konstanta di bytecode implementasi, bukan
+   storage: satu-satunya cara mengubahnya adalah upgrade, dan upgrade itu sendiri menunggu
+   2 hari.
 
    Yang **tidak** diberikan timelock ini:
    - Ia tidak mencabut kuasa. Sesudah jeda lewat owner dapat memasang implementasi apa
@@ -75,9 +82,9 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
      juga. Market lalu menjalankan alamat kosong, dan kode apa pun yang kemudian
      ditaruh di sana berjalan tanpa jadwal. Kontrak tidak dapat membedakannya dari kode
      yang sudah ada sebelumnya; tandanya sama, alamat terjadwal kosong selama jeda.
-   - Jadwal tidak kedaluwarsa. Sesudah `eta` lewat, implementasi itu dapat dipasang
-     kapan saja sampai dipasang atau dibatalkan, termasuk jadwal yang dibuat sebelum
-     seorang deposan masuk. Baca `pendingUpgrade()` sebelum menyetor, bukan hanya event.
+   - Selama 14 hari sesudah `eta`, implementasi itu dapat dipasang kapan saja dalam satu
+     transaksi. Deposan yang masuk di jendela itu masuk dengan upgrade yang sudah menunggu:
+     baca `pendingUpgrade()` sebelum menyetor, bukan hanya event.
 
    Kuasa yang tersisa ini diterima untuk MVP yang belum diaudit dan belum memiliki TVL
    nyata. Timelock adalah syarat yang §15 no. 9 tetapkan sebelum dana sungguhan; ia
