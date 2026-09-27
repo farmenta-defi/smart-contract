@@ -14,8 +14,14 @@ import {IPriceOracle} from "../src/interfaces/IPriceOracle.sol";
 /// @notice Upgrades one FarmentaMarket proxy through its timelock (ARCHITECTURE §4.1, FAR-21).
 /// @dev Two runs, `TIMELOCK_DELAY` apart, both broadcast by the proxy's owner:
 ///
-///        PROXY=0x… forge script script/Upgrade.s.sol --sig "schedule()" --rpc-url robinhood --broadcast
-///        PROXY=0x… forge script script/Upgrade.s.sol --sig "execute()"  --rpc-url robinhood --broadcast
+///        FOUNDRY_PROFILE=deploy PROXY=0x… forge script script/Upgrade.s.sol --sig "schedule()" \
+///            --rpc-url robinhood --broadcast
+///        FOUNDRY_PROFILE=deploy PROXY=0x… forge script script/Upgrade.s.sol --sig "execute()" \
+///            --rpc-url robinhood --broadcast
+///
+///      `deploy` is the profile that ships (foundry.toml). Scheduled from another profile, the
+///      replacement is other bytecode than a reader builds from the same source, and its hash
+///      matches nothing they can reproduce.
 ///
 ///      There is no `run()`: a script that picked the step itself would make the second run a
 ///      matter of timing, and an upgrade is the one transaction that should never be sent by
@@ -28,6 +34,7 @@ import {IPriceOracle} from "../src/interfaces/IPriceOracle.sol";
 contract Upgrade is Script {
     error NothingScheduled(address proxy);
     error TooEarly(address implementation, uint256 eta, uint256 nowIs);
+    error CodeChanged(address implementation, bytes32 scheduled, bytes32 found);
 
     /// @notice Deploys the replacement implementation and schedules it.
     /// @return implementation The implementation deployed and scheduled.
@@ -60,6 +67,8 @@ contract Upgrade is Script {
         console2.log("Proxy", address(proxy));
         console2.log("Scheduled implementation", implementation);
         console2.log("Installable from (unix time, simulated)", eta);
+        console2.log("Code hash the schedule is held to");
+        console2.logBytes32(proxy.pendingUpgradeCodehash());
         console2.log("The eta that binds is set by the mined block: read pendingUpgrade() on the proxy");
     }
 
@@ -72,8 +81,14 @@ contract Upgrade is Script {
         (implementation, eta) = proxy.pendingUpgrade();
         if (implementation == address(0)) revert NothingScheduled(address(proxy));
         if (block.timestamp < eta) revert TooEarly(implementation, eta, block.timestamp);
+        bytes32 scheduled = proxy.pendingUpgradeCodehash();
+        if (implementation.codehash != scheduled) {
+            revert CodeChanged(implementation, scheduled, implementation.codehash);
+        }
 
         bytes memory callData = vm.envOr("UPGRADE_CALLDATA", bytes(""));
+        console2.log("Calldata the new implementation runs, in bytes", callData.length);
+        if (callData.length != 0) console2.logBytes(callData);
 
         vm.startBroadcast();
         proxy.upgradeToAndCall(implementation, callData);

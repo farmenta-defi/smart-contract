@@ -31,9 +31,10 @@ contract UpgradeScriptTest is Test {
     FarmentaMarket internal implementation;
     FarmentaMarket internal market;
     Upgrade internal script;
+    MockERC20 internal usdg;
 
     function setUp() public {
-        MockERC20 usdg = new MockERC20("Paxos USDG", "USDG", RobinhoodChain.USDG_DECIMALS);
+        usdg = new MockERC20("Paxos USDG", "USDG", RobinhoodChain.USDG_DECIMALS);
         interestRateModel = address(new InterestRateModel());
         implementation = new FarmentaMarket(
             IPositionManager(payable(posm)),
@@ -106,6 +107,19 @@ contract UpgradeScriptTest is Test {
         assertEq(_installed(), scheduled, "the market does not run the scheduled implementation");
         (address pending,) = market.pendingUpgrade();
         assertEq(pending, address(0), "the schedule outlived its upgrade");
+    }
+
+    /// @notice `execute()` refuses to send an upgrade whose code is no longer the code scheduled.
+    function test_executeStopsWhenTheScheduledCodeChanged() public {
+        (address scheduled, uint256 eta) = script.schedule();
+        bytes32 announced = scheduled.codehash;
+        vm.warp(eta);
+        vm.etch(scheduled, address(usdg).code);
+
+        vm.expectRevert(abi.encodeWithSelector(Upgrade.CodeChanged.selector, scheduled, announced, scheduled.codehash));
+        script.execute();
+
+        assertEq(_installed(), address(implementation), "the script installed other code than it scheduled");
     }
 
     function test_executeAndCancelStopWhenNothingIsScheduled() public {
