@@ -105,6 +105,11 @@ contract FarmentaMarket is
     uint256 private constant BPS = 10_000;
     uint256 private constant WAD = 1e18;
 
+    /// @notice How long a scheduled upgrade waits before it can be installed (§4.1, FAR-21).
+    /// @dev A constant: it sits in the implementation's bytecode, where no transaction can write
+    ///      it. Changing it takes another implementation, and that one waits out this delay.
+    uint256 public constant TIMELOCK_DELAY = 2 days;
+
     /// @notice The Uniswap position NFT this market custodies.
     /// @dev Immutable in the implementation and changed by upgrading, like every other
     ///      dependency here (§4.1): each extra proxy would double the storage-collision
@@ -176,6 +181,15 @@ contract FarmentaMarket is
     event ReservesUpdated(uint256 reserves);
     event ReservesWithdrawn(uint256 amount, address indexed to);
 
+    /// @notice An upgrade was scheduled: `newImplementation` can be installed from `eta` on.
+    /// @dev The notice the delay exists to give. Whoever would rather not stay under the new
+    ///      implementation has until `eta` to repay, withdraw and redeem, which is why indexers
+    ///      consume it (§13) instead of leaving the schedule to be read from state.
+    event UpgradeScheduled(address indexed newImplementation, uint256 eta);
+
+    /// @notice The scheduled upgrade was withdrawn before it was installed.
+    event UpgradeCancelled(address indexed newImplementation);
+
     error ZeroAddress();
     error TierNotSet();
     error NotThePositionManager(address caller);
@@ -204,6 +218,8 @@ contract FarmentaMarket is
     error LiquidityExceedsPosition(uint256 tokenId, uint128 requested, uint128 available);
     error PermitDoesNotMatchPool();
     error ReserveWithdrawalExceedsAvailable(uint256 amount, uint256 available);
+    error UpgradeAlreadyScheduled(address implementation);
+    error NoUpgradeScheduled();
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -719,6 +735,14 @@ contract FarmentaMarket is
         return _marketStorage().reserveFloorBps;
     }
 
+    /// @notice The upgrade waiting to be installed, and the earliest time it can be.
+    /// @return implementation The scheduled implementation, or zero when none is scheduled.
+    /// @return eta The `block.timestamp` from which it can be installed, or zero.
+    function pendingUpgrade() external view returns (address implementation, uint256 eta) {
+        MarketLedger.Layout storage $ = _marketStorage();
+        return ($.pendingImplementation, $.upgradeEta);
+    }
+
     function _withdrawableReserves(
         uint256 cash
     ) private view returns (uint256) {
@@ -774,6 +798,44 @@ contract FarmentaMarket is
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @notice Schedules `newImplementation` to replace this one, `TIMELOCK_DELAY` from now at the
+    ///         earliest (§4.1, FAR-21).
+    /// @param newImplementation The implementation to install. Its code is what lenders and
+    ///        borrowers get the delay to read.
+    /// @dev One upgrade waits at a time. A second schedule is refused until the first is cancelled
+    ///      or installed, so every schedule ends in exactly one event: `UpgradeCancelled`, or
+    ///      ERC-1967's `Upgraded`. Cancelling and scheduling again starts a full delay over, so no
+    ///      sequence of calls brings an eta forward.
+    ///
+    ///      Not pausable, like `cancelUpgrade`: a pause is no reason to hold back a fix, and the
+    ///      delay runs the same either way.
+    function scheduleUpgrade(
+        address newImplementation
+    ) external onlyOwner {
+        if (newImplementation == address(0)) revert ZeroAddress();
+
+        MarketLedger.Layout storage $ = _marketStorage();
+        if ($.pendingImplementation != address(0)) revert UpgradeAlreadyScheduled($.pendingImplementation);
+
+        uint256 eta = block.timestamp + TIMELOCK_DELAY;
+        $.pendingImplementation = newImplementation;
+        $.upgradeEta = uint64(eta);
+        emit UpgradeScheduled(newImplementation, eta);
+    }
+
+    /// @notice Withdraws the scheduled upgrade.
+    /// @dev Instant, because cancelling adds no power: it only takes away the one upgrade that
+    ///      could have been installed.
+    function cancelUpgrade() external onlyOwner {
+        MarketLedger.Layout storage $ = _marketStorage();
+        address pending = $.pendingImplementation;
+        if (pending == address(0)) revert NoUpgradeScheduled();
+
+        delete $.pendingImplementation;
+        delete $.upgradeEta;
+        emit UpgradeCancelled(pending);
     }
 
     /// @notice Transfers reserve revenue above the tier's lender-protection floor.
