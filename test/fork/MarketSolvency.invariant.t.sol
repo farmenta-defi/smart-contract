@@ -178,10 +178,10 @@ contract MarketHandler is Test {
     ///
     ///      That also means the market never has a claim to refuse here: with nothing to release, a
     ///      claim cannot lower the health factor, and no action brings the position under 1 first.
-    ///      Removing `requireHealthy` from `collectFees` leaves
-    ///      `invariant_aClaimNeverLeavesThePositionUnhealthy` green (FAR-59). `MarketCollectFees.t.sol`
-    ///      guards that check; this ghost needs either fees that lower the health factor (a swap
-    ///      between claims) or a claim on a position already under 1 before it can fire (FAR-62).
+    ///      The claims it must refuse come from `collectFeesWhileUnhealthy`, which is what turns
+    ///      `invariant_aClaimNeverLeavesThePositionUnhealthy` red once `requireHealthy` is taken out
+    ///      of `collectFees` (FAR-62). A claim whose own fees carry a healthy position under 1 is
+    ///      still not reached here: that one is `MarketCollectFees.t.sol`'s.
     function collectFees() external {
         vm.prank(borrower);
         market.collectFees(tokenId, FEE_RECIPIENT);
