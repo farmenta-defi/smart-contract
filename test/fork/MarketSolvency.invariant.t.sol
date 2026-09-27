@@ -44,6 +44,10 @@ contract MarketHandler is Test {
     ///      stayed under the pool's minimum (§7 post-condition, §4.1 v0.59).
     bool public sawUnsoundRemoval;
     address internal constant FEE_RECIPIENT = address(0xFEE5);
+    /// @dev `IPriceOracle.price` is overloaded, so its two selectors are spelled out. A mocked call
+    ///      matches on the start of the calldata: selector and currency, whatever the pool key.
+    bytes4 internal constant PRICE = bytes4(keccak256("price(address)"));
+    bytes4 internal constant PRICE_IN_POOL = bytes4(keccak256("price(address,(address,address,uint24,int24,address))"));
 
     constructor(
         FarmentaMarket market_,
@@ -173,6 +177,52 @@ contract MarketHandler is Test {
         vm.prank(borrower);
         market.collectFees(tokenId, FEE_RECIPIENT);
         if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyClaim = true;
+    }
+
+    /// @dev Only claims the market must refuse: the collateral's price falls until the lens reports
+    ///      the position under 1, and the borrower claims at that price. On the intact market every
+    ///      call reverts and is discarded; kept apart from `collectFees` so that action's successes
+    ///      are not diluted.
+    ///
+    ///      A position's value falls by less than the price does while it still holds USDG, so one
+    ///      step of `price / healthFactor` can land above 1 and the fall is repeated until it does
+    ///      not. `shortfall` is how far under each step aims, up to half.
+    ///
+    ///      The price is a mocked call, and a mocked call outlives a revert. So nothing between the
+    ///      first mock and the last line may revert on its own: the lens and the claim are both
+    ///      tried, and the mocks are cleared before a refusal is passed on. No other action sees the
+    ///      lowered price.
+    function collectFeesWhileUnhealthy(
+        uint256 shortfall
+    ) external {
+        uint256 health = lens.healthFactor(tokenId);
+        if (health == type(uint256).max) return;
+        shortfall = bound(shortfall, 1, 5000);
+
+        uint256 price = oracle.price(collateral);
+        for (uint256 i = 0; i < 8 && health >= 1e18; ++i) {
+            price = price * 1e18 / health * (10_000 - shortfall) / 10_000;
+            vm.mockCall(address(oracle), abi.encodeWithSelector(PRICE, collateral), abi.encode(price));
+            vm.mockCall(address(oracle), abi.encodeWithSelector(PRICE_IN_POOL, collateral), abi.encode(price));
+            try lens.healthFactor(tokenId) returns (uint256 lowered) {
+                health = lowered;
+            } catch {
+                break;
+            }
+        }
+
+        if (health < 1e18) {
+            vm.prank(borrower);
+            try market.collectFees(tokenId, FEE_RECIPIENT) {
+                if (lens.healthFactor(tokenId) < 1e18) sawUnhealthyClaim = true;
+            } catch (bytes memory refusal) {
+                vm.clearMockedCalls();
+                assembly ("memory-safe") {
+                    revert(add(refusal, 0x20), mload(refusal))
+                }
+            }
+        }
+        vm.clearMockedCalls();
     }
 
     /// @dev Any amount up to everything the position holds. The market refuses the removals that go
