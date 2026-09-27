@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 
@@ -29,9 +30,6 @@ import {UnlockedMarketMock} from "../mocks/UnlockedMarketMock.sol";
 /// @dev The dependencies are opaque addresses, as in `FarmentaMarketTest`: an upgrade reaches
 ///      none of them.
 contract UpgradeTimelockTest is Test {
-    event UpgradeScheduled(address indexed newImplementation, uint256 eta);
-    event UpgradeCancelled(address indexed newImplementation);
-
     /// @dev Written out rather than read from the market, so a change to the constant fails here.
     uint256 internal constant DELAY = 2 days;
 
@@ -78,7 +76,7 @@ contract UpgradeTimelockTest is Test {
         uint256 eta = block.timestamp + DELAY;
 
         vm.expectEmit(address(market));
-        emit UpgradeScheduled(address(next), eta);
+        emit FarmentaMarket.UpgradeScheduled(address(next), eta);
         vm.prank(owner);
         market.scheduleUpgrade(address(next));
 
@@ -136,7 +134,7 @@ contract UpgradeTimelockTest is Test {
         _schedule(address(next));
 
         vm.expectEmit(address(market));
-        emit UpgradeCancelled(address(next));
+        emit FarmentaMarket.UpgradeCancelled(address(next));
         vm.prank(owner);
         market.cancelUpgrade();
 
@@ -457,6 +455,21 @@ contract UpgradeTimelockTest is Test {
         _assertNothingScheduled();
     }
 
+    /// @notice An account that only points at code is refused, whatever it points at.
+    /// @dev The 23 bytes of an EIP-7702 delegation. Their hash would not move when the account is
+    ///      pointed elsewhere, so a schedule held to it would be held to nothing.
+    function test_anAccountThatOnlyPointsAtCodeIsRefusedAtScheduling() public {
+        address delegated = address(0xE0A);
+        vm.etch(delegated, abi.encodePacked(hex"ef0100", address(next)));
+        assertEq(delegated.code.length, 23, "the account does not hold a delegation");
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.ImplementationIsAPointer.selector, delegated));
+        market.scheduleUpgrade(delegated);
+
+        _assertNothingScheduled();
+    }
+
     /// @notice Other code under the scheduled address is refused, and the refusal spends nothing.
     function test_codeThatChangedSinceItWasScheduledIsRefused() public {
         uint256 eta = _schedule(address(next));
@@ -478,6 +491,36 @@ contract UpgradeTimelockTest is Test {
         assertEq(pending, address(next), "the refused upgrade spent the schedule");
         assertEq(pendingEta, eta, "the refused upgrade moved the eta");
         assertEq(market.pendingUpgradeCodehash(), scheduled, "the refused upgrade moved the code hash");
+    }
+
+    /// @dev Too early is said first. Both refuse; this pins which one a caller is told.
+    function test_codeThatChangedBeforeTheEtaIsRefusedAsTooEarly() public {
+        uint256 eta = _schedule(address(next));
+        vm.etch(address(next), type(OtherImplementationMock).runtimeCode);
+
+        vm.warp(eta - 1);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.UpgradeNotReady.selector, address(next), eta));
+        market.upgradeToAndCall(address(next), "");
+    }
+
+    /// @notice An install that fails after the queue let it through leaves the schedule whole.
+    /// @dev The vault's asset holds code and is no implementation: the queue passes it and the
+    ///      UUPS check refuses it, which reverts the spending with everything else.
+    function test_anInstallRefusedAfterTheQueueLeavesTheScheduleAsItWas() public {
+        uint256 eta = _schedule(address(usdg));
+        bytes32 scheduled = address(usdg).codehash;
+        vm.warp(eta);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ERC1967Utils.ERC1967InvalidImplementation.selector, address(usdg)));
+        market.upgradeToAndCall(address(usdg), "");
+
+        assertEq(_installed(), address(implementation), "something that is no implementation went through");
+        (address pending, uint256 pendingEta) = market.pendingUpgrade();
+        assertEq(pending, address(usdg), "the failed install spent the schedule");
+        assertEq(pendingEta, eta, "the failed install moved the eta");
+        assertEq(market.pendingUpgradeCodehash(), scheduled, "the failed install moved the code hash");
     }
 
     /// @dev An address emptied after it was scheduled does not match what was scheduled either.
@@ -644,6 +687,36 @@ contract UpgradeTimelockOneTransactionCodeTest is Test {
         market.upgradeToAndCall(scheduled, "");
 
         assertEq(_installed(), address(implementation), "other code than was scheduled went through");
+    }
+
+    /// @notice KNOWN LIMIT, not a guarantee: code put in place, installed and removed inside one
+    ///         transaction leaves the market running an empty address, and whatever is put there
+    ///         next runs with no schedule and no delay.
+    /// @dev Nothing the market can check tells code created in the installing transaction from
+    ///      code that was there before it. What gives it away is off chain: the scheduled address
+    ///      held no code for the whole delay. A pending upgrade like that is to be treated as
+    ///      hostile (README point 1). `beforeTestSetup` runs the install as its own transaction.
+    function test_codeThatCanRemoveItselfIsReplacedOnceItIsInstalled() public {
+        assertEq(_installed(), scheduled, "the install did not go through");
+        assertEq(scheduled.code.length, 0, "the installed code is still there");
+
+        factory.deploy(type(OtherImplementationMock).runtimeCode);
+
+        assertTrue(OtherImplementationMock(address(market)).other(), "the market does not run the code put there");
+    }
+
+    function beforeTestSetup(
+        bytes4 testSelector
+    ) public view returns (bytes[] memory transactions) {
+        if (testSelector == this.test_codeThatCanRemoveItselfIsReplacedOnceItIsInstalled.selector) {
+            transactions = new bytes[](1);
+            transactions[0] = abi.encodeCall(this.installAndRemoveInOneTransaction, ());
+        }
+    }
+
+    function installAndRemoveInOneTransaction() public {
+        vm.warp(eta);
+        factory.deployInstallAndRemove(market);
     }
 
     /// @dev The schedule is held to the code, not to one deployment of it.

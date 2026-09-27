@@ -71,4 +71,13 @@ contract MetamorphicFactoryMock {
         market.scheduleUpgrade(at);
         RemovableImplementationMock(at).remove();
     }
+
+    /// @notice One transaction: the scheduled code is put back, installed, and removed again.
+    function deployInstallAndRemove(
+        FarmentaMarket market
+    ) external returns (address at) {
+        at = deploy(type(RemovableImplementationMock).runtimeCode);
+        market.upgradeToAndCall(at, "");
+        RemovableImplementationMock(at).remove();
+    }
 }
