@@ -43,8 +43,7 @@ import {IFlashLoanMorpho, ILiquidationMarket, LiquidatorHelper} from "../src/per
 ///
 ///      External addresses default to `RobinhoodChain` on chain 4663 and are read from the
 ///      environment everywhere else, so another chain needs no code change (ARCHITECTURE §14).
-///      Any of them can also be overridden on 4663 by setting the variable. The exception is
-///      `LiquidatorHelper`, which unwraps to `RobinhoodChain.WETH`: it is deployed on 4663 only.
+///      Any of them can also be overridden on 4663 by setting the variable.
 ///
 ///      Ownership. The deployer is `msg.sender`, which forge sets to the `--private-key` or
 ///      `--sender` account. With the timelock (the default), every owner function of the markets
@@ -121,7 +120,6 @@ contract Deploy is Script {
     error NoCode(string name, address account);
     error ZeroTimelockDelay();
     error GuardianIsTheDeployer(address deployer);
-    error LiquidatorHelperNeedsRobinhood(uint256 chainId);
 
     /// @dev The returned `Deployment` lands in the broadcast log, where script/manifest.sh reads
     ///      it: keep the field order of `Deployment` in step with that script.
@@ -170,10 +168,10 @@ contract Deploy is Script {
 
         if (c.liquidatorHelpers) {
             d.blueChipLiquidator = new LiquidatorHelper(
-                ILiquidationMarket(address(d.blueChip)), IFlashLoanMorpho(c.morpho), c.universalRouter
+                ILiquidationMarket(address(d.blueChip)), IFlashLoanMorpho(c.morpho), c.universalRouter, IERC20(c.weth)
             );
             d.memeLiquidator = new LiquidatorHelper(
-                ILiquidationMarket(address(d.meme)), IFlashLoanMorpho(c.morpho), c.universalRouter
+                ILiquidationMarket(address(d.meme)), IFlashLoanMorpho(c.morpho), c.universalRouter, IERC20(c.weth)
             );
         }
 
@@ -226,8 +224,7 @@ contract Deploy is Script {
         c.weth = _address("WETH", robinhood, RobinhoodChain.WETH);
         c.ethUsdFeed = _address("CHAINLINK_ETH_USD", robinhood, RobinhoodChain.CHAINLINK_ETH_USD);
         c.usdgUsdFeed = _address("CHAINLINK_USDG_USD", robinhood, RobinhoodChain.CHAINLINK_USDG_USD);
-        // LiquidatorHelper unwraps to `RobinhoodChain.WETH`, so it is Robinhood-only for now.
-        c.liquidatorHelpers = vm.envOr("DEPLOY_LIQUIDATOR_HELPERS", robinhood);
+        c.liquidatorHelpers = vm.envOr("DEPLOY_LIQUIDATOR_HELPERS", true);
         if (c.liquidatorHelpers) {
             c.morpho = _address("MORPHO_BLUE", robinhood, RobinhoodChain.MORPHO_BLUE);
             c.universalRouter = _address("UNIVERSAL_ROUTER", robinhood, RobinhoodChain.UNIVERSAL_ROUTER);
@@ -273,7 +270,6 @@ contract Deploy is Script {
         _hasCode("CHAINLINK_ETH_USD", c.ethUsdFeed);
         _hasCode("CHAINLINK_USDG_USD", c.usdgUsdFeed);
         if (c.liquidatorHelpers) {
-            if (block.chainid != RobinhoodChain.CHAIN_ID) revert LiquidatorHelperNeedsRobinhood(block.chainid);
             _hasCode("MORPHO_BLUE", c.morpho);
             _hasCode("UNIVERSAL_ROUTER", c.universalRouter);
         }

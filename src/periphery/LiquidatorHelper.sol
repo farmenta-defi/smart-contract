@@ -7,7 +7,6 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
 
-import {RobinhoodChain} from "../constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../interfaces/ICollateralPolicy.sol";
 
 interface IFlashLoanMorpho {
@@ -48,6 +47,7 @@ contract LiquidatorHelper {
     uint256 private constant BPS = 10_000;
 
     error UnauthorizedMorpho(address caller);
+    error ZeroWeth();
     error ZeroRepayAmount();
     error SwapFailed(bytes reason);
     error ResidualBalance(address token, uint256 balance);
@@ -55,17 +55,21 @@ contract LiquidatorHelper {
     ILiquidationMarket public immutable market;
     IFlashLoanMorpho public immutable morpho;
     IERC20 public immutable usdg;
+    IERC20 public immutable weth;
     IPositionManager public immutable positionManager;
     address public immutable universalRouter;
 
     constructor(
         ILiquidationMarket market_,
         IFlashLoanMorpho morpho_,
-        address universalRouter_
+        address universalRouter_,
+        IERC20 weth_
     ) {
+        if (address(weth_) == address(0)) revert ZeroWeth();
         market = market_;
         morpho = morpho_;
         usdg = market_.asset();
+        weth = weth_;
         positionManager = market_.positionManager();
         universalRouter = universalRouter_;
     }
@@ -148,9 +152,9 @@ contract LiquidatorHelper {
 
     function _requireNoResidual(
         Currency currency
-    ) private view {
+    ) internal view {
         address token = Currency.unwrap(currency);
-        if (token == address(0)) token = RobinhoodChain.WETH;
+        if (token == address(0)) token = address(weth);
         if (token == address(usdg)) return;
 
         uint256 balance = IERC20(token).balanceOf(address(this));
