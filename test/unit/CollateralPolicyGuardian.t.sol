@@ -353,6 +353,78 @@ contract CollateralPolicyGuardianTest is Test {
         policy.setHookAllowlist(Fixtures.HOOK_DOPPLER, true);
     }
 
+    /* ------------------------- what stays the owner's ------------------------- */
+
+    /// @notice The guardian holds the three functions above and no other. Terms, thresholds,
+    ///         haircuts, listings and ownership all stay with the owner.
+    function test_RevertWhenTheGuardianCallsAnOwnerFunction() public {
+        _nameGuardian();
+        PoolKey memory key = _list();
+        PoolId poolId = key.toId();
+        PoolKey memory other = _key();
+        other.fee = 500;
+        CollateralPolicy.ListingParams memory p = _params();
+        bytes memory refused = abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, guardian);
+
+        vm.startPrank(guardian);
+        vm.expectRevert(refused);
+        policy.list(other, p);
+
+        vm.expectRevert(refused);
+        policy.updateTerms(poolId, p);
+
+        vm.expectRevert(refused);
+        policy.scheduleLtRamp(poolId, 7000, uint40(block.timestamp + 1), 1 days);
+
+        // Freezing through the owner's function is refused as well: `freeze` is the guardian's.
+        vm.expectRevert(refused);
+        policy.setFrozen(poolId, true);
+
+        vm.expectRevert(refused);
+        policy.transferOwnership(guardian);
+
+        vm.expectRevert(refused);
+        policy.renounceOwnership();
+        vm.stopPrank();
+    }
+
+    /// @notice Tightening a frozen pool's terms is still the owner's step. The guardian stops
+    ///         new risk; it does not decide what existing loans are judged by.
+    function test_RevertWhenTheGuardianTightensTheTermsOfAPoolItFroze() public {
+        _nameGuardian();
+        PoolId poolId = _list().toId();
+        vm.prank(guardian);
+        policy.freeze(poolId);
+
+        CollateralPolicy.ListingParams memory tighter = _params();
+        tighter.ltBps = 5000;
+        tighter.removeHaircutBps = 0;
+
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, guardian));
+        policy.updateTerms(poolId, tighter);
+
+        assertEq(policy.termsOf(poolId).ltBps, _params().ltBps, "the threshold moved");
+    }
+
+    /// @notice Strangers are refused on every function the guardian was given.
+    function test_RevertWhenAStrangerCallsAGuardianFunction() public {
+        _nameGuardian();
+        PoolId poolId = _list().toId();
+        bytes memory refused = abi.encodeWithSelector(CollateralPolicy.NotOwnerOrGuardian.selector, stranger);
+
+        vm.startPrank(stranger);
+        vm.expectRevert(refused);
+        policy.freeze(poolId);
+
+        vm.expectRevert(refused);
+        policy.disableToken(weth);
+
+        vm.expectRevert(refused);
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+        vm.stopPrank();
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _nameGuardian() internal {
