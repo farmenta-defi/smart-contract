@@ -220,11 +220,37 @@ contract DeployScriptForkTest is ForkTest {
     }
 
     /// @notice The deployer's key is the one in `.env`, and may not be the guardian's.
+    /// @dev `OWNER` is a separate key here, as the README recommends. Left at its default it is
+    ///      the deployer too, and the test could not tell which of the two the check compares.
     function test_RevertWhenTheGuardianIsTheDeployer() public {
-        Deploy.Config memory c = _config();
+        Deploy.Config memory c = _configOwnedBy(makeAddr("owner"));
         c.guardian = address(this);
         vm.expectRevert(abi.encodeWithSelector(Deploy.GuardianIsTheDeployer.selector, address(this)));
         script.deploy(c);
+    }
+
+    /// @notice The guardian may be `OWNER`, the timelock's proposer: only the deployer and
+    ///         `address(0)` are refused. It is named on all three contracts, and acts at once
+    ///         as guardian while its owner calls still wait in the queue.
+    function test_guardianMayBeTheOwnerWhenTheDeployerIsAnotherKey() public {
+        address owner = makeAddr("owner");
+        Deploy.Config memory c = _configOwnedBy(owner);
+        c.guardian = owner;
+        Deploy.Deployment memory e = script.deploy(c);
+
+        assertEq(e.blueChip.guardian(), owner, "blue-chip guardian");
+        assertEq(e.meme.guardian(), owner, "meme guardian");
+        assertEq(e.policy.guardian(), owner, "policy guardian");
+        assertEq(e.blueChip.owner(), address(e.timelock), "the guardian owns the market");
+
+        vm.prank(owner);
+        e.blueChip.pause();
+        assertTrue(e.blueChip.paused(), "the pause did not take");
+
+        // As guardian it paused; as proposer its `unpause` is the timelock's and waits.
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, owner));
+        e.blueChip.unpause();
     }
 
     /// @notice Pausing is an owner call too, so from the owner it waits the delay like any other.
@@ -430,6 +456,17 @@ contract DeployScriptForkTest is ForkTest {
     function _config() private view returns (Deploy.Config memory c) {
         c = script.config();
         c.guardian = guardian;
+    }
+
+    /// @dev `_config()` with `OWNER` set to `owner`, a key other than the deployer's. The
+    ///      timelock's roles default to `OWNER`, so they move with it.
+    function _configOwnedBy(
+        address owner
+    ) private view returns (Deploy.Config memory c) {
+        c = _config();
+        c.owner = owner;
+        c.timelockProposer = owner;
+        c.timelockExecutor = owner;
     }
 
     /// @dev Lists a WETH/USDG pool behind a hook that needs the allowlist. The deployer still
