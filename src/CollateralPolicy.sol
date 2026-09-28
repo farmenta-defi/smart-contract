@@ -66,6 +66,13 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         uint128 minPositionUsd;
     }
 
+    /// @dev The part of a pool's key that can stop being acceptable after listing.
+    struct ListedKey {
+        Currency currency0;
+        Currency currency1;
+        address hooks;
+    }
+
     /// @notice The only borrow asset in the MVP; every accepted pair must quote in it (§1).
     Currency public immutable quote;
 
@@ -77,6 +84,10 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     /// @dev A `PoolId` cannot recover its hook address. Capture the immutable address-bit
     ///      permission at listing so `updateTerms` can reject a later nonzero haircut too.
     mapping(PoolId poolId => bool) internal _removeLiquidityReturnsDelta;
+
+    /// @dev Kept for the same reason: a `PoolId` cannot recover its tokens or its hook either,
+    ///      and `acceptsNewPositions` is asked about a pool by its id (FAR-74).
+    mapping(PoolId poolId => ListedKey) internal _listedKeys;
 
     mapping(PoolId poolId => Listing) internal _listings;
 
@@ -213,6 +224,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         _validate(tier, params, true, returnsRemoveDelta); // a pool is never listed already frozen
 
         _removeLiquidityReturnsDelta[poolId] = returnsRemoveDelta;
+        _listedKeys[poolId] = ListedKey({currency0: key.currency0, currency1: key.currency1, hooks: address(key.hooks)});
 
         _listings[poolId] = Listing({
             listed: true,
