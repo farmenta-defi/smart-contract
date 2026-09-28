@@ -316,6 +316,8 @@ dollars at 0.02 gwei.
 `LiquidatorHelper` receives the configured WETH address in its constructor. On chains other than
 4663, set `MORPHO_BLUE`, `UNIVERSAL_ROUTER`, and `WETH` to deployed contracts on that chain; when
 those dependencies have code, the helper deploys there by default.
+Code that constructs `LiquidatorHelper` directly must pass the chain's WETH token as its fourth
+constructor argument, then redeploy the helper.
 
 **Owned by the timelock.** The timelock has no admin: its roles and its delay change only
 through its own queue. Every owner call waits the delay.
