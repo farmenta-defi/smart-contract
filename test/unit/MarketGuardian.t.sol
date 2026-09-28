@@ -273,6 +273,46 @@ contract MarketGuardianTest is Test {
         vm.stopPrank();
     }
 
+    /* ---------------------------------- fuzz ---------------------------------- */
+
+    /// @notice No caller but the owner and the guardian pauses, and none but the owner names a
+    ///         guardian or lifts a pause, whoever it is.
+    function testFuzz_RevertWhenAnyoneElseCallsANewFunction(
+        address caller
+    ) public {
+        vm.assume(caller != owner && caller != guardian);
+        _nameGuardian();
+
+        vm.startPrank(caller);
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotOwnerOrGuardian.selector, caller));
+        market.pause();
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, caller));
+        market.setGuardian(caller);
+        vm.stopPrank();
+
+        assertFalse(market.paused(), "a refused call paused the market");
+        assertEq(market.guardian(), guardian, "a refused call replaced the guardian");
+    }
+
+    /// @notice Whichever account the owner names can pause, and cannot lift the pause it made.
+    function testFuzz_anyGuardianTheOwnerNamesPausesAndCannotUnpause(
+        address named
+    ) public {
+        vm.assume(named != address(0) && named != owner);
+        vm.prank(owner);
+        market.setGuardian(named);
+
+        vm.prank(named);
+        market.pause();
+        assertTrue(market.paused(), "the pause did not take");
+
+        vm.prank(named);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, named));
+        market.unpause();
+        assertTrue(market.paused(), "the guardian lifted the pause");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _nameGuardian() internal {

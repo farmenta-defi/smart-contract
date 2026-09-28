@@ -425,6 +425,69 @@ contract CollateralPolicyGuardianTest is Test {
         vm.stopPrank();
     }
 
+    /* ---------------------------------- fuzz ---------------------------------- */
+
+    /// @notice No caller but the owner and the guardian gets through any of the four new
+    ///         functions, whoever it is.
+    function testFuzz_RevertWhenAnyoneElseCallsANewFunction(
+        address caller
+    ) public {
+        vm.assume(caller != owner && caller != guardian);
+        _nameGuardian();
+        PoolId poolId = _list().toId();
+        bytes memory refused = abi.encodeWithSelector(CollateralPolicy.NotOwnerOrGuardian.selector, caller);
+
+        vm.startPrank(caller);
+        vm.expectRevert(refused);
+        policy.freeze(poolId);
+
+        vm.expectRevert(refused);
+        policy.disableToken(weth);
+
+        vm.expectRevert(refused);
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, caller));
+        policy.setGuardian(caller);
+        vm.stopPrank();
+
+        assertTrue(policy.acceptsNewPositions(poolId), "a refused call froze the pool");
+        assertEq(policy.guardian(), guardian, "a refused call replaced the guardian");
+    }
+
+    /// @notice Whichever account the owner names holds the three functions, and none of their
+    ///         reverses.
+    function testFuzz_anyGuardianTheOwnerNamesTightensAndCannotLoosen(
+        address named
+    ) public {
+        vm.assume(named != address(0) && named != owner);
+        PoolKey memory key = _listBehindAllowlistedHook();
+        PoolId poolId = key.toId();
+        vm.prank(owner);
+        policy.setGuardian(named);
+
+        vm.startPrank(named);
+        policy.freeze(poolId);
+        policy.disableToken(weth);
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+
+        bytes memory refused = abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, named);
+        vm.expectRevert(refused);
+        policy.setFrozen(poolId, false);
+
+        vm.expectRevert(refused);
+        policy.setTokenConfig(weth, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(2));
+
+        vm.expectRevert(refused);
+        policy.setHookAllowlist(Fixtures.HOOK_DOPPLER, true);
+        vm.stopPrank();
+
+        assertTrue(policy.listingOf(poolId).frozen, "frozen");
+        (bool enabled,,,) = policy.tokenConfig(weth);
+        assertFalse(enabled, "the token is still enabled");
+        assertFalse(policy.hookAllowlist(Fixtures.HOOK_DOPPLER), "the hook is still allowlisted");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _nameGuardian() internal {
