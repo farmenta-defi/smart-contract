@@ -214,9 +214,10 @@ contract FarmentaMarketTest is Test {
 
     /* ---------------------------------- pause --------------------------------- */
 
+    /// @dev Without a guardian named. With one, see `MarketGuardianTest`.
     function test_onlyOwnerCanPause() public {
         vm.prank(stranger);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotOwnerOrGuardian.selector, stranger));
         market.pause();
 
         vm.prank(owner);

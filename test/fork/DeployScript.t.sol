@@ -90,7 +90,7 @@ contract DeployScriptForkTest is ForkTest {
 
     /// @notice Pausing is an owner call too, so it waits the delay like any other.
     function test_pauseWaitsTheDelay() public {
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotOwnerOrGuardian.selector, address(this)));
         d.blueChip.pause();
 
         bytes memory pause = abi.encodeCall(FarmentaMarket.pause, ());
