@@ -18,8 +18,8 @@ import {IPriceOracle} from "../../src/interfaces/IPriceOracle.sol";
 import {MarketLedger} from "../../src/libraries/MarketLedger.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
-/// @notice Pins the market's ERC-7201 layout slot by slot, the upgrade queue included
-///         (ARCHITECTURE §4.1, §15 no. 10, FAR-21). No network.
+/// @notice Pins the market's ERC-7201 layout slot by slot, the upgrade queue and the guardian
+///         included (ARCHITECTURE §4.1, §15 no. 10, FAR-21, FAR-68). No network.
 /// @dev Slots are written and read raw, and compared with what the market's own getters return.
 ///      A field that moved would be read by its getter from a slot this file did not write.
 contract StorageLayoutTest is Test {
@@ -38,8 +38,10 @@ contract StorageLayoutTest is Test {
     uint256 internal constant TOTAL_RESERVES_WITHDRAWN = ROOT + 9;
     uint256 internal constant UPGRADE_QUEUE = ROOT + 10;
     uint256 internal constant UPGRADE_CODEHASH = ROOT + 11;
+    uint256 internal constant GUARDIAN = ROOT + 12;
 
-    /// @dev Every slot of the namespace that holds a value directly, the queue's two left out.
+    /// @dev Every slot of the namespace that holds a value directly, the queue's two and the
+    ///      guardian's left out.
     uint256 internal constant LEDGER_SLOTS = 10;
 
     uint256 internal constant TOKEN_ID = 77;
@@ -47,6 +49,7 @@ contract StorageLayoutTest is Test {
 
     address internal owner = address(0xA11CE);
     address internal borrower = address(0xB0110);
+    address internal guardian = address(0x6A4D);
 
     address internal interestRateModel;
     MockERC20 internal usdg;
@@ -84,6 +87,7 @@ contract StorageLayoutTest is Test {
         assertEq(_load(RESERVE_BPS), uint256(2500) | uint256(250) << 16, "reserve factor and floor slot");
         assertEq(_load(UPGRADE_QUEUE), 0, "a fresh market has a schedule");
         assertEq(_load(UPGRADE_CODEHASH), 0, "a fresh market holds a code hash");
+        assertEq(_load(GUARDIAN), 0, "a fresh market has a guardian");
     }
 
     /// @notice Every ledger field is read from the slot it has always had.
@@ -113,6 +117,7 @@ contract StorageLayoutTest is Test {
         assertEq(pending, address(0xABCD), "pendingImplementation");
         assertEq(eta, 1234, "upgradeEta");
         assertEq(market.pendingUpgradeCodehash(), bytes32(uint256(0xC0DE5)), "pendingCodehash");
+        assertEq(market.guardian(), guardian, "guardian");
     }
 
     /// @notice The queue sits in the two slots after the last field: address then eta packed in
@@ -128,6 +133,28 @@ contract StorageLayoutTest is Test {
         assertEq(_load(UPGRADE_CODEHASH), uint256(next.codehash), "code hash slot");
     }
 
+    /// @notice The guardian sits in the slot after the queue's two, alone in it.
+    function test_theGuardianTakesTheSlotAfterTheQueue() public {
+        vm.prank(owner);
+        market.setGuardian(guardian);
+
+        assertEq(_load(GUARDIAN), uint256(uint160(guardian)), "guardian slot");
+    }
+
+    /// @notice Naming and removing the guardian write its slot and no other.
+    function test_theGuardianWritesNoSlotButItsOwn() public {
+        vm.record();
+        vm.prank(owner);
+        market.setGuardian(guardian);
+        _assertOnlyWritten(GUARDIAN, GUARDIAN, "setGuardian");
+
+        vm.record();
+        vm.prank(owner);
+        market.setGuardian(address(0));
+        _assertOnlyWritten(GUARDIAN, GUARDIAN, "setGuardian(0)");
+        assertEq(_load(GUARDIAN), 0, "removing the guardian left its slot set");
+    }
+
     /// @notice Scheduling and cancelling write the queue's two slots and no other.
     function test_theQueueWritesNoSlotButItsOwn() public {
         address next = address(_deployImplementation());
@@ -135,12 +162,12 @@ contract StorageLayoutTest is Test {
         vm.record();
         vm.prank(owner);
         market.scheduleUpgrade(next);
-        _assertOnlyTheQueueWasWritten("scheduleUpgrade");
+        _assertOnlyWritten(UPGRADE_QUEUE, UPGRADE_CODEHASH, "scheduleUpgrade");
 
         vm.record();
         vm.prank(owner);
         market.cancelUpgrade();
-        _assertOnlyTheQueueWasWritten("cancelUpgrade");
+        _assertOnlyWritten(UPGRADE_QUEUE, UPGRADE_CODEHASH, "cancelUpgrade");
         assertEq(_load(UPGRADE_QUEUE), 0, "cancelling left the queue slot set");
         assertEq(_load(UPGRADE_CODEHASH), 0, "cancelling left the code hash set");
     }
@@ -156,6 +183,7 @@ contract StorageLayoutTest is Test {
         vm.prank(owner);
         market.scheduleUpgrade(next);
 
+        uint256 guardianSlot = _load(GUARDIAN);
         uint256[] memory ledger = _ledgerSlots();
         bytes32 loanRoot = _loanRoot(TOKEN_ID);
         uint256[3] memory loan = [_load(uint256(loanRoot)), _load(uint256(loanRoot) + 1), _load(uint256(loanRoot) + 2)];
@@ -175,6 +203,7 @@ contract StorageLayoutTest is Test {
         assertEq(_load(uint256(keccak256(abi.encode(POOL_ID, POOL_DEBT_SHARES)))), poolShares, "poolDebtShares");
         assertEq(_load(UPGRADE_QUEUE), 0, "the upgrade left its schedule behind");
         assertEq(_load(UPGRADE_CODEHASH), 0, "the upgrade left its code hash behind");
+        assertEq(_load(GUARDIAN), guardianSlot, "guardian");
         assertEq(market.owner(), owner, "owner");
         assertEq(market.asset(), address(usdg), "vault asset");
     }
@@ -193,6 +222,7 @@ contract StorageLayoutTest is Test {
         _store(TOTAL_RESERVES_WITHDRAWN, 9e6);
         _store(UPGRADE_QUEUE, uint256(uint160(address(0xABCD))) | uint256(1234) << 160);
         _store(UPGRADE_CODEHASH, 0xC0DE5);
+        _store(GUARDIAN, uint256(uint160(guardian)));
 
         uint256 loanRoot = uint256(_loanRoot(TOKEN_ID));
         _store(loanRoot, uint256(uint160(borrower)) | uint256(ICollateralPolicy.Tier.MEME) << 160);
@@ -201,17 +231,17 @@ contract StorageLayoutTest is Test {
         _store(uint256(keccak256(abi.encode(POOL_ID, POOL_DEBT_SHARES))), 13e6);
     }
 
-    function _assertOnlyTheQueueWasWritten(
+    /// @dev Every write since `vm.record()` landed in `first` or `second`.
+    function _assertOnlyWritten(
+        uint256 first,
+        uint256 second,
         string memory action
     ) private view {
         (, bytes32[] memory writes) = vm.accesses(address(market));
         assertGt(writes.length, 0, string.concat(action, " wrote nothing"));
         for (uint256 i = 0; i < writes.length; ++i) {
             uint256 slot = uint256(writes[i]);
-            assertTrue(
-                slot == UPGRADE_QUEUE || slot == UPGRADE_CODEHASH,
-                string.concat(action, " wrote outside the queue's slots")
-            );
+            assertTrue(slot == first || slot == second, string.concat(action, " wrote outside its own slots"));
         }
     }
 

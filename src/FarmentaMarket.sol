@@ -211,6 +211,9 @@ contract FarmentaMarket is
     /// @notice The scheduled upgrade was withdrawn before it was installed.
     event UpgradeCancelled(address indexed newImplementation);
 
+    /// @notice The owner named another guardian, or none (`newGuardian` zero) (§4.1, FAR-68).
+    event GuardianUpdated(address indexed previousGuardian, address indexed newGuardian);
+
     error ZeroAddress();
     error TierNotSet();
     error NotThePositionManager(address caller);
@@ -777,6 +780,11 @@ contract FarmentaMarket is
         return _marketStorage().pendingCodehash;
     }
 
+    /// @notice The account that may pause besides the owner, or zero when there is none.
+    function guardian() external view returns (address) {
+        return _marketStorage().guardian;
+    }
+
     function _withdrawableReserves(
         uint256 cash
     ) private view returns (uint256) {
@@ -832,6 +840,17 @@ contract FarmentaMarket is
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @notice Names the guardian, or removes it with `address(0)` (§4.1, FAR-68).
+    /// @dev Owner only, so under a timelock owner a guardian is replaced through the queue,
+    ///      where it can be seen coming.
+    function setGuardian(
+        address newGuardian
+    ) external onlyOwner {
+        MarketLedger.Layout storage $ = _marketStorage();
+        emit GuardianUpdated($.guardian, newGuardian);
+        $.guardian = newGuardian;
     }
 
     /// @notice Schedules `newImplementation` to replace this one, `TIMELOCK_DELAY` from now at the
