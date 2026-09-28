@@ -151,9 +151,11 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         guardian = newGuardian;
     }
 
-    /// @dev Disabling a token does not unlist pools that contain it. Unwinding a token is a
-    ///      per-pool decision — freeze and ramp them (§6.5) — because a blanket switch would
-    ///      strand collateral in pools nobody had reviewed for removal.
+    /// @dev Disabling a token does not unlist pools that contain it. Those pools stop taking
+    ///      collateral and stop lending against what they hold (`checkPool`,
+    ///      `acceptsNewPositions`), and enabling the token again reopens them as listed.
+    ///      Unwinding a token is a per-pool decision — freeze and ramp them (§6.5) — because a
+    ///      blanket switch would strand collateral in pools nobody had reviewed for removal.
     function setTokenConfig(
         Currency currency,
         bool enabled,
@@ -168,15 +170,16 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         emit TokenConfigured(currency, enabled, tier, decimals, priceFeed);
     }
 
-    /// @notice Stops a token being accepted in new collateral, at once (§6.5, FAR-68).
+    /// @notice Stops a token being accepted in new collateral and borrowed against, at once
+    ///         (§6.5, FAR-68, FAR-74).
     /// @dev For the owner or the guardian. Only `enabled` is written: the tier, the decimals
     ///      and the price feed stay as listed, because positions already held are still priced
     ///      with them (`ICollateralPolicy.tokenConfig`). The event is `setTokenConfig`'s, with
     ///      the values that stayed. Enabling a token again is `setTokenConfig`, the owner's.
     ///
-    ///      Like `setTokenConfig`, this reaches `checkPool` and `list`, not `borrow`: a loan can
-    ///      still be drawn against collateral already held in a pool of this token. Stopping
-    ///      that is `freeze`, pool by pool.
+    ///      Like `setTokenConfig`, this reaches `checkPool`, `list` and `acceptsNewPositions`,
+    ///      so every pool of this token stops lending against collateral it already holds,
+    ///      without a `freeze` each. Loans that exist are left as `setFrozen` describes.
     function disableToken(
         Currency currency
     ) external onlyOwnerOrGuardian {
@@ -394,11 +397,16 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     }
 
     /// @inheritdoc ICollateralPolicy
+    /// @dev `borrow` asks this, by pool id, where a deposit asks `checkPool`. The two agree on
+    ///      the tokens: a pool holding a disabled token is closed to both (FAR-74).
     function acceptsNewPositions(
         PoolId poolId
     ) external view returns (bool) {
         Listing storage listing = _listings[poolId];
-        return listing.listed && !listing.frozen;
+        if (!listing.listed || listing.frozen) return false;
+
+        ListedKey storage key = _listedKeys[poolId];
+        return tokenConfig[key.currency0].enabled && tokenConfig[key.currency1].enabled;
     }
 
     /// @inheritdoc ICollateralPolicy
