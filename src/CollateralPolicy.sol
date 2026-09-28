@@ -66,6 +66,13 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         uint128 minPositionUsd;
     }
 
+    /// @dev The part of a pool's key that can stop being acceptable after listing.
+    struct ListedKey {
+        Currency currency0;
+        Currency currency1;
+        address hooks;
+    }
+
     /// @notice The only borrow asset in the MVP; every accepted pair must quote in it (§1).
     Currency public immutable quote;
 
@@ -77,6 +84,10 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     /// @dev A `PoolId` cannot recover its hook address. Capture the immutable address-bit
     ///      permission at listing so `updateTerms` can reject a later nonzero haircut too.
     mapping(PoolId poolId => bool) internal _removeLiquidityReturnsDelta;
+
+    /// @dev Kept for the same reason: a `PoolId` cannot recover its tokens or its hook either,
+    ///      and `acceptsNewPositions` is asked about a pool by its id (FAR-74).
+    mapping(PoolId poolId => ListedKey) internal _listedKeys;
 
     mapping(PoolId poolId => Listing) internal _listings;
 
@@ -140,9 +151,11 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         guardian = newGuardian;
     }
 
-    /// @dev Disabling a token does not unlist pools that contain it. Unwinding a token is a
-    ///      per-pool decision — freeze and ramp them (§6.5) — because a blanket switch would
-    ///      strand collateral in pools nobody had reviewed for removal.
+    /// @dev Disabling a token does not unlist pools that contain it. Those pools stop taking
+    ///      collateral and stop lending against what they hold (`checkPool`,
+    ///      `acceptsNewPositions`), and enabling the token again reopens them as listed.
+    ///      Unwinding a token is a per-pool decision (freeze and ramp them, §6.5), because a
+    ///      blanket switch would strand collateral in pools nobody had reviewed for removal.
     function setTokenConfig(
         Currency currency,
         bool enabled,
@@ -157,15 +170,16 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         emit TokenConfigured(currency, enabled, tier, decimals, priceFeed);
     }
 
-    /// @notice Stops a token being accepted in new collateral, at once (§6.5, FAR-68).
+    /// @notice Stops a token being accepted in new collateral and borrowed against, at once
+    ///         (§6.5, FAR-68, FAR-74).
     /// @dev For the owner or the guardian. Only `enabled` is written: the tier, the decimals
     ///      and the price feed stay as listed, because positions already held are still priced
     ///      with them (`ICollateralPolicy.tokenConfig`). The event is `setTokenConfig`'s, with
     ///      the values that stayed. Enabling a token again is `setTokenConfig`, the owner's.
     ///
-    ///      Like `setTokenConfig`, this reaches `checkPool` and `list`, not `borrow`: a loan can
-    ///      still be drawn against collateral already held in a pool of this token. Stopping
-    ///      that is `freeze`, pool by pool.
+    ///      Like `setTokenConfig`, this reaches `checkPool`, `list` and `acceptsNewPositions`,
+    ///      so every pool of this token stops lending against collateral it already holds,
+    ///      without a `freeze` each. Loans that exist are left as `setFrozen` describes.
     function disableToken(
         Currency currency
     ) external onlyOwnerOrGuardian {
@@ -182,12 +196,12 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         emit HookAllowlisted(hooks, allowed);
     }
 
-    /// @notice Takes a hook off the allowlist, at once (§6.5, FAR-68).
+    /// @notice Takes a hook off the allowlist, at once (§6.5, FAR-68, FAR-74).
     /// @dev `setHookAllowlist(hooks, false)` for the owner or the guardian, and the same event.
-    ///      Pools behind the hook stop passing `checkPool`, so no position enters them and
-    ///      none is added to, unless the hook passes the bit check without the allowlist.
-    ///      Like `disableToken` it does not reach `borrow`; `freeze` does. Allowlisting a hook
-    ///      is `setHookAllowlist`, the owner's, after the review of §6.3.
+    ///      Pools behind the hook stop passing `checkPool` and `acceptsNewPositions`, so no
+    ///      position enters them, none is added to, and none is borrowed against, unless the
+    ///      hook passes the bit check without the allowlist; stopping such a pool is `freeze`.
+    ///      Allowlisting a hook is `setHookAllowlist`, the owner's, after the review of §6.3.
     function revokeHook(
         address hooks
     ) external onlyOwnerOrGuardian {
@@ -213,6 +227,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         _validate(tier, params, true, returnsRemoveDelta); // a pool is never listed already frozen
 
         _removeLiquidityReturnsDelta[poolId] = returnsRemoveDelta;
+        _listedKeys[poolId] = ListedKey({currency0: key.currency0, currency1: key.currency1, hooks: address(key.hooks)});
 
         _listings[poolId] = Listing({
             listed: true,
@@ -382,11 +397,18 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     }
 
     /// @inheritdoc ICollateralPolicy
+    /// @dev `borrow` asks this, by pool id, where a deposit asks `checkPool`. The two agree on
+    ///      the tokens and on the hook: a pool holding a disabled token, or sitting behind a
+    ///      hook that is no longer permitted, is closed to both (FAR-74). The quote and the
+    ///      tier are not read again, since neither can change for a pool once it is listed.
     function acceptsNewPositions(
         PoolId poolId
     ) external view returns (bool) {
         Listing storage listing = _listings[poolId];
-        return listing.listed && !listing.frozen;
+        if (!listing.listed || listing.frozen) return false;
+
+        ListedKey storage key = _listedKeys[poolId];
+        return tokenConfig[key.currency0].enabled && tokenConfig[key.currency1].enabled && _isHookPermitted(key.hooks);
     }
 
     /// @inheritdoc ICollateralPolicy
@@ -488,8 +510,14 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     function _requireHookPermitted(
         address hooks
     ) internal view {
-        if (HookPermissions.passesBitCheck(IHooks(hooks))) return;
-        if (!hookAllowlist[hooks]) revert HookNotPermitted(hooks);
+        if (!_isHookPermitted(hooks)) revert HookNotPermitted(hooks);
+    }
+
+    /// @dev The §6.1 hook rule as an answer: the bit check, or failing that the allowlist.
+    function _isHookPermitted(
+        address hooks
+    ) internal view returns (bool) {
+        return HookPermissions.passesBitCheck(IHooks(hooks)) || hookAllowlist[hooks];
     }
 
     /// @dev Deviations from the tier preset are accepted only toward stricter, and the

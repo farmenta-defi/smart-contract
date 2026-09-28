@@ -45,8 +45,9 @@ interface ICollateralPolicy {
     }
 
     /// @notice The listing-time metadata for `currency`.
-    /// @dev `enabled` gates new listings only. Existing positions may still need its recorded
-    ///      decimals and price source to repay, withdraw, or be liquidated (§6.5).
+    /// @dev `enabled` gates new listings, new collateral and new borrowing. Existing positions
+    ///      may still need its recorded decimals and price source to repay, withdraw, or be
+    ///      liquidated (§6.5).
     function tokenConfig(
         Currency currency
     ) external view returns (bool enabled, Tier tier, uint8 decimals, address priceFeed);
@@ -71,7 +72,8 @@ interface ICollateralPolicy {
     ) external view returns (Terms memory);
 
     /// @notice Whether new collateral and new borrowing are currently allowed for a pool.
-    /// @dev False once frozen. Existing loans keep working regardless — repay, collect,
+    /// @dev False once frozen, while either of the pool's tokens is disabled, and while its
+    ///      hook is not permitted. Existing loans keep working regardless: repay, collect,
     ///      decrease, withdraw and liquidate all stay open, because trapping collateral or
     ///      switching off liquidation would manufacture bad debt (§6.5).
     function acceptsNewPositions(
