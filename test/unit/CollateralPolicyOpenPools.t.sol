@@ -124,8 +124,12 @@ contract CollateralPolicyOpenPoolsTest is Test {
         assertFalse(policy.acceptsNewPositions(poolId), "enabling a token reopened a frozen pool");
     }
 
-    /// @notice A pool nobody listed has no tokens on record and stays closed.
-    function test_anUnlistedPoolStaysClosedWhateverItsTokensAre() public view {
+    /// @notice A pool nobody listed has an empty key on record, which reads as native ETH on both
+    ///         sides and no hook. With native ETH enabled, as the deploy script enables it, the
+    ///         tokens and the hook of that record all pass, and `listed` alone keeps it closed.
+    function test_anUnlistedPoolStaysClosedWhileNativeEthIsEnabled() public {
+        _enableNativeEth();
+
         assertFalse(policy.acceptsNewPositions(_wethKey(200).toId()), "an unlisted pool is open");
     }
 
@@ -279,7 +283,27 @@ contract CollateralPolicyOpenPoolsTest is Test {
         assertEq(policy.acceptsNewPositions(poolId), baseEnabled && quoteEnabled && !frozen && allowlisted, "open");
     }
 
+    /// @notice No pool id reads as open before its pool is listed, whatever the id.
+    /// @dev Native ETH is enabled for the same reason as above: without it the empty record
+    ///      fails the token check, and the test would pass with `listed` never read.
+    function testFuzz_noPoolIsOpenBeforeItIsListed(
+        bytes32 id
+    ) public {
+        _enableNativeEth();
+        PoolId listed = _list(_wethKey(200)).toId();
+        vm.assume(id != PoolId.unwrap(listed));
+
+        assertFalse(policy.acceptsNewPositions(PoolId.wrap(id)), "an unlisted pool is open");
+        assertTrue(policy.acceptsNewPositions(listed), "the listed pool is closed");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
+
+    /// @dev `address(0)` is native ETH, and what an empty `ListedKey` reads as.
+    function _enableNativeEth() internal {
+        vm.prank(owner);
+        policy.setTokenConfig(Currency.wrap(address(0)), true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(3));
+    }
 
     /// @dev The owner's switch, with the tier, decimals and feed the token already has.
     function _setEnabled(
