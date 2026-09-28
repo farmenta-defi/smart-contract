@@ -250,6 +250,36 @@ contract MarketClosedPoolForkTest is MarketForkTest {
         assertEq(lens.healthFactor(tokenId), healthFactor, "the health factor moved");
     }
 
+    /* ----------------------------------- gas ---------------------------------- */
+
+    /// @notice What the token and hook reads cost `borrow` (FAR-74).
+    /// @dev Storage is cooled first, so the figure is what a transaction pays and not what a
+    ///      test that has already touched the policy pays. Measured on the pinned block with
+    ///      this test, against the policy before FAR-74 and after: `acceptsNewPositions` 7,773
+    ///      and 18,698, `borrow` 184,155 and 195,080. Both rise by 10,925, which is five cold
+    ///      storage reads: the three slots of the recorded key and the two token records. A
+    ///      hook that needs the allowlist adds a sixth.
+    ///
+    ///      The ceilings are loose on purpose, as in `TwapRecorderForkTest`: they catch a read
+    ///      that multiplies, not a toolchain that counts differently.
+    function test_theTokenAndHookReadsCostBorrowAFewStorageSlots() public {
+        vm.cool(address(policy));
+        uint256 gasBefore = gasleft();
+        policy.acceptsNewPositions(poolId);
+        uint256 viewGas = gasBefore - gasleft();
+
+        _coolEverythingBorrowTouches();
+        vm.prank(borrower);
+        gasBefore = gasleft();
+        market.borrow(tokenId, DRAW, borrower);
+        uint256 borrowGas = gasBefore - gasleft();
+
+        emit log_named_uint("acceptsNewPositions gas", viewGas);
+        emit log_named_uint("borrow gas", borrowGas);
+        assertLt(viewGas, 2 * 18_698, "acceptsNewPositions exceeded its loose ceiling");
+        assertLt(borrowGas, 2 * 195_080, "borrow exceeded its loose ceiling");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _expectClosed(
@@ -302,5 +332,17 @@ contract MarketClosedPoolForkTest is MarketForkTest {
         market.depositCollateral(hooked);
         assertGt(lens.maxBorrow(hooked), 2 * DRAW, "the minted position is too small for two draws");
         market.borrow(hooked, DRAW, address(this));
+    }
+
+    function _coolEverythingBorrowTouches() private {
+        vm.cool(address(policy));
+        vm.cool(address(market));
+        vm.cool(address(valuer));
+        vm.cool(address(oracle));
+        vm.cool(address(interestRateModel));
+        vm.cool(address(stateView));
+        vm.cool(address(poolManager));
+        vm.cool(address(positionManager));
+        vm.cool(RobinhoodChain.USDG);
     }
 }
