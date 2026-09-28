@@ -152,8 +152,8 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    |---|---|---|---|
    | `FarmentaMarket` | `pause()` | semua yang mengambil risiko baru berhenti, likuidasi juga | `unpause()`, owner saja |
    | `CollateralPolicy` | `freeze(poolId)` | pool berhenti menerima jaminan dan pinjaman baru | `setFrozen(poolId, false)`, owner saja |
-   | `CollateralPolicy` | `disableToken(currency)` | token ditolak di jaminan baru dan listing baru | `setTokenConfig(…, true, …)`, owner saja |
-   | `CollateralPolicy` | `revokeHook(hooks)` | pool di balik hook itu berhenti menerima posisi | `setHookAllowlist(hooks, true)`, owner saja |
+   | `CollateralPolicy` | `disableToken(currency)` | token ditolak di listing baru, dan setiap pool yang memuatnya berhenti menerima jaminan dan pinjaman baru | `setTokenConfig(…, true, …)`, owner saja |
+   | `CollateralPolicy` | `revokeHook(hooks)` | pool di balik hook itu berhenti menerima jaminan dan pinjaman baru, kecuali hook-nya lolos cek bit tanpa allowlist | `setHookAllowlist(hooks, true)`, owner saja |
 
    Yang **tidak** dapat dilakukan guardian: `unpause`, membuka kembali pool, mengaktifkan
    token, menambah hook, mengubah terms, LT, haircut, atau cap, me-listing pool, menarik
@@ -163,9 +163,13 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    `freeze`, `disableToken`, dan `revokeHook` tidak menyentuh pinjaman yang sudah ada:
    `repay`, `withdrawCollateral`, `collectFees`, `decreaseLiquidity`, dan `liquidate`
    tetap jalan, dan token yang dinonaktifkan tetap dihargai oracle (decimals dan price
-   feed-nya tidak dihapus). `disableToken` dan `revokeHook` menutup pintu masuk posisi,
-   bukan `borrow` atas jaminan yang sudah disimpan; yang menghentikan `borrow` di sebuah
-   pool adalah `freeze`.
+   feed-nya tidak dihapus). `disableToken` dan `revokeHook` menutup pintu masuk posisi
+   dan juga `borrow` atas jaminan yang sudah disimpan, tanpa `freeze` per pool (FAR-74):
+   `borrow` bertanya `acceptsNewPositions`, dan fungsi itu memeriksa kedua token dan hook
+   pool seperti `checkPool`. Saat owner mengaktifkan token atau mengizinkan hook itu
+   kembali, pool terbuka lagi tanpa listing ulang. Satu pengecualian: hook yang lolos cek
+   bit tidak pernah memerlukan allowlist, jadi `revokeHook` atasnya tidak menghentikan
+   apa pun; yang menghentikan pool seperti itu adalah `freeze`.
 
    **Risiko yang tersisa ada di `pause`.** Pause ikut menghentikan likuidasi, jadi
    guardian yang keliru atau kuncinya bocor dapat menahan likuidasi selama pause itu
@@ -325,7 +329,9 @@ guardian as well as the owner, and the guardian's take effect at once (FAR-68):
 - `pause` on either market, the only sequencer-downtime mitigation this chain allows (see
   “Trust assumptions”);
 - `CollateralPolicy.freeze(poolId)`, which stops new collateral and borrows on a pool;
-- `CollateralPolicy.disableToken(currency)` and `CollateralPolicy.revokeHook(hooks)`.
+- `CollateralPolicy.disableToken(currency)` and `CollateralPolicy.revokeHook(hooks)`, which
+  stop them on every pool of that token or behind that hook, with no freeze each (FAR-74). A
+  hook that passes the bit check is the exception: revoking it stops nothing, `freeze` does.
 
 ```sh
 cast send <market> "pause()" --rpc-url robinhood --private-key <guardian key>
