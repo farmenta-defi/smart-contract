@@ -488,8 +488,14 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     function _requireHookPermitted(
         address hooks
     ) internal view {
-        if (HookPermissions.passesBitCheck(IHooks(hooks))) return;
-        if (!hookAllowlist[hooks]) revert HookNotPermitted(hooks);
+        if (!_isHookPermitted(hooks)) revert HookNotPermitted(hooks);
+    }
+
+    /// @dev The §6.1 hook rule as an answer: the bit check, or failing that the allowlist.
+    function _isHookPermitted(
+        address hooks
+    ) internal view returns (bool) {
+        return HookPermissions.passesBitCheck(IHooks(hooks)) || hookAllowlist[hooks];
     }
 
     /// @dev Deviations from the tier preset are accepted only toward stricter, and the
