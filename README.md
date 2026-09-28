@@ -310,11 +310,12 @@ dollars at 0.02 gwei.
 | `DEPLOY_TIMELOCK` | `true` | `false` makes `OWNER` the direct owner |
 | `TIMELOCK_MIN_DELAY` | `172800` (2 days) | the timelock's delay, in seconds; `0` is refused |
 | `TIMELOCK_PROPOSER`, `TIMELOCK_EXECUTOR` | `OWNER` | the timelock's roles; neither may be `address(0)` |
-| `DEPLOY_LIQUIDATOR_HELPERS` | `true` on 4663, `false` elsewhere | deploy one `LiquidatorHelper` per market; refused off 4663 |
+| `DEPLOY_LIQUIDATOR_HELPERS` | `true` | deploy one `LiquidatorHelper` per market; Morpho Blue, UniversalRouter and WETH addresses must have code |
 | `POSITION_MANAGER`, `STATE_VIEW`, `USDG`, `WETH`, `CHAINLINK_ETH_USD`, `CHAINLINK_USDG_USD`, `MORPHO_BLUE`, `UNIVERSAL_ROUTER` | `RobinhoodChain` | external addresses; required on any other chain |
 
-`LiquidatorHelper` still reads WETH from `RobinhoodChain`, so the script deploys it on 4663 only,
-and refuses `DEPLOY_LIQUIDATOR_HELPERS=true` elsewhere until WETH is a constructor argument.
+`LiquidatorHelper` receives the configured WETH address in its constructor. On chains other than
+4663, set `MORPHO_BLUE`, `UNIVERSAL_ROUTER`, and `WETH` to deployed contracts on that chain; when
+those dependencies have code, the helper deploys there by default.
 
 **Owned by the timelock.** The timelock has no admin: its roles and its delay change only
 through its own queue. Every owner call waits the delay.
