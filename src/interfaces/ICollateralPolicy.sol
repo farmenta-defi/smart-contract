@@ -73,7 +73,7 @@ interface ICollateralPolicy {
 
     /// @notice Whether new collateral and new borrowing are currently allowed for a pool.
     /// @dev False once frozen, while either of the pool's tokens is disabled, and while its
-    ///      hook is not permitted. Existing loans keep working regardless — repay, collect,
+    ///      hook is not permitted. Existing loans keep working regardless: repay, collect,
     ///      decrease, withdraw and liquidate all stay open, because trapping collateral or
     ///      switching off liquidation would manufacture bad debt (§6.5).
     function acceptsNewPositions(

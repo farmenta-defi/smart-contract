@@ -154,7 +154,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     /// @dev Disabling a token does not unlist pools that contain it. Those pools stop taking
     ///      collateral and stop lending against what they hold (`checkPool`,
     ///      `acceptsNewPositions`), and enabling the token again reopens them as listed.
-    ///      Unwinding a token is a per-pool decision — freeze and ramp them (§6.5) — because a
+    ///      Unwinding a token is a per-pool decision (freeze and ramp them, §6.5), because a
     ///      blanket switch would strand collateral in pools nobody had reviewed for removal.
     function setTokenConfig(
         Currency currency,
