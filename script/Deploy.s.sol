@@ -230,7 +230,8 @@ contract Deploy is Script {
         string memory symbol,
         ICollateralPolicy.Tier tier
     ) private returns (FarmentaMarket) {
-        bytes memory init = abi.encodeCall(FarmentaMarket.initialize, (IERC20(usdg), name, symbol, tier, owner));
+        bytes memory init =
+            abi.encodeCall(FarmentaMarket.initialize, (IERC20(usdg), name, symbol, tier, owner, address(0)));
         return FarmentaMarket(payable(address(new ERC1967Proxy(address(implementation), init))));
     }
 

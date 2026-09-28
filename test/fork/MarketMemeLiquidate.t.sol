@@ -500,7 +500,14 @@ contract MarketMemeLiquidateForkTest is MarketForkTest {
                         address(implementation),
                         abi.encodeCall(
                             FarmentaMarket.initialize,
-                            (IERC20(RobinhoodChain.USDG), "Farmenta USDG", "fUSDG", ICollateralPolicy.Tier.MEME, owner)
+                            (
+                                IERC20(RobinhoodChain.USDG),
+                                "Farmenta USDG",
+                                "fUSDG",
+                                ICollateralPolicy.Tier.MEME,
+                                owner,
+                                address(0)
+                            )
                         )
                     )
                 ))

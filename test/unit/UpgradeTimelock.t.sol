@@ -59,7 +59,8 @@ contract UpgradeTimelockTest is Test {
                                 "Farmenta USDG Blue-chip",
                                 "fUSDG-BC",
                                 ICollateralPolicy.Tier.BLUE_CHIP,
-                                owner
+                                owner,
+                                address(0)
                             )
                         )
                     )
@@ -712,7 +713,8 @@ contract UpgradeTimelockOneTransactionCodeTest is Test {
                                 "Farmenta USDG Blue-chip",
                                 "fUSDG-BC",
                                 ICollateralPolicy.Tier.BLUE_CHIP,
-                                address(factory)
+                                address(factory),
+                                address(0)
                             )
                         )
                     )

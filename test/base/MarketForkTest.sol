@@ -144,7 +144,7 @@ abstract contract MarketForkTest is PositionMinter {
                         address(implementation),
                         abi.encodeCall(
                             FarmentaMarket.initialize,
-                            (IERC20(RobinhoodChain.USDG), "Farmenta USDG", "fUSDG", tier_, owner)
+                            (IERC20(RobinhoodChain.USDG), "Farmenta USDG", "fUSDG", tier_, owner, address(0))
                         )
                     )
                 ))

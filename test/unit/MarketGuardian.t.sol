@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -28,34 +29,48 @@ contract MarketGuardianTest is Test {
     address internal stranger = address(0xBAD);
 
     MockERC20 internal usdg;
+    FarmentaMarket internal implementation;
     FarmentaMarket internal market;
 
     function setUp() public {
         usdg = new MockERC20("Paxos USDG", "USDG", RobinhoodChain.USDG_DECIMALS);
-        FarmentaMarket implementation = new FarmentaMarket(
+        implementation = new FarmentaMarket(
             IPositionManager(payable(address(0xB0B))),
             ICollateralPolicy(address(0xC0DE)),
             IPositionValuer(address(0xDEAD)),
             IPriceOracle(address(0x0A11CE)),
             IInterestRateModel(address(new InterestRateModel()))
         );
-        market = FarmentaMarket(
-            payable(address(
-                    new ERC1967Proxy(
-                        address(implementation),
-                        abi.encodeCall(
-                            FarmentaMarket.initialize,
-                            (
-                                IERC20(address(usdg)),
-                                "Farmenta USDG Blue-chip",
-                                "fUSDG-BC",
-                                ICollateralPolicy.Tier.BLUE_CHIP,
-                                owner
-                            )
-                        )
-                    )
-                ))
-        );
+        market = _deployProxy(address(0));
+    }
+
+    /* ------------------------------- initialize ------------------------------- */
+
+    /// @notice A proxy deployed for a timelock owner has its guardian from the first block:
+    ///         named in `initialize`, able to pause before the owner has made a single call.
+    function test_initializeNamesTheGuardian() public {
+        vm.expectEmit();
+        emit FarmentaMarket.GuardianUpdated(address(0), guardian);
+        FarmentaMarket guarded = _deployProxy(guardian);
+
+        assertEq(guarded.guardian(), guardian, "guardian");
+        assertEq(guarded.owner(), owner, "owner");
+
+        vm.prank(guardian);
+        guarded.pause();
+        assertTrue(guarded.paused(), "the pause did not take");
+    }
+
+    /// @notice Initialised without a guardian, a market announces none.
+    function test_initializeWithoutAGuardianEmitsNoGuardianEvent() public {
+        vm.recordLogs();
+        FarmentaMarket unguarded = _deployProxy(address(0));
+
+        assertEq(unguarded.guardian(), address(0), "guardian");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; ++i) {
+            assertTrue(logs[i].topics[0] != FarmentaMarket.GuardianUpdated.selector, "GuardianUpdated was emitted");
+        }
     }
 
     /* ------------------------------- the role --------------------------------- */
@@ -263,5 +278,22 @@ contract MarketGuardianTest is Test {
     function _nameGuardian() internal {
         vm.prank(owner);
         market.setGuardian(guardian);
+    }
+
+    function _deployProxy(
+        address guardian_
+    ) internal returns (FarmentaMarket) {
+        bytes memory init = abi.encodeCall(
+            FarmentaMarket.initialize,
+            (
+                IERC20(address(usdg)),
+                "Farmenta USDG Blue-chip",
+                "fUSDG-BC",
+                ICollateralPolicy.Tier.BLUE_CHIP,
+                owner,
+                guardian_
+            )
+        );
+        return FarmentaMarket(payable(address(new ERC1967Proxy(address(implementation), init))));
     }
 }

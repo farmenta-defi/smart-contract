@@ -66,7 +66,14 @@ contract StorageLayoutTest is Test {
                         address(implementation),
                         abi.encodeCall(
                             FarmentaMarket.initialize,
-                            (IERC20(address(usdg)), "Farmenta USDG Meme", "fUSDG-M", ICollateralPolicy.Tier.MEME, owner)
+                            (
+                                IERC20(address(usdg)),
+                                "Farmenta USDG Meme",
+                                "fUSDG-M",
+                                ICollateralPolicy.Tier.MEME,
+                                owner,
+                                address(0)
+                            )
                         )
                     )
                 ))
@@ -139,6 +146,17 @@ contract StorageLayoutTest is Test {
         market.setGuardian(guardian);
 
         assertEq(_load(GUARDIAN), uint256(uint160(guardian)), "guardian slot");
+    }
+
+    /// @notice `initialize` writes the guardian it is given to the same slot.
+    function test_initializeWritesTheGuardianSlot() public {
+        bytes memory init = abi.encodeCall(
+            FarmentaMarket.initialize,
+            (IERC20(address(usdg)), "Farmenta USDG Meme", "fUSDG-M", ICollateralPolicy.Tier.MEME, owner, guardian)
+        );
+        address guarded = address(new ERC1967Proxy(address(implementation), init));
+
+        assertEq(uint256(vm.load(guarded, bytes32(GUARDIAN))), uint256(uint160(guardian)), "guardian slot");
     }
 
     /// @notice Naming and removing the guardian write its slot and no other.

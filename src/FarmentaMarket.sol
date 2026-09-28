@@ -290,14 +290,22 @@ contract FarmentaMarket is
     /// @param symbol_ ERC-20 symbol, e.g. "fUSDG-BC" (§3).
     /// @param tier_ Which collateral tier this proxy accepts.
     /// @param owner_ Holder of every privileged function, including upgrades.
+    /// @param guardian_ The account that may `pause` besides the owner, or zero for none
+    ///        (§4.1, FAR-68).
     /// @dev `Tier.NONE` is rejected rather than stored: it is the unconfigured value, and a
     ///      market that accepted it would compare equal to every unlisted pool's tier.
+    ///
+    ///      The guardian is taken here because `setGuardian` is the owner's, and a proxy
+    ///      deployed for a timelock owner is the timelock's from this call on: set afterwards,
+    ///      the guardian would arrive one delay late, and the market would run that long with
+    ///      nobody able to pause it in time.
     function initialize(
         IERC20 asset_,
         string calldata name_,
         string calldata symbol_,
         ICollateralPolicy.Tier tier_,
-        address owner_
+        address owner_,
+        address guardian_
     ) external initializer {
         if (tier_ == ICollateralPolicy.Tier.NONE) revert TierNotSet();
 
@@ -312,6 +320,10 @@ contract FarmentaMarket is
         $.borrowIndex = WAD;
         $.lastAccrual = block.timestamp;
         ($.reserveFactorBps, $.reserveFloorBps) = tier_ == ICollateralPolicy.Tier.BLUE_CHIP ? (1500, 100) : (2500, 250);
+        if (guardian_ != address(0)) {
+            $.guardian = guardian_;
+            emit GuardianUpdated(address(0), guardian_);
+        }
     }
 
     /* -------------------------------- collateral ------------------------------ */
