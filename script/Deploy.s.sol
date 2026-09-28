@@ -24,12 +24,14 @@ import {IFlashLoanMorpho, ILiquidationMarket, LiquidatorHelper} from "../src/per
 
 /// @notice Deploys the whole protocol in one run: dependencies, one market implementation, the
 ///         Blue-chip and Meme proxies, a lens for each, optionally a liquidator helper for each,
-///         and a `TimelockController` that owns both markets and the policy.
+///         and a `TimelockController` that owns both markets and the policy, with a guardian
+///         named on all three.
 /// @dev Simulate first, then broadcast, both from the `deploy` profile (the one that ships):
 ///
-///        FOUNDRY_PROFILE=deploy OWNER=0x… forge script script/Deploy.s.sol --rpc-url robinhood
-///        FOUNDRY_PROFILE=deploy OWNER=0x… forge script script/Deploy.s.sol --rpc-url robinhood \
-///            --broadcast --private-key $PRIVATE_KEY
+///        FOUNDRY_PROFILE=deploy OWNER=0x… GUARDIAN=0x… forge script script/Deploy.s.sol \
+///            --rpc-url robinhood
+///        FOUNDRY_PROFILE=deploy OWNER=0x… GUARDIAN=0x… forge script script/Deploy.s.sol \
+///            --rpc-url robinhood --broadcast --private-key $PRIVATE_KEY
 ///
 ///      The linked libraries (`MarketDebt`, `MarketMint`, `MarketLiquidity`, `MarketLiquidation`,
 ///      `MarketUpgrade`) are deployed by forge itself, through the CREATE2 factory, before the
@@ -49,10 +51,16 @@ import {IFlashLoanMorpho, ILiquidationMarket, LiquidatorHelper} from "../src/per
 ///      and the policy goes through it: `TIMELOCK_PROPOSER` schedules, waits `TIMELOCK_MIN_DELAY`,
 ///      and `TIMELOCK_EXECUTOR` executes (script/Timelock.s.sol). Both default to `OWNER`, which
 ///      defaults to the deployer. The timelock has no admin, so its roles and delay change only
-///      through its own queue. Incident responses are owner functions too and wait the delay as
-///      well: `pause`, and on the policy freezing a pool, disabling a token and revoking a hook
-///      (ARCHITECTURE §6.5 assumes those are immediate; FAR-68 tracks a guardian for them).
-///      `DEPLOY_TIMELOCK=false` skips the timelock and `OWNER` owns everything directly.
+///      through its own queue. `DEPLOY_TIMELOCK=false` skips the timelock and `OWNER` owns
+///      everything directly.
+///
+///      Guardian. Every owner call waits the timelock's delay, and an incident does not. So
+///      `GUARDIAN` is named on both markets and on the policy, and may do four things at once:
+///      `pause` a market, and on the policy `freeze` a pool, `disableToken` and `revokeHook`
+///      (ARCHITECTURE §4.1, §6.5, FAR-68). The reverse of each, and everything else, stays with
+///      the owner. `GUARDIAN` has no default: the run stops before any transaction when it is
+///      unset, `address(0)`, or the deployer, whose key is the one that sits in `.env`.
+///      Replacing the guardian later is `setGuardian`, an owner call, on each of the three.
 ///
 ///      The markets get their owner in `initialize`. The policy cannot: its token configuration
 ///      below has to be written by its owner in this run, so it is deployed owned by the deployer
@@ -67,6 +75,7 @@ import {IFlashLoanMorpho, ILiquidationMarket, LiquidatorHelper} from "../src/per
 contract Deploy is Script {
     struct Config {
         address owner;
+        address guardian;
         address positionManager;
         address stateView;
         address usdg;
@@ -108,6 +117,7 @@ contract Deploy is Script {
     error ZeroAddress(string name);
     error NoCode(string name, address account);
     error ZeroTimelockDelay();
+    error GuardianIsTheDeployer(address deployer);
     error LiquidatorHelperNeedsRobinhood(uint256 chainId);
 
     /// @dev The returned `Deployment` lands in the broadcast log, where script/manifest.sh reads
@@ -122,9 +132,9 @@ contract Deploy is Script {
     function deploy(
         Config memory c
     ) public returns (Deployment memory d) {
-        _check(c);
-
         address deployer = msg.sender;
+        _check(c, deployer);
+
         vm.startBroadcast(deployer);
 
         if (c.timelock) {
@@ -148,10 +158,9 @@ contract Deploy is Script {
         );
 
         d.blueChip = _proxy(
-            d.implementation, c.usdg, d.admin, "Farmenta USDG Blue-chip", "fUSDG-BC", ICollateralPolicy.Tier.BLUE_CHIP
+            d.implementation, c, d.admin, "Farmenta USDG Blue-chip", "fUSDG-BC", ICollateralPolicy.Tier.BLUE_CHIP
         );
-        d.meme =
-            _proxy(d.implementation, c.usdg, d.admin, "Farmenta USDG Meme", "fUSDG-MEME", ICollateralPolicy.Tier.MEME);
+        d.meme = _proxy(d.implementation, c, d.admin, "Farmenta USDG Meme", "fUSDG-MEME", ICollateralPolicy.Tier.MEME);
         d.blueChipLens = new MarketLens(d.blueChip);
         d.memeLens = new MarketLens(d.meme);
 
@@ -186,6 +195,9 @@ contract Deploy is Script {
                 Currency.wrap(RobinhoodChain.NATIVE), true, ICollateralPolicy.Tier.BLUE_CHIP, 18, c.ethUsdFeed
             );
 
+        // While the deployer still owns the policy: afterwards this is the timelock's call.
+        d.policy.setGuardian(c.guardian);
+
         if (d.admin != deployer) d.policy.transferOwnership(d.admin);
         if (c.timelock && c.timelockProposer == deployer) {
             bytes memory accept = abi.encodeCall(d.policy.acceptOwnership, ());
@@ -202,6 +214,8 @@ contract Deploy is Script {
     function config() public view returns (Config memory c) {
         bool robinhood = block.chainid == RobinhoodChain.CHAIN_ID;
         c.owner = vm.envOr("OWNER", msg.sender);
+        // No default: `_check` refuses the zero this leaves when the variable is unset.
+        c.guardian = vm.envOr("GUARDIAN", address(0));
         c.positionManager = _address("POSITION_MANAGER", robinhood, RobinhoodChain.POSITION_MANAGER);
         c.stateView = _address("STATE_VIEW", robinhood, RobinhoodChain.STATE_VIEW);
         c.usdg = _address("USDG", robinhood, RobinhoodChain.USDG);
@@ -222,25 +236,32 @@ contract Deploy is Script {
         }
     }
 
+    /// @dev The guardian goes in through `initialize`: the proxy is its owner's from that call
+    ///      on, and under a timelock owner `setGuardian` would wait the delay.
     function _proxy(
         FarmentaMarket implementation,
-        address usdg,
+        Config memory c,
         address owner,
         string memory name,
         string memory symbol,
         ICollateralPolicy.Tier tier
     ) private returns (FarmentaMarket) {
         bytes memory init =
-            abi.encodeCall(FarmentaMarket.initialize, (IERC20(usdg), name, symbol, tier, owner, address(0)));
+            abi.encodeCall(FarmentaMarket.initialize, (IERC20(c.usdg), name, symbol, tier, owner, c.guardian));
         return FarmentaMarket(payable(address(new ERC1967Proxy(address(implementation), init))));
     }
 
     /// @dev Refuses to spend gas against a wrong address: every external dependency must exist.
     ///      A mistyped feed or token would otherwise surface only when the first borrow reverts.
     function _check(
-        Config memory c
+        Config memory c,
+        address deployer
     ) private view {
         if (c.owner == address(0)) revert ZeroAddress("OWNER");
+        if (c.guardian == address(0)) revert ZeroAddress("GUARDIAN");
+        // The deployer's key is the one in `.env`. A guardian is the key that is reached for
+        // in an incident, and it should not be the one a deploy machine holds.
+        if (c.guardian == deployer) revert GuardianIsTheDeployer(deployer);
         _hasCode("POSITION_MANAGER", c.positionManager);
         _hasCode("STATE_VIEW", c.stateView);
         _hasCode("USDG", c.usdg);
@@ -288,6 +309,9 @@ contract Deploy is Script {
             require(address(d.blueChipLiquidator.market()) == address(d.blueChip), "blue-chip liquidator");
             require(address(d.memeLiquidator.market()) == address(d.meme), "meme liquidator");
         }
+        require(d.blueChip.guardian() == c.guardian, "blue-chip guardian");
+        require(d.meme.guardian() == c.guardian, "meme guardian");
+        require(d.policy.guardian() == c.guardian, "policy guardian");
         require(d.policy.owner() == deployer, "policy owner");
         require(d.policy.pendingOwner() == (d.admin == deployer ? address(0) : d.admin), "policy pending owner");
         require(d.oracle.price(Currency.wrap(c.usdg)) > 0, "USDG price");
@@ -310,6 +334,7 @@ contract Deploy is Script {
     ) private view {
         console2.log("Deployer", deployer);
         console2.log("Owner of markets and policy", d.admin);
+        console2.log("Guardian of markets and policy", c.guardian);
         console2.log("TimelockController", address(d.timelock));
         console2.log("TwapRecorder", address(d.recorder));
         console2.log("CollateralPolicy", address(d.policy));
