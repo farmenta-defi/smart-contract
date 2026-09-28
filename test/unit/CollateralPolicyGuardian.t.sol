@@ -184,6 +184,101 @@ contract CollateralPolicyGuardianTest is Test {
         assertTrue(policy.acceptsNewPositions(poolId), "the owner could not reopen the pool");
     }
 
+    /* ------------------------------ disableToken ------------------------------ */
+
+    /// @notice Only `enabled` changes. The tier, decimals and feed are what positions already
+    ///         held are priced with, so they have to survive the token being switched off.
+    function test_theGuardianDisablesATokenAndItsListingDataStays() public {
+        _nameGuardian();
+
+        vm.expectEmit(address(policy));
+        emit CollateralPolicy.TokenConfigured(weth, false, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(2));
+        vm.prank(guardian);
+        policy.disableToken(weth);
+
+        (bool enabled, ICollateralPolicy.Tier tier, uint8 decimals, address priceFeed) = policy.tokenConfig(weth);
+        assertFalse(enabled, "the token is still enabled");
+        assertEq(uint8(tier), uint8(ICollateralPolicy.Tier.BLUE_CHIP), "tier");
+        assertEq(decimals, 18, "decimals");
+        assertEq(priceFeed, address(2), "price feed");
+    }
+
+    /// @notice A pool holding the token stops taking positions, and cannot be listed either.
+    function test_aDisabledTokenStopsNewPositionsAndNewListings() public {
+        _nameGuardian();
+        PoolKey memory key = _list();
+
+        vm.prank(guardian);
+        policy.disableToken(weth);
+
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.TokenNotEnabled.selector, weth));
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+
+        PoolKey memory other = _key();
+        other.fee = 500;
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.TokenNotEnabled.selector, weth));
+        policy.list(other, _params());
+    }
+
+    /// @notice The other token of the pair is not touched.
+    function test_disablingOneTokenLeavesTheOtherEnabled() public {
+        _nameGuardian();
+
+        vm.prank(guardian);
+        policy.disableToken(weth);
+
+        (bool enabled,,,) = policy.tokenConfig(usdg);
+        assertTrue(enabled, "USDG went with WETH");
+    }
+
+    function test_theOwnerDisablesThroughTheSameFunction() public {
+        vm.prank(owner);
+        policy.disableToken(weth);
+
+        (bool enabled,,,) = policy.tokenConfig(weth);
+        assertFalse(enabled, "the token is still enabled");
+    }
+
+    /// @notice A token nobody configured stays what it was: disabled, with no tier.
+    function test_disablingAnUnconfiguredTokenChangesNothing() public {
+        _nameGuardian();
+        Currency unknown = Currency.wrap(address(0xDEAD));
+
+        vm.prank(guardian);
+        policy.disableToken(unknown);
+
+        (bool enabled, ICollateralPolicy.Tier tier, uint8 decimals, address priceFeed) = policy.tokenConfig(unknown);
+        assertFalse(enabled, "enabled");
+        assertEq(uint8(tier), uint8(ICollateralPolicy.Tier.NONE), "tier");
+        assertEq(decimals, 0, "decimals");
+        assertEq(priceFeed, address(0), "price feed");
+    }
+
+    function test_RevertWhenAStrangerDisablesAToken() public {
+        _nameGuardian();
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.NotOwnerOrGuardian.selector, stranger));
+        policy.disableToken(weth);
+    }
+
+    /// @notice Enabling is the owner's alone, whether the token was disabled or never listed.
+    function test_RevertWhenTheGuardianEnablesAToken() public {
+        _nameGuardian();
+        vm.prank(guardian);
+        policy.disableToken(weth);
+
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, guardian));
+        policy.setTokenConfig(weth, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(2));
+
+        vm.prank(owner);
+        policy.setTokenConfig(weth, true, ICollateralPolicy.Tier.BLUE_CHIP, 18, address(2));
+        (bool enabled,,,) = policy.tokenConfig(weth);
+        assertTrue(enabled, "the owner could not enable the token again");
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _nameGuardian() internal {

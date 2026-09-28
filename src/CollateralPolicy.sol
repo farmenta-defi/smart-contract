@@ -157,6 +157,23 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         emit TokenConfigured(currency, enabled, tier, decimals, priceFeed);
     }
 
+    /// @notice Stops a token being accepted in new collateral, at once (§6.5, FAR-68).
+    /// @dev For the owner or the guardian. Only `enabled` is written: the tier, the decimals
+    ///      and the price feed stay as listed, because positions already held are still priced
+    ///      with them (`ICollateralPolicy.tokenConfig`). The event is `setTokenConfig`'s, with
+    ///      the values that stayed. Enabling a token again is `setTokenConfig`, the owner's.
+    ///
+    ///      Like `setTokenConfig`, this reaches `checkPool` and `list`, not `borrow`: a loan can
+    ///      still be drawn against collateral already held in a pool of this token. Stopping
+    ///      that is `freeze`, pool by pool.
+    function disableToken(
+        Currency currency
+    ) external onlyOwnerOrGuardian {
+        TokenConfig storage config = tokenConfig[currency];
+        config.enabled = false;
+        emit TokenConfigured(currency, false, config.tier, config.decimals, config.priceFeed);
+    }
+
     function setHookAllowlist(
         address hooks,
         bool allowed
