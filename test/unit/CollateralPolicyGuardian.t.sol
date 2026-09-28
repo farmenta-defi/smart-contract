@@ -13,6 +13,7 @@ import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
+import {Fixtures} from "../base/Fixtures.sol";
 
 /// @notice The policy's guardian (ARCHITECTURE §6.5, FAR-68): who names it, what it may do at
 ///         once, and everything it may not. No network.
@@ -279,6 +280,79 @@ contract CollateralPolicyGuardianTest is Test {
         assertTrue(enabled, "the owner could not enable the token again");
     }
 
+    /* ------------------------------- revokeHook ------------------------------- */
+
+    /// @notice Revoking bites a pool already listed behind the hook, as the owner's revoke does.
+    function test_theGuardianRevokesAHookAndItsPoolStopsTakingPositions() public {
+        _nameGuardian();
+        PoolKey memory key = _listBehindAllowlistedHook();
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+
+        vm.expectEmit(address(policy));
+        emit CollateralPolicy.HookAllowlisted(Fixtures.HOOK_DOPPLER, false);
+        vm.prank(guardian);
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+
+        assertFalse(policy.hookAllowlist(Fixtures.HOOK_DOPPLER), "the hook is still allowlisted");
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, Fixtures.HOOK_DOPPLER));
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+    }
+
+    function test_theOwnerRevokesThroughTheSameFunction() public {
+        _listBehindAllowlistedHook();
+
+        vm.prank(owner);
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+
+        assertFalse(policy.hookAllowlist(Fixtures.HOOK_DOPPLER), "the hook is still allowlisted");
+    }
+
+    /// @notice One hook is revoked, not the list.
+    function test_revokingOneHookLeavesTheOthersAllowlisted() public {
+        _nameGuardian();
+        _listBehindAllowlistedHook();
+        vm.prank(owner);
+        policy.setHookAllowlist(Fixtures.HOOK_CASHCAT_V2, true);
+
+        vm.prank(guardian);
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+
+        assertTrue(policy.hookAllowlist(Fixtures.HOOK_CASHCAT_V2), "another hook was revoked with it");
+    }
+
+    /// @notice A hook that passes the bit check never needed the allowlist, so revoking it
+    ///         stops nothing. Stopping its pool is `freeze`.
+    function test_revokingAHookThatPassesTheBitCheckStopsNothing() public {
+        _nameGuardian();
+        PoolKey memory key = _key();
+        key.hooks = IHooks(Fixtures.HOOK_ETH_USDG_DYN);
+        vm.prank(owner);
+        policy.list(key, _params());
+
+        vm.prank(guardian);
+        policy.revokeHook(Fixtures.HOOK_ETH_USDG_DYN);
+
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+    }
+
+    function test_RevertWhenAStrangerRevokesAHook() public {
+        _nameGuardian();
+        _listBehindAllowlistedHook();
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.NotOwnerOrGuardian.selector, stranger));
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+    }
+
+    /// @notice Allowlisting follows a review (§6.3) and is the owner's alone.
+    function test_RevertWhenTheGuardianAllowlistsAHook() public {
+        _nameGuardian();
+
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, guardian));
+        policy.setHookAllowlist(Fixtures.HOOK_DOPPLER, true);
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _nameGuardian() internal {
@@ -294,6 +368,15 @@ contract CollateralPolicyGuardianTest is Test {
         key = _key();
         vm.prank(owner);
         policy.list(key, _params());
+    }
+
+    function _listBehindAllowlistedHook() internal returns (PoolKey memory key) {
+        key = _key();
+        key.hooks = IHooks(Fixtures.HOOK_DOPPLER);
+        vm.startPrank(owner);
+        policy.setHookAllowlist(Fixtures.HOOK_DOPPLER, true);
+        policy.list(key, _params());
+        vm.stopPrank();
     }
 
     function _params() internal pure returns (CollateralPolicy.ListingParams memory) {

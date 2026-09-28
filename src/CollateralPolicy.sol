@@ -182,6 +182,19 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         emit HookAllowlisted(hooks, allowed);
     }
 
+    /// @notice Takes a hook off the allowlist, at once (§6.5, FAR-68).
+    /// @dev `setHookAllowlist(hooks, false)` for the owner or the guardian, and the same event.
+    ///      Pools behind the hook stop passing `checkPool`, so no position enters them and
+    ///      none is added to, unless the hook passes the bit check without the allowlist.
+    ///      Like `disableToken` it does not reach `borrow`; `freeze` does. Allowlisting a hook
+    ///      is `setHookAllowlist`, the owner's, after the review of §6.3.
+    function revokeHook(
+        address hooks
+    ) external onlyOwnerOrGuardian {
+        hookAllowlist[hooks] = false;
+        emit HookAllowlisted(hooks, false);
+    }
+
     /* --------------------------------- listing -------------------------------- */
 
     /// @notice Lists a pool as acceptable collateral, on the given terms.
