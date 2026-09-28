@@ -171,7 +171,9 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    guardian yang keliru atau kuncinya bocor dapat menahan likuidasi selama pause itu
    berlangsung, dan harga yang bergerak selama itu menjadi bad debt. Pause hanya
    berakhir lewat `unpause` milik owner, yang pada owner timelock berarti paling cepat
-   sesudah jeda 2 hari. Guardian pengganti ditunjuk dengan jalan yang sama, jadi
+   sesudah jeda 2 hari, kecuali sebuah `unpause` siaga sudah menunggu di antrean (lihat
+   “Deploying”, keputusan 28 Sep 2026): dengan itu owner mengakhiri pause dalam satu
+   transaksi. Guardian pengganti ditunjuk lewat antrean yang sama, jadi
    `setGuardian` dan `unpause` sebaiknya dijadwalkan bersama. Karena itulah guardian
    tidak diberi `unpause`: akun yang dapat memulai pause bukan akun yang memutuskan
    kapan pause aman diakhiri, dan jalan keluarnya terlihat di antrean timelock.
@@ -339,6 +341,25 @@ owner call on each of the three contracts. A market upgrade waits twice: the tim
 run `scheduleUpgrade`, then the market's own `TIMELOCK_DELAY` before `upgradeToAndCall` (four days
 at the defaults).
 
+**A standing `unpause`, one per market.** Only the owner can `unpause`, so without it a guardian's
+pause lasts at least the delay, two days with no liquidation, and that holds for a false alarm
+too. The timelock's operations do not expire, and `unpause()` on a market that is not paused
+reverts and leaves the operation ready. So right after the deploy the proposer schedules one
+`unpause` for each market. It is ready two days later and stays ready until a pause needs it;
+the executor then ends that pause in one transaction (decided 28 Sep 2026, spec v1.76).
+
+```sh
+# once per market after the deploy, and again after each use, under a salt not used before
+TIMELOCK=0x… TARGET=<market> CALLDATA=$(cast calldata "unpause()") SALT=$(cast to-uint256 1) \
+    forge script script/Timelock.s.sol --sig "schedule()" --rpc-url robinhood --broadcast --private-key …
+# to end a pause: the same variables
+TIMELOCK=0x… TARGET=<market> CALLDATA=$(cast calldata "unpause()") SALT=$(cast to-uint256 1) \
+    forge script script/Timelock.s.sol --sig "execute()" --rpc-url robinhood --broadcast --private-key …
+```
+
+The pause that uses it up leaves the market without one for two days, so schedule the next at
+once. The guardian still cannot end a pause: the standing operation is the executor's to run.
+
 The guardian's key should be one that can be reached in minutes and is not the deployer's. What
 it can and cannot do, and what a wrong pause costs, is point 5 of “Kekuasaan owner dan batasnya”.
 
@@ -490,7 +511,8 @@ The owner powers are disclosed above. Other trust assumptions:
   publishes no Chainlink L2 Sequencer Uptime Feed, so pausing is the only sequencer-downtime
   mitigation available (spec §5.2, §15.1). Deployed by `script/Deploy.s.sol`, the owner is a
   `TimelockController`: its pause takes effect only after its delay, the guardian's at once,
-  and only the owner can `unpause`, so a pause lasts at least that delay.
+  and only the owner can `unpause`, so a pause lasts at least that delay unless a standing
+  `unpause` is already waiting in the queue (see “Deploying”).
 - Robinhood Chain is L2BEAT **Stage 0** with 2 validators; the sequencer can filter
   transactions. "A liquidation can always be submitted" is an assumption, not a guarantee.
 - **ETH sent to the market cannot be recovered.** `receive()` is open because the fee,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
@@ -41,7 +41,7 @@ contract DeployScriptForkTest is ForkTest {
     function setUp() public override {
         super.setUp();
         script = new Deploy();
-        // `deploy(config())` is `run()` without the manifest, which a test must not write.
+        // `deploy(c)` is `run()` with the config given here instead of read from the environment.
         d = script.deploy(_config());
     }
 
@@ -132,6 +132,39 @@ contract DeployScriptForkTest is ForkTest {
         _execute(address(d.blueChip), unpause);
         assertFalse(d.blueChip.paused(), "the owner could not lift the pause");
         assertTrue(d.meme.paused(), "the other market was unpaused with it");
+    }
+
+    /// @notice A standing `unpause`, scheduled before any pause, stays ready for as long as it
+    ///         is not used, and ends a guardian's pause in one transaction.
+    /// @dev Why a guardian's pause need not last the whole delay (README, "Guarded by
+    ///      `GUARDIAN`"). The timelock's operations do not expire, and `unpause()` on a market
+    ///      that is not paused reverts, which leaves the operation ready. The pause it ends uses
+    ///      it up: the next one is scheduled again, under another salt, and waits again.
+    function test_aStandingUnpauseStaysReadyAndEndsAGuardiansPauseAtOnce() public {
+        bytes memory unpause = abi.encodeCall(FarmentaMarket.unpause, ());
+        bytes32 id = d.timelock.hashOperation(address(d.blueChip), 0, unpause, bytes32(0), bytes32(0));
+        _schedule(address(d.blueChip), unpause);
+
+        vm.warp(block.timestamp + 30 days);
+        assertTrue(d.timelock.isOperationReady(id), "the standing unpause expired");
+
+        // Nothing to lift yet: the call reverts, and the operation is still there.
+        vm.expectRevert(PausableUpgradeable.ExpectedPause.selector);
+        _execute(address(d.blueChip), unpause);
+        assertTrue(d.timelock.isOperationReady(id), "a refused unpause used the operation up");
+
+        vm.prank(guardian);
+        d.blueChip.pause();
+        _execute(address(d.blueChip), unpause);
+        assertFalse(d.blueChip.paused(), "the standing unpause did not lift the pause");
+        assertTrue(d.timelock.isOperationDone(id), "the operation was not used up");
+
+        // The next pause finds no standing unpause, until one is scheduled again.
+        vm.prank(guardian);
+        d.blueChip.pause();
+        vm.expectRevert(_notReady(address(d.blueChip), unpause, bytes32(0)));
+        _execute(address(d.blueChip), unpause);
+        assertTrue(d.blueChip.paused(), "a used operation lifted a second pause");
     }
 
     /// @notice On a policy the timelock owns, the guardian freezes a pool, disables a token and
