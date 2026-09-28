@@ -27,6 +27,7 @@ contract MarketClosedPoolForkTest is MarketForkTest {
 
     address internal guardian = address(0x6A4D);
     address internal lender = address(0x1E4DE2);
+    address internal recipient = makeAddr("recipient");
 
     uint256 internal tokenId;
     address internal borrower;
@@ -186,6 +187,67 @@ contract MarketClosedPoolForkTest is MarketForkTest {
         policy.setHookAllowlist(REMOVAL_HAIRCUT_HOOK, true);
 
         _draw(hooked, address(this));
+    }
+
+    /* ----------------------------- what stays open ---------------------------- */
+
+    /// @notice Fees are the borrower's, and a disabled token does not hold them back.
+    function test_feesAreCollectedFromAPoolOfADisabledToken() public {
+        uint256 fees0 = valuer.value(tokenId).fees0;
+        uint256 fees1 = valuer.value(tokenId).fees1;
+        assertGt(fees0, 0, "the fixture must hold ETH fees");
+        assertGt(fees1, 0, "the fixture must hold USDG fees");
+        vm.prank(guardian);
+        policy.disableToken(eth);
+
+        vm.prank(borrower);
+        market.collectFees(tokenId, recipient);
+
+        assertEq(recipient.balance, fees0, "the ETH fees reach the recipient");
+        assertEq(usdg.balanceOf(recipient), fees1, "the USDG fees reach the recipient");
+    }
+
+    /// @notice Liquidity leaves a pool of a disabled token as it would any other, while the loan
+    ///         stays within its limit.
+    function test_liquidityIsRemovedFromAPoolOfADisabledToken() public {
+        uint128 liquidity = positionManager.getPositionLiquidity(tokenId);
+        uint128 slice = liquidity / 10;
+        uint256 debt = market.debtOf(tokenId);
+        vm.prank(guardian);
+        policy.disableToken(eth);
+
+        vm.prank(borrower);
+        market.decreaseLiquidity(tokenId, slice, 0, 0, recipient);
+
+        assertEq(positionManager.getPositionLiquidity(tokenId), liquidity - slice, "the slice did not leave");
+        assertGt(recipient.balance, 0, "the ETH leg did not reach the recipient");
+        assertGt(usdg.balanceOf(recipient), 0, "the USDG leg did not reach the recipient");
+        assertEq(market.debtOf(tokenId), debt, "the removal moved the debt");
+    }
+
+    /// @notice The same behind a revoked hook.
+    function test_liquidityIsRemovedFromAPoolBehindARevokedHook() public {
+        (uint256 hooked,) = _openBehindAllowlistedHook();
+        uint128 liquidity = positionManager.getPositionLiquidity(hooked);
+        uint128 slice = liquidity / 10;
+        vm.prank(guardian);
+        policy.revokeHook(REMOVAL_HAIRCUT_HOOK);
+
+        market.decreaseLiquidity(hooked, slice, 0, 0, recipient);
+
+        assertEq(positionManager.getPositionLiquidity(hooked), liquidity - slice, "the slice did not leave");
+    }
+
+    /// @notice Terms and prices stay readable, since the loans that exist are judged by them.
+    function test_termsAndHealthStayReadableInAPoolOfADisabledToken() public {
+        bytes32 terms = keccak256(abi.encode(policy.termsOf(poolId)));
+        uint256 healthFactor = lens.healthFactor(tokenId);
+
+        vm.prank(guardian);
+        policy.disableToken(eth);
+
+        assertEq(keccak256(abi.encode(policy.termsOf(poolId))), terms, "the terms changed");
+        assertEq(lens.healthFactor(tokenId), healthFactor, "the health factor moved");
     }
 
     /* --------------------------------- helpers -------------------------------- */
