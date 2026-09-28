@@ -196,12 +196,12 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         emit HookAllowlisted(hooks, allowed);
     }
 
-    /// @notice Takes a hook off the allowlist, at once (§6.5, FAR-68).
+    /// @notice Takes a hook off the allowlist, at once (§6.5, FAR-68, FAR-74).
     /// @dev `setHookAllowlist(hooks, false)` for the owner or the guardian, and the same event.
-    ///      Pools behind the hook stop passing `checkPool`, so no position enters them and
-    ///      none is added to, unless the hook passes the bit check without the allowlist.
-    ///      Like `disableToken` it does not reach `borrow`; `freeze` does. Allowlisting a hook
-    ///      is `setHookAllowlist`, the owner's, after the review of §6.3.
+    ///      Pools behind the hook stop passing `checkPool` and `acceptsNewPositions`, so no
+    ///      position enters them, none is added to, and none is borrowed against, unless the
+    ///      hook passes the bit check without the allowlist; stopping such a pool is `freeze`.
+    ///      Allowlisting a hook is `setHookAllowlist`, the owner's, after the review of §6.3.
     function revokeHook(
         address hooks
     ) external onlyOwnerOrGuardian {
@@ -398,7 +398,9 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
 
     /// @inheritdoc ICollateralPolicy
     /// @dev `borrow` asks this, by pool id, where a deposit asks `checkPool`. The two agree on
-    ///      the tokens: a pool holding a disabled token is closed to both (FAR-74).
+    ///      the tokens and on the hook: a pool holding a disabled token, or sitting behind a
+    ///      hook that is no longer permitted, is closed to both (FAR-74). The quote and the
+    ///      tier are not read again, since neither can change for a pool once it is listed.
     function acceptsNewPositions(
         PoolId poolId
     ) external view returns (bool) {
@@ -406,7 +408,7 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         if (!listing.listed || listing.frozen) return false;
 
         ListedKey storage key = _listedKeys[poolId];
-        return tokenConfig[key.currency0].enabled && tokenConfig[key.currency1].enabled;
+        return tokenConfig[key.currency0].enabled && tokenConfig[key.currency1].enabled && _isHookPermitted(key.hooks);
     }
 
     /// @inheritdoc ICollateralPolicy

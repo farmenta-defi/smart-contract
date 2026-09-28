@@ -12,9 +12,10 @@ import {CollateralPolicy} from "../../src/CollateralPolicy.sol";
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
 import {TierPresets} from "../../src/libraries/TierPresets.sol";
+import {Fixtures} from "../base/Fixtures.sol";
 
-/// @notice What `acceptsNewPositions` answers once a listed pool's token is switched off
-///         (ARCHITECTURE §6.5, FAR-74). No network.
+/// @notice What `acceptsNewPositions` answers once a listed pool's token is switched off or
+///         its hook is revoked (ARCHITECTURE §6.5, FAR-74). No network.
 /// @dev `borrow` asks this function and nothing else of the policy's gates, so what it answers
 ///      is whether a loan can still be drawn against collateral the market already holds.
 contract CollateralPolicyOpenPoolsTest is Test {
@@ -153,6 +154,94 @@ contract CollateralPolicyOpenPoolsTest is Test {
         policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
     }
 
+    /* ---------------------------------- hooks --------------------------------- */
+
+    /// @notice The owner's revoke closes a pool listed behind the hook, without a freeze.
+    function test_aPoolBehindAHookTheOwnerRevokedTakesNothingNew() public {
+        PoolId poolId = _listBehind(Fixtures.HOOK_DOPPLER).toId();
+        assertTrue(policy.acceptsNewPositions(poolId), "a listed pool is closed");
+
+        vm.prank(owner);
+        policy.setHookAllowlist(Fixtures.HOOK_DOPPLER, false);
+
+        assertFalse(policy.acceptsNewPositions(poolId), "the pool still lends behind a revoked hook");
+        assertFalse(policy.listingOf(poolId).frozen, "the pool was frozen on the way");
+    }
+
+    /// @notice The guardian's `revokeHook` does the same, at once.
+    function test_aPoolBehindAHookTheGuardianRevokedTakesNothingNew() public {
+        PoolId poolId = _listBehind(Fixtures.HOOK_DOPPLER).toId();
+
+        vm.prank(guardian);
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+
+        assertFalse(policy.acceptsNewPositions(poolId), "the pool still lends behind a revoked hook");
+        assertFalse(policy.listingOf(poolId).frozen, "the pool was frozen on the way");
+    }
+
+    /// @notice A hook that passes the bit check never needed the allowlist, so revoking it
+    ///         closes nothing here either. `checkPool` answers the same; the stop is `freeze`.
+    function test_revokingAHookThatPassesTheBitCheckLeavesItsPoolOpen() public {
+        PoolKey memory key = _wethKey(200);
+        key.hooks = IHooks(Fixtures.HOOK_ETH_USDG_DYN);
+        PoolId poolId = _list(key).toId();
+
+        vm.prank(guardian);
+        policy.revokeHook(Fixtures.HOOK_ETH_USDG_DYN);
+
+        assertTrue(policy.acceptsNewPositions(poolId), "a revoke closed a pool the bit check admits");
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+    }
+
+    /// @notice A pool without a hook has nothing to revoke.
+    function test_revokingTheZeroHookLeavesHooklessPoolsOpen() public {
+        PoolId poolId = _list(_wethKey(200)).toId();
+
+        vm.prank(guardian);
+        policy.revokeHook(address(0));
+
+        assertTrue(policy.acceptsNewPositions(poolId), "a hookless pool was closed");
+    }
+
+    /// @notice One hook is revoked, not the list: a pool behind another hook stays open.
+    function test_aRevokedHookClosesItsPoolsAndNoOther() public {
+        PoolId doppler = _listBehind(Fixtures.HOOK_DOPPLER).toId();
+        PoolId cashcat = _listBehind(Fixtures.HOOK_CASHCAT_V2).toId();
+        PoolId hookless = _list(_wethKey(200)).toId();
+
+        vm.prank(guardian);
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+
+        assertFalse(policy.acceptsNewPositions(doppler), "the pool behind the revoked hook stayed open");
+        assertTrue(policy.acceptsNewPositions(cashcat), "a pool behind another hook was closed");
+        assertTrue(policy.acceptsNewPositions(hookless), "a hookless pool was closed");
+    }
+
+    /// @notice Allowlisting the hook again reopens the pool on the terms it was listed with.
+    function test_allowlistingTheHookAgainReopensThePoolWithoutListingItAgain() public {
+        PoolId poolId = _listBehind(Fixtures.HOOK_DOPPLER).toId();
+        bytes32 listed = keccak256(abi.encode(policy.listingOf(poolId)));
+        vm.prank(guardian);
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+
+        vm.prank(owner);
+        policy.setHookAllowlist(Fixtures.HOOK_DOPPLER, true);
+
+        assertTrue(policy.acceptsNewPositions(poolId), "the pool stayed closed");
+        assertEq(keccak256(abi.encode(policy.listingOf(poolId))), listed, "the listing changed");
+    }
+
+    function test_RevertWhenCheckingAPoolClosedByItsHook() public {
+        PoolKey memory key = _listBehind(Fixtures.HOOK_DOPPLER);
+
+        vm.prank(guardian);
+        policy.revokeHook(Fixtures.HOOK_DOPPLER);
+
+        assertFalse(policy.acceptsNewPositions(key.toId()), "the view and the gate disagree");
+        vm.expectRevert(abi.encodeWithSelector(CollateralPolicy.HookNotPermitted.selector, Fixtures.HOOK_DOPPLER));
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+    }
+
     /* ---------------------------------- fuzz ---------------------------------- */
 
     /// @notice Open means listed, not frozen, and both tokens enabled, in any combination.
@@ -169,6 +258,25 @@ contract CollateralPolicyOpenPoolsTest is Test {
         policy.setFrozen(poolId, frozen);
 
         assertEq(policy.acceptsNewPositions(poolId), baseEnabled && quoteEnabled && !frozen, "open");
+    }
+
+    /// @notice Behind a hook that needs the allowlist, the allowlist is one more condition.
+    function testFuzz_aPoolBehindAnAllowlistedHookIsOpenOnlyWhileTheHookIsAllowlisted(
+        bool baseEnabled,
+        bool quoteEnabled,
+        bool frozen,
+        bool allowlisted
+    ) public {
+        PoolId poolId = _listBehind(Fixtures.HOOK_DOPPLER).toId();
+
+        _setEnabled(weth, baseEnabled);
+        _setEnabled(usdg, quoteEnabled);
+        vm.startPrank(owner);
+        policy.setFrozen(poolId, frozen);
+        policy.setHookAllowlist(Fixtures.HOOK_DOPPLER, allowlisted);
+        vm.stopPrank();
+
+        assertEq(policy.acceptsNewPositions(poolId), baseEnabled && quoteEnabled && !frozen && allowlisted, "open");
     }
 
     /* --------------------------------- helpers -------------------------------- */
@@ -191,6 +299,17 @@ contract CollateralPolicyOpenPoolsTest is Test {
 
     function _memeKey() internal view returns (PoolKey memory) {
         return PoolKey({currency0: usdg, currency1: memeToken, fee: 3000, tickSpacing: 60, hooks: IHooks(address(0))});
+    }
+
+    /// @dev A WETH/USDG pool behind a hook the bit check refuses, allowlisted for the listing.
+    function _listBehind(
+        address hooks
+    ) internal returns (PoolKey memory key) {
+        key = _wethKey(200);
+        key.hooks = IHooks(hooks);
+        vm.prank(owner);
+        policy.setHookAllowlist(hooks, true);
+        _list(key);
     }
 
     function _list(
