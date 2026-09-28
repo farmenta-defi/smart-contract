@@ -2,8 +2,10 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 
 import {RobinhoodChain} from "../../src/constants/RobinhoodChain.sol";
 import {ICollateralPolicy} from "../../src/interfaces/ICollateralPolicy.sol";
@@ -130,6 +132,62 @@ contract MarketClosedPoolForkTest is MarketForkTest {
         market.borrow(tokenId, amount, borrower);
     }
 
+    /* ---------------------------------- hooks --------------------------------- */
+
+    function test_RevertWhenBorrowingBehindAHookTheGuardianRevoked() public {
+        (uint256 hooked, PoolId hookedPool) = _openBehindAllowlistedHook();
+
+        vm.prank(guardian);
+        policy.revokeHook(REMOVAL_HAIRCUT_HOOK);
+
+        _expectClosed(hooked, hookedPool, address(this));
+        assertFalse(policy.listingOf(hookedPool).frozen, "the pool was frozen, so the freeze is what closed it");
+    }
+
+    function test_RevertWhenBorrowingBehindAHookTheOwnerRevoked() public {
+        (uint256 hooked, PoolId hookedPool) = _openBehindAllowlistedHook();
+
+        vm.prank(owner);
+        policy.setHookAllowlist(REMOVAL_HAIRCUT_HOOK, false);
+
+        _expectClosed(hooked, hookedPool, address(this));
+    }
+
+    /// @notice The fixture pool's hook is swap-only and passes the bit check, so it never needed
+    ///         the allowlist and a revoke stops nothing. `checkPool` answers the same.
+    function test_revokingAHookThatPassesTheBitCheckDoesNotStopBorrowing() public {
+        PoolKey memory key = _keyOf(tokenId);
+        assertEq(address(key.hooks), Fixtures.HOOK_ETH_USDG_DYN, "the fixture pool changed its hook");
+
+        vm.prank(guardian);
+        policy.revokeHook(Fixtures.HOOK_ETH_USDG_DYN);
+
+        _draw(tokenId, borrower);
+        policy.checkPool(key, ICollateralPolicy.Tier.BLUE_CHIP);
+    }
+
+    /// @notice A revoke reaches the pools behind that hook and no other.
+    function test_aRevokedHookLeavesAPoolBehindAnotherHookLending() public {
+        _openBehindAllowlistedHook();
+
+        vm.prank(guardian);
+        policy.revokeHook(REMOVAL_HAIRCUT_HOOK);
+
+        _draw(tokenId, borrower);
+    }
+
+    function test_allowlistingTheHookAgainLetsTheBorrowerDrawWithoutListingAgain() public {
+        (uint256 hooked, PoolId hookedPool) = _openBehindAllowlistedHook();
+        vm.prank(guardian);
+        policy.revokeHook(REMOVAL_HAIRCUT_HOOK);
+        _expectClosed(hooked, hookedPool, address(this));
+
+        vm.prank(owner);
+        policy.setHookAllowlist(REMOVAL_HAIRCUT_HOOK, true);
+
+        _draw(hooked, address(this));
+    }
+
     /* --------------------------------- helpers -------------------------------- */
 
     function _expectClosed(
@@ -168,5 +226,19 @@ contract MarketClosedPoolForkTest is MarketForkTest {
         (, ICollateralPolicy.Tier tier, uint8 decimals, address priceFeed) = policy.tokenConfig(currency);
         vm.prank(owner);
         policy.setTokenConfig(currency, enabled, tier, decimals, priceFeed);
+    }
+
+    /// @dev A second position, minted behind a hook that only the allowlist admits, with a loan
+    ///      on it and room to draw more. This test contract is its borrower.
+    function _openBehindAllowlistedHook() private returns (uint256 hooked, PoolId hookedPool) {
+        hooked = _mintRemovalHaircutPosition(0, 1e14);
+        PoolKey memory hookedKey = _keyOf(hooked);
+        hookedPool = hookedKey.toId();
+        _listPool(hookedKey, 50e18, 0);
+
+        IERC721(RobinhoodChain.POSITION_MANAGER).approve(address(market), hooked);
+        market.depositCollateral(hooked);
+        assertGt(lens.maxBorrow(hooked), 2 * DRAW, "the minted position is too small for two draws");
+        market.borrow(hooked, DRAW, address(this));
     }
 }
