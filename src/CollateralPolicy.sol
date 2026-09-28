@@ -109,6 +109,17 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     error RampDurationIsZero();
     error RampBelowMaxLtvRequiresFreeze(uint16 maxLtvBps, uint16 ltTargetBps);
     error UnfreezeWouldLeaveNoBorrowingRoom(uint16 maxLtvBps, uint16 ltBps);
+    error NotOwnerOrGuardian(address caller);
+
+    /// @dev For the functions that can only stop new risk. Everything else stays `onlyOwner`.
+    ///      The zero address is refused by name: with no guardian set, `guardian` reads zero,
+    ///      and a simulated call from `address(0)` must not pass as the guardian.
+    modifier onlyOwnerOrGuardian() {
+        if (msg.sender != owner() && (msg.sender == address(0) || msg.sender != guardian)) {
+            revert NotOwnerOrGuardian(msg.sender);
+        }
+        _;
+    }
 
     constructor(
         Currency quote_,
@@ -250,6 +261,24 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
 
         listing.frozen = frozen;
         emit PoolFrozen(poolId, frozen);
+    }
+
+    /// @notice Stops new collateral and new borrowing for a pool, at once (§6.5, FAR-68).
+    /// @dev `setFrozen(poolId, true)` for the owner or the guardian, and the same event. It is
+    ///      the half of `setFrozen` that takes nothing from anyone: existing loans are left as
+    ///      that function describes, liquidation included. Reopening the pool is `setFrozen`,
+    ///      and the owner's alone.
+    ///
+    ///      Freezing a pool that is already frozen is not refused. A guardian answering an
+    ///      incident should not revert because the owner's freeze landed first.
+    function freeze(
+        PoolId poolId
+    ) external onlyOwnerOrGuardian {
+        Listing storage listing = _listings[poolId];
+        if (!listing.listed) revert PoolNotListed(poolId);
+
+        listing.frozen = true;
+        emit PoolFrozen(poolId, true);
     }
 
     /// @notice Schedules a gradual fall in a pool's liquidation threshold.
