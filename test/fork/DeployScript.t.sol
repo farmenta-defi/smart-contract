@@ -27,10 +27,11 @@ import {ForkTest} from "../base/ForkTest.sol";
 /// @dev The deployer is this contract: `run()` broadcasts as its `msg.sender`, and with no
 ///      `OWNER` set it is also the timelock's proposer and executor.
 ///
-///      Environment variables are process-wide and tests run in parallel, so no test here sets
-///      one `Deploy` reads, and only `test_timelockScriptSchedulesExecutesAndCancels` sets the
-///      ones `Timelock` reads. `GUARDIAN` has no default, so every test takes `config()` and
-///      writes the guardian into it, which is what the variable would have done.
+///      Environment variables are process-wide and tests run in parallel, so only
+///      `test_timelockScriptSchedulesExecutesAndCancels` sets the ones `Timelock` reads, and
+///      only `test_runReadsTheGuardianFromTheEnvironmentAndHasNoDefault` sets one `Deploy`
+///      reads, `GUARDIAN`. Every other test takes `config()` and writes the guardian into it,
+///      so whatever the variable holds at that moment does not reach them.
 contract DeployScriptForkTest is ForkTest {
     address internal guardian = makeAddr("guardian");
 
@@ -211,7 +212,32 @@ contract DeployScriptForkTest is ForkTest {
         d.meme.pause();
     }
 
-    /// @notice `GUARDIAN` has no default: unset, the run stops before it sends anything.
+    /// @notice `run()` takes the guardian from `GUARDIAN` and from nowhere else: unset, there
+    ///         is none and the run stops; set, that address is named on all three contracts.
+    /// @dev The one test that reads or writes `GUARDIAN`, with both halves in one function
+    ///      because the environment is the process's: two tests would race for it. Every
+    ///      other test overwrites `c.guardian`, so the variable set here reaches none of them.
+    ///      The first half needs `GUARDIAN` unset where the tests run; `.env.example` leaves it
+    ///      commented out.
+    function test_runReadsTheGuardianFromTheEnvironmentAndHasNoDefault() public {
+        Deploy.Config memory c = script.config();
+        assertEq(c.guardian, address(0), "GUARDIAN is set in this environment, or config() gave it a default");
+        assertTrue(c.owner != address(0), "the config is empty, so a zero guardian proves nothing");
+
+        vm.expectRevert(abi.encodeWithSelector(Deploy.ZeroAddress.selector, "GUARDIAN"));
+        script.run();
+
+        address fromEnv = makeAddr("guardian from the environment");
+        vm.setEnv("GUARDIAN", vm.toString(fromEnv));
+        assertEq(script.config().guardian, fromEnv, "config() did not read GUARDIAN");
+
+        Deploy.Deployment memory e = script.run();
+        assertEq(e.blueChip.guardian(), fromEnv, "blue-chip guardian");
+        assertEq(e.meme.guardian(), fromEnv, "meme guardian");
+        assertEq(e.policy.guardian(), fromEnv, "policy guardian");
+    }
+
+    /// @notice A config with no guardian is refused however it was built.
     function test_RevertWhenTheGuardianIsNotSet() public {
         Deploy.Config memory c = _config();
         c.guardian = address(0);
