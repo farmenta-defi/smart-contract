@@ -337,7 +337,7 @@ contract DeployScriptForkTest is ForkTest {
     /// @notice script/manifest.sh names the fields of the returned `Deployment` by position, so
     ///         the struct's order is pinned here to the list in that script.
     function test_deploymentFieldOrderMatchesTheManifest() public view {
-        address[15] memory expected = [
+        address[16] memory expected = [
             address(d.timelock),
             address(d.recorder),
             address(d.policy),
@@ -352,11 +352,12 @@ contract DeployScriptForkTest is ForkTest {
             address(d.blueChipLiquidator),
             address(d.memeLiquidator),
             d.admin,
+            guardian,
             address(0)
         ];
         bytes memory encoded = abi.encode(d);
-        assertEq(encoded.length, 15 * 32, "Deployment gained or lost a field: update script/manifest.sh");
-        for (uint256 i; i < 14; ++i) {
+        assertEq(encoded.length, 16 * 32, "Deployment gained or lost a field: update script/manifest.sh");
+        for (uint256 i; i < 15; ++i) {
             bytes32 word;
             assembly ("memory-safe") {
                 word := mload(add(add(encoded, 0x20), mul(i, 0x20)))
@@ -365,9 +366,18 @@ contract DeployScriptForkTest is ForkTest {
         }
         bytes32 last;
         assembly ("memory-safe") {
-            last := mload(add(encoded, add(0x20, mul(14, 0x20))))
+            last := mload(add(encoded, add(0x20, mul(15, 0x20))))
         }
         assertEq(last, d.acceptOperation, "policyAcceptOperation");
+    }
+
+    /// @notice The guardian the run returns, which the manifest records, is the one the
+    ///         contracts hold.
+    function test_returnedGuardianIsTheOneOnTheContracts() public view {
+        assertEq(d.guardian, guardian, "returned guardian");
+        assertEq(d.guardian, d.blueChip.guardian(), "blue-chip guardian");
+        assertEq(d.guardian, d.meme.guardian(), "meme guardian");
+        assertEq(d.guardian, d.policy.guardian(), "policy guardian");
     }
 
     /// @notice `script/Timelock.s.sol` names one operation by its variables across all three runs.

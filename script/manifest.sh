@@ -14,7 +14,9 @@
 #
 # The output has the shape `indexer/config/deployment.ts` loads (`collateralPolicy`,
 # `twapRecorder` and `markets`, each `{address, startBlock}`), with every other contract next to
-# them in the same shape for the keeper, the backend and the frontend. For the indexer, copy it
+# them in the same shape for the keeper, the backend and the frontend. `owner` and `guardian`
+# are plain addresses: the owner of the markets and the policy, and the account that may pause
+# and tighten at once (FAR-68). For the indexer, copy it
 # to `indexer/deployments/<name>.json` and set FARMENTA_DEPLOYMENT=<name>.
 #
 # It stops, writing nothing, on a dry-run log, a log for another chain, a failed transaction,
@@ -46,7 +48,7 @@ def isZero: test("^0x0*$");
 | ["timelock", "twapRecorder", "collateralPolicy", "priceOracle", "positionValuer",
    "interestRateModel", "marketImplementation", "blueChipMarket", "memeMarket",
    "blueChipLens", "memeLens", "blueChipLiquidatorHelper", "memeLiquidatorHelper",
-   "owner", "policyAcceptOperation"] as $fields
+   "owner", "guardian", "policyAcceptOperation"] as $fields
 | ((.returns["0"].value // fail("log has no returned Deployment"))
    | ltrimstr("(") | rtrimstr(")") | split(", ")) as $values
 | if ($values | length) != ($fields | length)
@@ -65,6 +67,7 @@ def isZero: test("^0x0*$");
 {
   chainId: $chainId,
   owner: $d.owner,
+  guardian: (if ($d.guardian | isZero) then fail("the deployment names no guardian") else $d.guardian end),
   collateralPolicy: contract("collateralPolicy"),
   twapRecorder: contract("twapRecorder"),
   markets: {blueChip: contract("blueChipMarket"), meme: contract("memeMarket")},

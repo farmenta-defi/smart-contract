@@ -279,10 +279,13 @@ script/manifest.sh            # broadcast/Deploy.s.sol/4663/run-latest.json -> d
 It needs `jq`. Every contract gets `{address, startBlock}`; `collateralPolicy`, `twapRecorder`
 and `markets.{blueChip,meme}` are exactly what `indexer/config/deployment.ts` loads, so the file
 goes to `indexer/deployments/<name>.json` unchanged, and the keeper's `KEEPER_LOG_START_BLOCK` is
-`collateralPolicy.startBlock`. The blocks come from the receipts, not from the script:
+`collateralPolicy.startBlock`. `owner` and `guardian` are plain addresses: who owns the markets
+and the policy, and who may pause and tighten at once. They are what the run set; a later
+`setGuardian` is read from the contracts, not from this file. The blocks come from the receipts, not from the script:
 `block.number` on this chain is the L1 block (spec §14). The manifest names the fields of the
 returned `Deployment` by position; `test_deploymentFieldOrderMatchesTheManifest` pins that
-order. It refuses a dry-run log, a failed transaction, and an address no receipt created.
+order. It refuses a dry-run log, a failed transaction, an address no receipt created, and a deployment
+that names no guardian.
 
 Commit the mainnet manifest (`deployments/4663.json`) together with its broadcast log: it is the
 record the services read addresses from (decided 27 Sep 2026, spec v1.56).

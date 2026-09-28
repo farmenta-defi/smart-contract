@@ -107,6 +107,9 @@ contract Deploy is Script {
         LiquidatorHelper memeLiquidator;
         /// @dev Who owns the markets and, once accepted, the policy: the timelock or `OWNER`.
         address admin;
+        /// @dev Named on both markets and the policy. Returned so the manifest carries it: a
+        ///      reader learns who can pause without calling `guardian()` on three contracts.
+        address guardian;
         /// @dev The timelock operation that accepts the policy, when this run scheduled it.
         bytes32 acceptOperation;
     }
@@ -151,6 +154,7 @@ contract Deploy is Script {
         d.recorder = new TwapRecorder(IStateView(c.stateView));
         d.policy = new CollateralPolicy(Currency.wrap(c.usdg), deployer);
         d.oracle = new PriceOracle(d.policy, d.recorder);
+        d.guardian = c.guardian;
         d.valuer = new PositionValuer(IPositionManager(payable(c.positionManager)), IStateView(c.stateView), d.oracle);
         d.interestRateModel = new InterestRateModel();
         d.implementation = new FarmentaMarket(
