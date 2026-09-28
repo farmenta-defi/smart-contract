@@ -69,9 +69,10 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
      Kuasa owner atas `CollateralPolicy` di poin 2 dan 3 juga tetap instan.
      Catatan ini tentang kontraknya. Deployment dari `script/Deploy.s.sol` menjadikan
      owner sebuah `TimelockController` (lihat “Deploying”), dan dengan owner itu semua
-     panggilan owner ikut menunggu jeda timelock: `pause`, dan di `CollateralPolicy`
-     pembekuan pool, penonaktifan token, pencabutan hook, dan pengetatan terms. Spec §6.5
-     mengandaikan pengetatan itu seketika; peran guardian untuknya dilacak di FAR-68.
+     panggilan owner ikut menunggu jeda timelock, termasuk `unpause`, membuka kembali
+     pool, dan pengetatan terms. Empat respons insiden tidak ikut menunggu, karena
+     dipegang guardian (poin 5): `pause`, pembekuan pool, penonaktifan token, dan
+     pencabutan hook.
      Sebaliknya, penurunan LT dan kenaikan `removeHaircutBps` (poin 2 dan 3) juga menunggu
      jeda, jadi peminjam melihatnya di antrean timelock sebelum berlaku.
    - Data yang dijalankan `upgradeToAndCall` tidak ikut dijadwalkan. Yang diumumkan
@@ -142,7 +143,47 @@ implementasi pada bagian “What `FarmentaMarket` does today”.
    diaudit dan belum memiliki TVL nyata, dengan syarat yang sama seperti poin 1.
    Sumber: `ARCHITECTURE.md` §7, **§15 no. 13**.
 
-Ketiga poin merujuk SOT
+5. **Guardian dapat menghentikan market dan menutup pool seketika, dan hanya itu.**
+   Guardian adalah satu akun yang ditunjuk owner lewat `setGuardian`, di tiap market dan
+   di `CollateralPolicy` (FAR-68). Ia ada karena owner hasil deploy adalah timelock, dan
+   insiden tidak menunggu dua hari. Yang boleh ia lakukan, tanpa jeda:
+
+   | Kontrak | Fungsi | Akibat | Kebalikannya |
+   |---|---|---|---|
+   | `FarmentaMarket` | `pause()` | semua yang mengambil risiko baru berhenti, likuidasi juga | `unpause()`, owner saja |
+   | `CollateralPolicy` | `freeze(poolId)` | pool berhenti menerima jaminan dan pinjaman baru | `setFrozen(poolId, false)`, owner saja |
+   | `CollateralPolicy` | `disableToken(currency)` | token ditolak di jaminan baru dan listing baru | `setTokenConfig(…, true, …)`, owner saja |
+   | `CollateralPolicy` | `revokeHook(hooks)` | pool di balik hook itu berhenti menerima posisi | `setHookAllowlist(hooks, true)`, owner saja |
+
+   Yang **tidak** dapat dilakukan guardian: `unpause`, membuka kembali pool, mengaktifkan
+   token, menambah hook, mengubah terms, LT, haircut, atau cap, me-listing pool, menarik
+   reserve, rescue, menjadwalkan atau memasang upgrade, memindahkan ownership, dan
+   menunjuk guardian berikutnya. Ia tidak dapat memindahkan aset siapa pun.
+
+   `freeze`, `disableToken`, dan `revokeHook` tidak menyentuh pinjaman yang sudah ada:
+   `repay`, `withdrawCollateral`, `collectFees`, `decreaseLiquidity`, dan `liquidate`
+   tetap jalan, dan token yang dinonaktifkan tetap dihargai oracle (decimals dan price
+   feed-nya tidak dihapus). `disableToken` dan `revokeHook` menutup pintu masuk posisi,
+   bukan `borrow` atas jaminan yang sudah disimpan; yang menghentikan `borrow` di sebuah
+   pool adalah `freeze`.
+
+   **Risiko yang tersisa ada di `pause`.** Pause ikut menghentikan likuidasi, jadi
+   guardian yang keliru atau kuncinya bocor dapat menahan likuidasi selama pause itu
+   berlangsung, dan harga yang bergerak selama itu menjadi bad debt. Pause hanya
+   berakhir lewat `unpause` milik owner, yang pada owner timelock berarti paling cepat
+   sesudah jeda 2 hari. Guardian pengganti ditunjuk dengan jalan yang sama, jadi
+   `setGuardian` dan `unpause` sebaiknya dijadwalkan bersama. Karena itulah guardian
+   tidak diberi `unpause`: akun yang dapat memulai pause bukan akun yang memutuskan
+   kapan pause aman diakhiri, dan jalan keluarnya terlihat di antrean timelock.
+   Penyimpanan kunci guardian (multisig atau tidak) di luar cakupan kontrak ini.
+
+   `address(0)` berarti tidak ada guardian. `GuardianUpdated(previous, new)` terbit di
+   setiap penunjukan. Aksi guardian menerbitkan event yang sama dengan aksi owner
+   (`Paused`, `PoolFrozen`, `TokenConfigured`, `HookAllowlisted`), jadi pembaca log tidak
+   butuh handler baru; `Paused(account)` menyebut pemanggilnya.
+   Sumber: `ARCHITECTURE.md` §4.1, §6.5, **§15 no. 1**.
+
+Poin 1 sampai 4 merujuk SOT
 [`farmenta-defi/docs/ARCHITECTURE.md`](https://github.com/farmenta-defi/docs/blob/main/ARCHITECTURE.md)
 v0.9. Penyampaian risiko di frontend adalah pekerjaan terpisah dari FAR-14.
 
@@ -217,14 +258,15 @@ each Blue-chip or Meme market and direct risk-view consumers to that lens.
 them through the CREATE2 factory), `TwapRecorder`, `CollateralPolicy`, `PriceOracle`,
 `PositionValuer`, `InterestRateModel`, one market implementation, the Blue-chip (`fUSDG-BC`) and
 Meme (`fUSDG-MEME`) proxies, a `MarketLens` and a `LiquidatorHelper` for each, and a
-`TimelockController` that owns both markets and the policy. It configures USDG, WETH and native
-ETH with their Chainlink feeds. It lists no pool: listings are curated one by one (spec §6.3).
+`TimelockController` that owns both markets and the policy. It names the guardian on all three,
+and configures USDG, WETH and native ETH with their Chainlink feeds. It lists no pool: listings
+are curated one by one (spec §6.3).
 
 ```sh
 # simulate against mainnet; nothing is sent
-FOUNDRY_PROFILE=deploy OWNER=0x… forge script script/Deploy.s.sol --rpc-url robinhood
+FOUNDRY_PROFILE=deploy OWNER=0x… GUARDIAN=0x… forge script script/Deploy.s.sol --rpc-url robinhood
 # broadcast
-FOUNDRY_PROFILE=deploy OWNER=0x… forge script script/Deploy.s.sol --rpc-url robinhood \
+FOUNDRY_PROFILE=deploy OWNER=0x… GUARDIAN=0x… forge script script/Deploy.s.sol --rpc-url robinhood \
     --broadcast --private-key $PRIVATE_KEY
 ```
 
@@ -249,14 +291,17 @@ An `anvil` fork keeps chain id 4663, so a rehearsal against one leaves a
 `broadcast/Deploy.s.sol/4663/` log that looks like a mainnet deploy: give `manifest.sh` another
 output path, and delete that log afterwards.
 
-The simulation stops before any transaction if an external address has no code, if a Chainlink
-feed does not answer with a fresh price, or if the wiring read back differs from what was
-deployed. Measured 2026-09-27 on a mainnet fork: 23 transactions and about 23 million gas (forge
-prints 30 million: it adds a 30% margin), a few dollars at 0.02 gwei.
+The simulation stops before any transaction if `GUARDIAN` is unset or is the deployer, if an
+external address has no code, if a Chainlink feed does not answer with a fresh price, or if the
+wiring read back differs from what was deployed. Measured 2026-09-28 in a simulation against
+mainnet: 23 transactions with `OWNER` apart from the deployer, 24 when the deployer is also the
+proposer, and about 23.6 million gas (forge prints 30.7 million: it adds a 30% margin), a few
+dollars at 0.02 gwei.
 
 | Variable | Default on 4663 | Meaning |
 |---|---|---|
 | `OWNER` | the deployer | proposer and executor of the timelock; owner of everything when `DEPLOY_TIMELOCK=false`. Set it to a key other than the deployer's (a hardware key or a multisig): left at the default, the key in `.env` holds the whole timelock, and the run logs a warning |
+| `GUARDIAN` | none, required | the account that may `pause` a market and, on the policy, `freeze` a pool, `disableToken` and `revokeHook`, at once. Refused when unset, `address(0)`, or the deployer |
 | `DEPLOY_TIMELOCK` | `true` | `false` makes `OWNER` the direct owner |
 | `TIMELOCK_MIN_DELAY` | `172800` (2 days) | the timelock's delay, in seconds; `0` is refused |
 | `TIMELOCK_PROPOSER`, `TIMELOCK_EXECUTOR` | `OWNER` | the timelock's roles; neither may be `address(0)` |
@@ -267,20 +312,32 @@ prints 30 million: it adds a 30% margin), a few dollars at 0.02 gwei.
 and refuses `DEPLOY_LIQUIDATOR_HELPERS=true` elsewhere until WETH is a constructor argument.
 
 **Owned by the timelock.** The timelock has no admin: its roles and its delay change only
-through its own queue. Every owner call waits the delay, and that includes the incident
-responses:
+through its own queue. Every owner call waits the delay.
 
-- `pause`, the only sequencer-downtime mitigation this chain allows (see “Trust assumptions”);
-- `CollateralPolicy.setFrozen(poolId, true)`, which stops new collateral and borrows on a pool;
-- `setTokenConfig(token, false, …)` and `setHookAllowlist(hook, false)`;
-- tightening a pool's terms or scheduling an LT ramp.
+**Guarded by `GUARDIAN`.** An incident does not wait two days, so four responses belong to the
+guardian as well as the owner, and the guardian's take effect at once (FAR-68):
 
-Spec §6.5 assumes tightening is immediate (freeze, then write the new LT). Under this owner a
-pool being drained keeps taking new loans for the length of the delay. A guardian that may only
-pause and tighten, at once, is tracked in FAR-68. The same delay works for borrowers: lowering an
-LT or raising `removeHaircutBps` is visible in the timelock's queue (`CallScheduled`) before it
-applies. A market upgrade waits twice: the timelock's delay to run `scheduleUpgrade`, then the
-market's own `TIMELOCK_DELAY` before `upgradeToAndCall` (four days at the defaults).
+- `pause` on either market, the only sequencer-downtime mitigation this chain allows (see
+  “Trust assumptions”);
+- `CollateralPolicy.freeze(poolId)`, which stops new collateral and borrows on a pool;
+- `CollateralPolicy.disableToken(currency)` and `CollateralPolicy.revokeHook(hooks)`.
+
+```sh
+cast send <market> "pause()" --rpc-url robinhood --private-key <guardian key>
+cast send <CollateralPolicy> "freeze(bytes32)" <poolId> --rpc-url robinhood --private-key <guardian key>
+```
+
+The reverse of each is the owner's and waits the delay: `unpause`, `setFrozen(poolId, false)`,
+`setTokenConfig` with `enabled = true`, `setHookAllowlist(hooks, true)`. So is what follows a
+freeze: the guardian closes the pool at once, and the owner's new LT arrives through the queue.
+That delay works for borrowers: lowering an LT or raising `removeHaircutBps` is visible in the
+timelock's queue (`CallScheduled`) before it applies. Replacing the guardian is `setGuardian`, an
+owner call on each of the three contracts. A market upgrade waits twice: the timelock's delay to
+run `scheduleUpgrade`, then the market's own `TIMELOCK_DELAY` before `upgradeToAndCall` (four days
+at the defaults).
+
+The guardian's key should be one that can be reached in minutes and is not the deployer's. What
+it can and cannot do, and what a wrong pause costs, is point 5 of “Kekuasaan owner dan batasnya”.
 
 **The policy needs one more step.** Its token configuration has to be written by its owner
 during the run, so it is deployed owned by the deployer and handed to the timelock with
@@ -426,10 +483,11 @@ The owner powers are disclosed above. Other trust assumptions:
 - Only the market sits behind a proxy. `PositionValuer`, `PriceOracle`, `CollateralPolicy`
   and `InterestRateModel` are plain contracts held as immutables and changed by upgrading —
   every extra proxy doubles the storage-collision surface without adding a capability.
-- The owner can `pause`, and pausing halts liquidations too. Robinhood Chain publishes no
-  Chainlink L2 Sequencer Uptime Feed, so pausing is the only sequencer-downtime mitigation
-  available (spec §5.2, §15.1). Deployed by `script/Deploy.s.sol`, the owner is a
-  `TimelockController`, and a pause takes effect only after its delay.
+- The owner and the guardian can `pause`, and pausing halts liquidations too. Robinhood Chain
+  publishes no Chainlink L2 Sequencer Uptime Feed, so pausing is the only sequencer-downtime
+  mitigation available (spec §5.2, §15.1). Deployed by `script/Deploy.s.sol`, the owner is a
+  `TimelockController`: its pause takes effect only after its delay, the guardian's at once,
+  and only the owner can `unpause`, so a pause lasts at least that delay.
 - Robinhood Chain is L2BEAT **Stage 0** with 2 validators; the sequencer can filter
   transactions. "A liquidation can always be submitted" is an assumption, not a guarantee.
 - **ETH sent to the market cannot be recovered.** `receive()` is open because the fee,
