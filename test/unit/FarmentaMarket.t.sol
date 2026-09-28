@@ -106,12 +106,12 @@ contract FarmentaMarketTest is Test {
     ///      drive `upgradeToAndCall` on itself, which is how UUPS implementations get bricked.
     function test_implementationCannotBeInitialised() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        implementation.initialize(IERC20(address(usdg)), "x", "x", ICollateralPolicy.Tier.BLUE_CHIP, owner);
+        implementation.initialize(IERC20(address(usdg)), "x", "x", ICollateralPolicy.Tier.BLUE_CHIP, owner, address(0));
     }
 
     function test_cannotInitialiseTwice() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        market.initialize(IERC20(address(usdg)), "x", "x", ICollateralPolicy.Tier.BLUE_CHIP, owner);
+        market.initialize(IERC20(address(usdg)), "x", "x", ICollateralPolicy.Tier.BLUE_CHIP, owner, address(0));
     }
 
     /// @dev `Tier.NONE` is the unconfigured value. A market holding it would match every
@@ -214,9 +214,10 @@ contract FarmentaMarketTest is Test {
 
     /* ---------------------------------- pause --------------------------------- */
 
+    /// @dev Without a guardian named. With one, see `MarketGuardianTest`.
     function test_onlyOwnerCanPause() public {
         vm.prank(stranger);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.NotOwnerOrGuardian.selector, stranger));
         market.pause();
 
         vm.prank(owner);
@@ -781,7 +782,8 @@ contract FarmentaMarketTest is Test {
         ICollateralPolicy.Tier tier
     ) internal view returns (bytes memory) {
         return abi.encodeCall(
-            FarmentaMarket.initialize, (IERC20(address(usdg)), "Farmenta USDG Blue-chip", "fUSDG-BC", tier, owner)
+            FarmentaMarket.initialize,
+            (IERC20(address(usdg)), "Farmenta USDG Blue-chip", "fUSDG-BC", tier, owner, address(0))
         );
     }
 }

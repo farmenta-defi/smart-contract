@@ -28,8 +28,16 @@ contract PolicyHandler is Test {
     ///      loop stays cheap.
     uint256 internal constant MAX_POOLS = 8;
 
+    /// @dev The one caller here that is not the owner (§6.5, FAR-68).
+    address public constant GUARDIAN = address(0x6A4D);
+
     CollateralPolicy public policy;
     PoolKey[] public keys;
+
+    /// @dev Set when a guardian freeze left a pool open or changed its record beyond the flag.
+    ///      A ghost, not an assertion: with `fail_on_revert = false` a failed assertion in a
+    ///      handler is one more revert, and the campaign stays green.
+    bool public guardianFreezeWentWrong;
 
     constructor(
         CollateralPolicy policy_
@@ -76,6 +84,23 @@ contract PolicyHandler is Test {
         bool frozen
     ) public {
         policy.setFrozen(_pick(idx).toId(), frozen);
+    }
+
+    /// @dev The guardian's freeze, at any point of the owner's sequence. What it has to leave
+    ///      behind is the record it found with `frozen` set, whatever ramp is running.
+    function guardianFreeze(
+        uint256 idx
+    ) public {
+        PoolId poolId = _pick(idx).toId();
+        CollateralPolicy.Listing memory expected = policy.listingOf(poolId);
+        expected.frozen = true;
+
+        vm.prank(GUARDIAN);
+        policy.freeze(poolId);
+
+        if (keccak256(abi.encode(policy.listingOf(poolId))) != keccak256(abi.encode(expected))) {
+            guardianFreezeWentWrong = true;
+        }
     }
 
     /// @dev The target is bounded to the threshold in force, so the campaign exercises the
@@ -152,6 +177,7 @@ contract CollateralPolicyInvariantTest is Test {
         );
 
         handler = new PolicyHandler(policy);
+        policy.setGuardian(handler.GUARDIAN());
         policy.transferOwnership(address(handler));
         vm.prank(address(handler));
         policy.acceptOwnership();
@@ -210,6 +236,13 @@ contract CollateralPolicyInvariantTest is Test {
             assertLe(ltNow, listing.ltStartBps, "threshold rose above where the ramp began");
             assertGe(ltNow, listing.ltTargetBps, "threshold fell past where the ramp was aimed");
         }
+    }
+
+    /// @notice A guardian freeze writes the flag and nothing else (§6.5, FAR-68).
+    /// @dev The guardian may stop new risk. If its freeze could move a threshold, a ramp or a
+    ///      cap, it would be deciding what existing loans are judged by, which is the owner's.
+    function invariant_aGuardianFreezeWritesOnlyTheFlag() public view {
+        assertFalse(handler.guardianFreezeWentWrong(), "a guardian freeze changed more than the flag");
     }
 
     function _poolId(

@@ -70,6 +70,10 @@ import {MarketUpgrade} from "./libraries/MarketUpgrade.sol";
 ///      in the protocol (§15 no. 9). `pause` and `unpause` do not wait, because the moment that
 ///      needs a pause has no time to.
 ///
+///      **The guardian.** When the owner is itself a timelock, every owner call waits, `pause`
+///      included. The guardian is an account the owner names that may `pause` at once and do
+///      nothing else: not `unpause`, not an upgrade, not a withdrawal (§4.1, FAR-68).
+///
 ///      **Storage discipline.** State lives under an ERC-7201 namespace, so adding variables
 ///      in a later version cannot shift a slot already in use. Inherited OpenZeppelin
 ///      upgradeable contracts namespace their own storage the same way, which is why the
@@ -211,6 +215,9 @@ contract FarmentaMarket is
     /// @notice The scheduled upgrade was withdrawn before it was installed.
     event UpgradeCancelled(address indexed newImplementation);
 
+    /// @notice The owner named another guardian, or none (`newGuardian` zero) (§4.1, FAR-68).
+    event GuardianUpdated(address indexed previousGuardian, address indexed newGuardian);
+
     error ZeroAddress();
     error TierNotSet();
     error NotThePositionManager(address caller);
@@ -247,6 +254,7 @@ contract FarmentaMarket is
     error ImplementationCodeChanged(address implementation, bytes32 scheduled, bytes32 found);
     error ImplementationIsAPointer(address implementation);
     error UpgradeExpired(address implementation, uint256 expiredAt);
+    error NotOwnerOrGuardian(address caller);
 
     /// @param positionManager_ Uniswap v4 PositionManager, the only NFT this market takes.
     /// @param policy_ Collateral policy the market defers listing decisions to.
@@ -282,14 +290,22 @@ contract FarmentaMarket is
     /// @param symbol_ ERC-20 symbol, e.g. "fUSDG-BC" (§3).
     /// @param tier_ Which collateral tier this proxy accepts.
     /// @param owner_ Holder of every privileged function, including upgrades.
+    /// @param guardian_ The account that may `pause` besides the owner, or zero for none
+    ///        (§4.1, FAR-68).
     /// @dev `Tier.NONE` is rejected rather than stored: it is the unconfigured value, and a
     ///      market that accepted it would compare equal to every unlisted pool's tier.
+    ///
+    ///      The guardian is taken here because `setGuardian` is the owner's, and a proxy
+    ///      deployed for a timelock owner is the timelock's from this call on: set afterwards,
+    ///      the guardian would arrive one delay late, and the market would run that long with
+    ///      nobody able to pause it in time.
     function initialize(
         IERC20 asset_,
         string calldata name_,
         string calldata symbol_,
         ICollateralPolicy.Tier tier_,
-        address owner_
+        address owner_,
+        address guardian_
     ) external initializer {
         if (tier_ == ICollateralPolicy.Tier.NONE) revert TierNotSet();
 
@@ -304,6 +320,10 @@ contract FarmentaMarket is
         $.borrowIndex = WAD;
         $.lastAccrual = block.timestamp;
         ($.reserveFactorBps, $.reserveFloorBps) = tier_ == ICollateralPolicy.Tier.BLUE_CHIP ? (1500, 100) : (2500, 250);
+        if (guardian_ != address(0)) {
+            $.guardian = guardian_;
+            emit GuardianUpdated(address(0), guardian_);
+        }
     }
 
     /* -------------------------------- collateral ------------------------------ */
@@ -777,6 +797,11 @@ contract FarmentaMarket is
         return _marketStorage().pendingCodehash;
     }
 
+    /// @notice The account that may pause besides the owner, or zero when there is none.
+    function guardian() external view returns (address) {
+        return _marketStorage().guardian;
+    }
+
     function _withdrawableReserves(
         uint256 cash
     ) private view returns (uint256) {
@@ -826,12 +851,38 @@ contract FarmentaMarket is
     /// @notice Halts the operations that take on new risk.
     /// @dev The MVP mitigation for sequencer downtime (§5.2): Robinhood Chain publishes no
     ///      Chainlink L2 Sequencer Uptime Feed, so pausing is the only lever available.
-    function pause() external onlyOwner {
+    ///
+    ///      For the owner or the guardian (§4.1, FAR-68). The owner may be a timelock, and the
+    ///      moment that needs a pause has no time to wait one out. OpenZeppelin's `Paused`
+    ///      carries the caller, so the logs say which of the two it was.
+    ///
+    ///      The zero address is refused by name: with no guardian set the slot reads zero, and
+    ///      a simulated call from `address(0)` must not pass as the guardian.
+    function pause() external {
+        if (msg.sender != owner() && (msg.sender == address(0) || msg.sender != _marketStorage().guardian)) {
+            revert NotOwnerOrGuardian(msg.sender);
+        }
         _pause();
     }
 
+    /// @notice Lifts the pause.
+    /// @dev Owner only, and on purpose (§4.1, FAR-68). A pause stops liquidation too, so it is
+    ///      the one guardian action that can cost lenders. The account that can start one
+    ///      must not be the one that decides when it is safe to end it; under a timelock owner
+    ///      the way out of a pause is a call anyone can watch in the queue.
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    /// @notice Names the guardian, or removes it with `address(0)` (§4.1, FAR-68).
+    /// @dev Owner only, so under a timelock owner a guardian is replaced through the queue,
+    ///      where it can be seen coming.
+    function setGuardian(
+        address newGuardian
+    ) external onlyOwner {
+        MarketLedger.Layout storage $ = _marketStorage();
+        emit GuardianUpdated($.guardian, newGuardian);
+        $.guardian = newGuardian;
     }
 
     /// @notice Schedules `newImplementation` to replace this one, `TIMELOCK_DELAY` from now at the

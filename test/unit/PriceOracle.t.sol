@@ -70,6 +70,21 @@ contract PriceOracleTest is Test {
         assertEq(oracle.decimals(WETH), 18);
     }
 
+    /// @notice The guardian's `disableToken` leaves the feed and the decimals in place, so a
+    ///         position already held on the token is still priced (§6.5, FAR-68).
+    function test_priceAndDecimalsRemainAvailableAfterTheGuardianDisablesAToken() public {
+        address guardian = address(0x6A4D);
+        vm.prank(OWNER);
+        policy.setGuardian(guardian);
+
+        vm.prank(guardian);
+        policy.disableToken(WETH);
+
+        assertEq(oracle.price(WETH), 2520e18);
+        assertEq(oracle.priceForLiquidation(WETH), 2520e18);
+        assertEq(oracle.decimals(WETH), 18);
+    }
+
     function test_priceAcceptsAFeedUpdatedTwentyFourHoursAgo() public {
         ethUsd.setAnswer(2520e8, block.timestamp - 24 hours);
         assertEq(oracle.price(WETH), 2520e18);

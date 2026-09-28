@@ -34,6 +34,8 @@ library MarketLedger {
     ///        installed. It shares the slot of `pendingImplementation`.
     /// @param pendingCodehash The hash of the code `pendingImplementation` held when it was
     ///        scheduled, or zero when no upgrade is scheduled. The slot after the queue's first.
+    /// @param guardian The account that may pause besides the owner, or zero when there is
+    ///        none (§4.1, FAR-68). Appended after the queue, in a slot of its own.
     struct Layout {
         ICollateralPolicy.Tier tier;
         mapping(uint256 tokenId => Loan) loans;
@@ -49,6 +51,7 @@ library MarketLedger {
         address pendingImplementation;
         uint64 upgradeEta;
         bytes32 pendingCodehash;
+        address guardian;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("farmenta.storage.Market")) - 1)) & ~bytes32(uint256(0xff))

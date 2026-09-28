@@ -54,7 +54,8 @@ contract UpgradeScriptTest is Test {
                                 "Farmenta USDG Blue-chip",
                                 "fUSDG-BC",
                                 ICollateralPolicy.Tier.BLUE_CHIP,
-                                DEFAULT_SENDER
+                                DEFAULT_SENDER,
+                                address(0)
                             )
                         )
                     )

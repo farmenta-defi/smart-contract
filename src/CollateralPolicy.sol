@@ -23,6 +23,9 @@ import {TierPresets} from "./libraries/TierPresets.sol";
 ///      Since v0.5 nothing is accepted automatically. Every pool is listed by the owner after
 ///      the off-chain review in §6.3, and every mutating function here is `onlyOwner` —
 ///      there is no permissionless path into the configuration.
+///
+///      The one exception is the guardian (§6.5, FAR-68), an account the owner names. It exists
+///      because the owner may be a timelock, and an incident does not wait two days.
 contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     /// @param enabled Whether the token may appear in collateral at all.
     /// @param tier Risk class; a pool inherits the riskier of its two tokens.
@@ -77,6 +80,11 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
 
     mapping(PoolId poolId => Listing) internal _listings;
 
+    /// @notice The account that may tighten at once, or zero when there is none (§6.5, FAR-68).
+    address public guardian;
+
+    /// @notice The owner named another guardian, or none (`newGuardian` zero).
+    event GuardianUpdated(address indexed previousGuardian, address indexed newGuardian);
     event TokenConfigured(Currency indexed currency, bool enabled, Tier tier, uint8 decimals, address priceFeed);
     event HookAllowlisted(address indexed hooks, bool allowed);
     event PoolListed(PoolId indexed poolId, Tier tier, ListingParams params);
@@ -101,6 +109,17 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     error RampDurationIsZero();
     error RampBelowMaxLtvRequiresFreeze(uint16 maxLtvBps, uint16 ltTargetBps);
     error UnfreezeWouldLeaveNoBorrowingRoom(uint16 maxLtvBps, uint16 ltBps);
+    error NotOwnerOrGuardian(address caller);
+
+    /// @dev For the functions that can only stop new risk. Everything else stays `onlyOwner`.
+    ///      The zero address is refused by name: with no guardian set, `guardian` reads zero,
+    ///      and a simulated call from `address(0)` must not pass as the guardian.
+    modifier onlyOwnerOrGuardian() {
+        if (msg.sender != owner() && (msg.sender == address(0) || msg.sender != guardian)) {
+            revert NotOwnerOrGuardian(msg.sender);
+        }
+        _;
+    }
 
     constructor(
         Currency quote_,
@@ -110,6 +129,16 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
     }
 
     /* ------------------------------ configuration ----------------------------- */
+
+    /// @notice Names the guardian, or removes it with `address(0)`.
+    /// @dev Owner only, so under a timelock owner a guardian is replaced through the queue,
+    ///      where it can be seen coming.
+    function setGuardian(
+        address newGuardian
+    ) external onlyOwner {
+        emit GuardianUpdated(guardian, newGuardian);
+        guardian = newGuardian;
+    }
 
     /// @dev Disabling a token does not unlist pools that contain it. Unwinding a token is a
     ///      per-pool decision — freeze and ramp them (§6.5) — because a blanket switch would
@@ -128,12 +157,42 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
         emit TokenConfigured(currency, enabled, tier, decimals, priceFeed);
     }
 
+    /// @notice Stops a token being accepted in new collateral, at once (§6.5, FAR-68).
+    /// @dev For the owner or the guardian. Only `enabled` is written: the tier, the decimals
+    ///      and the price feed stay as listed, because positions already held are still priced
+    ///      with them (`ICollateralPolicy.tokenConfig`). The event is `setTokenConfig`'s, with
+    ///      the values that stayed. Enabling a token again is `setTokenConfig`, the owner's.
+    ///
+    ///      Like `setTokenConfig`, this reaches `checkPool` and `list`, not `borrow`: a loan can
+    ///      still be drawn against collateral already held in a pool of this token. Stopping
+    ///      that is `freeze`, pool by pool.
+    function disableToken(
+        Currency currency
+    ) external onlyOwnerOrGuardian {
+        TokenConfig storage config = tokenConfig[currency];
+        config.enabled = false;
+        emit TokenConfigured(currency, false, config.tier, config.decimals, config.priceFeed);
+    }
+
     function setHookAllowlist(
         address hooks,
         bool allowed
     ) external onlyOwner {
         hookAllowlist[hooks] = allowed;
         emit HookAllowlisted(hooks, allowed);
+    }
+
+    /// @notice Takes a hook off the allowlist, at once (§6.5, FAR-68).
+    /// @dev `setHookAllowlist(hooks, false)` for the owner or the guardian, and the same event.
+    ///      Pools behind the hook stop passing `checkPool`, so no position enters them and
+    ///      none is added to, unless the hook passes the bit check without the allowlist.
+    ///      Like `disableToken` it does not reach `borrow`; `freeze` does. Allowlisting a hook
+    ///      is `setHookAllowlist`, the owner's, after the review of §6.3.
+    function revokeHook(
+        address hooks
+    ) external onlyOwnerOrGuardian {
+        hookAllowlist[hooks] = false;
+        emit HookAllowlisted(hooks, false);
     }
 
     /* --------------------------------- listing -------------------------------- */
@@ -232,6 +291,24 @@ contract CollateralPolicy is ICollateralPolicy, Ownable2Step {
 
         listing.frozen = frozen;
         emit PoolFrozen(poolId, frozen);
+    }
+
+    /// @notice Stops new collateral and new borrowing for a pool, at once (§6.5, FAR-68).
+    /// @dev `setFrozen(poolId, true)` for the owner or the guardian, and the same event. It is
+    ///      the half of `setFrozen` that takes nothing from anyone: existing loans are left as
+    ///      that function describes, liquidation included. Reopening the pool is `setFrozen`,
+    ///      and the owner's alone.
+    ///
+    ///      Freezing a pool that is already frozen is not refused. A guardian answering an
+    ///      incident should not revert because the owner's freeze landed first.
+    function freeze(
+        PoolId poolId
+    ) external onlyOwnerOrGuardian {
+        Listing storage listing = _listings[poolId];
+        if (!listing.listed) revert PoolNotListed(poolId);
+
+        listing.frozen = true;
+        emit PoolFrozen(poolId, true);
     }
 
     /// @notice Schedules a gradual fall in a pool's liquidation threshold.
