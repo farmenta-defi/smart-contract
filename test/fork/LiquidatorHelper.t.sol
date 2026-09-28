@@ -52,7 +52,8 @@ contract LiquidatorHelperForkTest is MarketForkTest {
         helper = new LiquidatorHelper(
             ILiquidationMarket(address(market)),
             IFlashLoanMorpho(RobinhoodChain.MORPHO_BLUE),
-            RobinhoodChain.UNIVERSAL_ROUTER
+            RobinhoodChain.UNIVERSAL_ROUTER,
+            IERC20(RobinhoodChain.WETH)
         );
     }
 

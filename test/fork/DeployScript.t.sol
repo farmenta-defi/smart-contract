@@ -509,12 +509,13 @@ contract DeployScriptForkTest is ForkTest {
         script.deploy(c);
     }
 
-    /// @notice `LiquidatorHelper` unwraps to Robinhood's WETH, so no other chain may get one.
-    function test_RevertWhenALiquidatorHelperIsDeployedOffRobinhood() public {
+    /// @notice A configured WETH and external stack allow helpers on any chain.
+    function test_deploysLiquidatorHelpersOffRobinhoodWithConfiguredWeth() public {
         Deploy.Config memory c = _config();
         vm.chainId(1);
-        vm.expectRevert(abi.encodeWithSelector(Deploy.LiquidatorHelperNeedsRobinhood.selector, uint256(1)));
-        script.deploy(c);
+        Deploy.Deployment memory deployed = script.deploy(c);
+        assertEq(address(deployed.blueChipLiquidator.weth()), c.weth, "blue-chip helper WETH");
+        assertEq(address(deployed.memeLiquidator.weth()), c.weth, "meme helper WETH");
 
         c.liquidatorHelpers = false;
         Deploy.Deployment memory e = script.deploy(c);
