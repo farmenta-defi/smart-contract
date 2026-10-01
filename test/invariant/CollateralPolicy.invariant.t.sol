@@ -149,7 +149,7 @@ contract PolicyHandler is Test {
             liquidatorBonusBps: uint16(bound(bonus, 500, 5000)),
             removeHaircutBps: 0,
             debtCapUsdg: uint128(bound(cap, 0, 500_000e6)),
-            minPositionUsd: uint128(bound(minPos, 50e18, 1_000_000e18))
+            minPositionUsd: uint128(bound(minPos, 5e18, 1_000_000e18))
         });
     }
 

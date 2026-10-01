@@ -34,7 +34,6 @@ library MarketDebt {
     error BorrowerNotAuthorized(uint256 tokenId, address borrower);
     error InvalidBorrowRecipient(address to);
     error BorrowExceedsMaxLtv(uint256 requestedDebt, uint256 maximumDebt);
-    error BorrowBelowMinimum(uint256 debt);
     error ZeroBorrowAmount();
     error PoolDebtCapExceeded(PoolId poolId, uint256 requestedDebt, uint256 debtCap);
     error MarketDebtCapExceeded(uint256 requestedDebt, uint256 debtCap);
@@ -80,7 +79,6 @@ library MarketDebt {
             uint256 requestedDebtUsd = _debtUsd(env.asset, env.oracle, requestedDebt);
             uint256 maximumDebtUsd = collateralUsd * terms.maxLtvBps / BPS;
             if (requestedDebtUsd > maximumDebtUsd) revert BorrowExceedsMaxLtv(requestedDebtUsd, maximumDebtUsd);
-            if (requestedDebt < 10e6) revert BorrowBelowMinimum(requestedDebt);
 
             uint256 requestedPoolDebt = DebtMath.debtOf($.poolDebtShares[loan.poolKeyId], $.borrowIndex) + amount;
             if (requestedPoolDebt > terms.debtCapUsdg) {

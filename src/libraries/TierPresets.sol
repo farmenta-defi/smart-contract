@@ -49,7 +49,7 @@ library TierPresets {
             minLiquidatorBonusBps: 500,
             maxDebtCapUsdg: 500_000e6,
             marketDebtCapUsdg: 500_000e6,
-            minPositionUsd: 50e18,
+            minPositionUsd: 5e18,
             maxRemoveHaircutBps: 2000
         });
     }
@@ -62,7 +62,7 @@ library TierPresets {
             minLiquidatorBonusBps: 1000,
             maxDebtCapUsdg: 20_000e6,
             marketDebtCapUsdg: 50_000e6,
-            minPositionUsd: 50e18,
+            minPositionUsd: 5e18,
             maxRemoveHaircutBps: 2000
         });
     }

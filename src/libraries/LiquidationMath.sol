@@ -38,10 +38,9 @@ library LiquidationMath {
     uint256 internal constant FULL_CLOSE_HF = 0.9e18;
 
     /// @notice Debts under this size may be closed in one go (§6.2).
-    /// @dev **100 USDG, not $100** — the unit is the ledger's, 6 decimals, the same as the
-    ///      10 USDG borrow minimum. Reading it as USD is the exact mistake that rejected a
-    ///      10 USDG borrow while USDG traded at 0,98 (PR #7), and it is worse here: it would
-    ///      move the boundary at which a liquidator may close a whole position.
+    /// @dev **100 USDG, not $100** — the unit is the ledger's, 6 decimals. Reading it as USD
+    ///      would move the boundary at which a liquidator may close a whole position whenever
+    ///      USDG trades off par.
     uint256 internal constant FULL_CLOSE_DEBT_USDG = 100e6;
 
     /// @notice The health factor used by the liquidation gate and its read-only lens.

@@ -18,7 +18,7 @@ contract TierPresetsTest is Test {
         assertEq(p.minLiquidatorBonusBps, 500, "liquidator bonus");
         assertEq(p.maxDebtCapUsdg, 500_000e6, "pool cap ceiling");
         assertEq(p.marketDebtCapUsdg, 500_000e6, "market debt cap");
-        assertEq(p.minPositionUsd, 50e18, "minimum position");
+        assertEq(p.minPositionUsd, 5e18, "minimum position");
         assertEq(p.maxRemoveHaircutBps, 2000, "removal haircut ceiling");
     }
 
@@ -29,7 +29,7 @@ contract TierPresetsTest is Test {
         assertEq(p.minLiquidatorBonusBps, 1000, "liquidator bonus");
         assertEq(p.maxDebtCapUsdg, 20_000e6, "pool cap ceiling");
         assertEq(p.marketDebtCapUsdg, 50_000e6, "market debt cap");
-        assertEq(p.minPositionUsd, 50e18, "minimum position");
+        assertEq(p.minPositionUsd, 5e18, "minimum position");
         assertEq(p.maxRemoveHaircutBps, 2000, "removal haircut ceiling");
         assertEq(TierPresets.MEME_STALE_HAIRCUT_BPS, 2000, "stale haircut");
         assertEq(TierPresets.MEME_CRASH_THRESHOLD_BPS, 2500, "crash threshold");
