@@ -727,7 +727,7 @@ contract CollateralPolicyTest is Test {
         if (which == 1) p.ltBps = 7501;
         if (which == 2) p.liquidatorBonusBps = 499;
         if (which == 3) p.debtCapUsdg = 500_001e6;
-        if (which == 4) p.minPositionUsd = 49e18;
+        if (which == 4) p.minPositionUsd = 5e18 - 1;
         return p;
     }
 

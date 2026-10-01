@@ -232,7 +232,6 @@ contract FarmentaMarket is
     error BorrowerNotAuthorized(uint256 tokenId, address borrower);
     error InvalidBorrowRecipient(address to);
     error BorrowExceedsMaxLtv(uint256 requestedDebt, uint256 maximumDebt);
-    error BorrowBelowMinimum(uint256 debt);
     error ZeroBorrowAmount();
     error PoolDebtCapExceeded(PoolId poolId, uint256 requestedDebt, uint256 debtCap);
     error MarketDebtCapExceeded(uint256 requestedDebt, uint256 debtCap);

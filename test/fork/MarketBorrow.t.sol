@@ -258,14 +258,43 @@ contract MarketBorrowForkTest is MarketForkTest {
         market.withdraw(cash + 1, lender, lender);
     }
 
-    function test_borrowBelowTenDollarsReverts() public {
+    /// @dev §6.2 has no minimum debt: the smallest unit of USDG is a loan like any other, and it
+    ///      is recorded as owed rather than rounded away.
+    function test_borrowHasNoMinimum() public {
         (uint256 tokenId, address holder) = _prepareLoan();
-        vm.prank(holder);
-        vm.expectRevert(abi.encodeWithSelector(FarmentaMarket.BorrowBelowMinimum.selector, 9e6));
-        market.borrow(tokenId, 9e6, holder);
+        IERC20 usdg = IERC20(address(RobinhoodChain.USDG));
+        uint256 balanceBefore = usdg.balanceOf(holder);
 
         vm.prank(holder);
-        market.borrow(tokenId, 10e6, holder);
+        market.borrow(tokenId, 1, holder);
+
+        assertEq(usdg.balanceOf(holder) - balanceBefore, 1, "the borrower received one unit");
+        assertEq(market.debtOf(tokenId), 1, "and owes it");
+    }
+
+    /// @dev With the floor gone, zero is the only amount `borrow` refuses for being too small.
+    function test_RevertWhenBorrowingNothing() public {
+        (uint256 tokenId, address holder) = _prepareLoan();
+        vm.prank(holder);
+        vm.expectRevert(FarmentaMarket.ZeroBorrowAmount.selector);
+        market.borrow(tokenId, 0, holder);
+    }
+
+    /// @dev Every amount under the 10 USDG the floor used to demand is lent, and owed in full.
+    function testFuzz_borrowUnderTheFormerMinimumIsLentAndOwed(
+        uint256 amount
+    ) public {
+        amount = bound(amount, 1, 10e6 - 1);
+        (uint256 tokenId, address holder) = _prepareLoan();
+        IERC20 usdg = IERC20(address(RobinhoodChain.USDG));
+        uint256 balanceBefore = usdg.balanceOf(holder);
+
+        vm.prank(holder);
+        market.borrow(tokenId, amount, holder);
+
+        assertEq(usdg.balanceOf(holder) - balanceBefore, amount, "the borrower received what was asked");
+        assertGe(market.debtOf(tokenId), amount, "the debt never rounds under the loan");
+        assertLe(market.debtOf(tokenId), amount + 1, "and rounds up by one unit at most");
     }
 
     function test_poolDebtCapRejectsAnotherBorrow() public {
